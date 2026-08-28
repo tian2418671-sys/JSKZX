@@ -21,6 +21,11 @@
                     class="flex-1 py-1.5 text-xs font-bold rounded-lg shadow transition flex items-center justify-center gap-1.5">
                 🌍 世界书库 <span class="opacity-70 font-normal">({{ worldbooks.length }})</span>
             </button>
+            <button @click="appMode = 'presets'"
+                    :class="appMode === 'presets' ? 'bg-sky-600 text-white shadow-md shadow-sky-900/30' : 'bg-zinc-800 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700'"
+                    class="flex-1 py-1.5 text-xs font-bold rounded-lg shadow transition flex items-center justify-center gap-1.5">
+                ⚙️ 预设 <span class="opacity-70 font-normal">({{ presets.length }})</span>
+            </button>
         </div>
 
         <!-- ============ 角色卡模式 ============ -->
@@ -457,6 +462,50 @@
                 </div>
             </div>
         </template>
+
+        <!-- ============ ⚙️ 预设模式 ============ -->
+        <template v-if="appMode === 'presets'">
+            <div class="px-3 pt-2.5 pb-2 border-b border-zinc-800 bg-zinc-900 flex flex-col gap-2 shrink-0 z-10">
+                <div class="relative">
+                    <span class="absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-500 text-xs">🔍</span>
+                    <input v-model="presetSearchQuery" type="text" placeholder="搜索预设名称..."
+                           class="w-full h-8 bg-zinc-800/80 border border-zinc-700/60 rounded-lg pl-8 pr-2 text-xs text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-sky-500/80 transition">
+                </div>
+                <div class="flex items-center gap-1.5">
+                    <button @click="loadPresets" class="flex-1 flex items-center justify-center gap-1.5 px-2 py-1.5 bg-zinc-800 hover:bg-sky-600 text-zinc-200 text-xs rounded border border-zinc-700/60 transition">
+                        📂 打开预设目录
+                    </button>
+                    <button @click="exportPresetsBatch" title="批量导出预设"
+                            class="px-2.5 py-1.5 bg-zinc-800 hover:bg-blue-600 text-zinc-200 text-xs rounded border border-zinc-700/60 transition">
+                        📦 导出
+                    </button>
+                </div>
+            </div>
+
+            <div class="flex-1 overflow-y-auto custom-scrollbar p-2 space-y-1.5">
+                <div v-for="(preset, index) in filteredPresets" :key="preset.path || index"
+                     @click="activePreset = preset"
+                     @contextmenu.prevent="openPresetContextMenu($event, preset)"
+                     :class="activePreset && activePreset.path === preset.path ? 'bg-sky-600/20 border-sky-500/50' : 'bg-zinc-800/50 border-zinc-700/50 hover:bg-zinc-700'"
+                     class="p-3 rounded-lg border cursor-pointer transition flex flex-col gap-1.5">
+                    <div class="flex justify-between items-center gap-1">
+                        <span class="text-xs font-bold text-zinc-200 truncate">{{ (preset.data && preset.data.name) || preset.name }}</span>
+                        <div class="flex items-center gap-1 shrink-0">
+                            <button @click.stop="renamePreset(preset)" title="重命名" class="px-1.5 py-0.5 text-[10px] bg-zinc-700/50 hover:bg-blue-600 text-zinc-300 hover:text-white rounded">✏️</button>
+                            <button @click.stop="duplicatePreset(preset)" title="复制副本" class="px-1.5 py-0.5 text-[10px] bg-zinc-700/50 hover:bg-emerald-600 text-zinc-300 hover:text-white rounded">📋</button>
+                            <button @click.stop="deletePreset(preset)" title="移入回收站" class="px-1.5 py-0.5 text-[10px] bg-zinc-700/50 hover:bg-rose-600 text-zinc-300 hover:text-white rounded">🗑️</button>
+                        </div>
+                    </div>
+                    <div class="text-[10px] opacity-60 truncate">📄 {{ preset.name }}</div>
+                </div>
+                <div v-if="presets.length === 0" class="flex flex-col items-center justify-center h-full text-zinc-500 text-xs text-center p-4 gap-3">
+                    <span>尚未加载任何预设。<br>请选择酒馆的预设目录。</span>
+                    <button @click="loadPresets" class="px-3 py-1.5 bg-sky-600 hover:bg-sky-500 text-white text-xs rounded shadow transition">📂 打开预设文件夹</button>
+                </div>
+                <div v-else-if="filteredPresets.length === 0" class="text-center py-8 text-zinc-500 text-xs">🔍 没有匹配的预设</div>
+            </div>
+        </template>
+
     </aside>
 
     <!-- 📏 侧边栏拖拽调节把手 -->
@@ -500,6 +549,17 @@ export default {
             appMode: ctx.appMode,
             library: ctx.library,
             worldbooks: ctx.worldbooks,
+            presets: ctx.presets,
+            activePreset: ctx.activePreset,
+            presetSearchQuery: ctx.presetSearchQuery,
+            filteredPresets: ctx.filteredPresets,
+            loadPresets: ctx.loadPresets,
+            exportPresetsBatch: ctx.exportPresetsBatch,
+            renamePreset: ctx.renamePreset,
+            duplicatePreset: ctx.duplicatePreset,
+            deletePreset: ctx.deletePreset,
+            openPresetContextMenu: ctx.openPresetContextMenu,
+            openPresetInFolder: ctx.openPresetInFolder,
             currentCategoryKey: ctx.currentCategoryKey,
             allCategories: ctx.allCategories,
             customCategories: ctx.customCategories,

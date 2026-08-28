@@ -23,7 +23,7 @@ export function useConfigPersistence({
     // —— 收集源：UI 状态 ——
     theme, appSettings, sanitizeImportedTags, snapshotConfig, localCategoryMap,
     sidebarWidth, viewMode, isCompactMode, sortBy,
-    systemPromptPresets, lastWorldbookDirPath, wbCategoryMap
+    systemPromptPresets, lastWorldbookDirPath, lastPresetDirPath, wbCategoryMap
 }) {
     // 🛡️ 启动配置恢复保护：loadAppConfig 恢复字段时置 true，防止各 watch 触发写盘把「恢复值/旧残留」回写 app_config.json
     //    （否则旧文件 / localStorage 残留会在加载竞态中被写回权威文件，导致「删除/清空后重启复活」）
@@ -70,6 +70,7 @@ export function useConfigPersistence({
                 sortBy: sortBy.value,
                 systemPromptPresets: JSON.parse(JSON.stringify(Array.isArray(systemPromptPresets.value) ? systemPromptPresets.value : [])),
                 lastWorldbookDirPath: lastWorldbookDirPath.value || '',
+                lastPresetDirPath: lastPresetDirPath.value || '',
                 wbCategoryMap: JSON.parse(JSON.stringify(wbCategoryMap.value || {}))
             }
         };

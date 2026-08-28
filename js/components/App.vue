@@ -448,6 +448,7 @@ import { useStatusbarPreview } from '../composables/useStatusbarPreview.js'; // 
 import { useCardGroups } from '../composables/useCardGroups.js'; // 📁 角色卡分组/分类功能（拆分出的组合式函数）
 import { useDedupe } from '../composables/useDedupe.js'; // 🔍 查重与差异比对功能（拆分出的组合式函数）
 import { useWorldbooks } from '../composables/useWorldbooks.js'; // 🌍 世界书库与分组功能（拆分出的组合式函数）
+import { usePresets } from '../composables/usePresets.js'; // ⚙️ 酒馆预设管理功能
 import { useWorldbookEntries } from '../composables/useWorldbookEntries.js'; // 📚 世界书词条深度编辑（Entry IDE）组合式函数
 import { useGlobalEntrySearch } from '../composables/useGlobalEntrySearch.js'; // 🔎 全库词条搜索与反向引用组合式函数
 import { useWorldbookExtras } from '../composables/useWorldbookExtras.js'; // 📤 世界书扩展：提取/JSONL导入/批量导出/快照/统计
@@ -1898,6 +1899,7 @@ export default {
                                     systemPromptPresets.value = cfg.ui.systemPromptPresets;
                                 }
                                 if (typeof cfg.ui.lastWorldbookDirPath === 'string') lastWorldbookDirPath.value = cfg.ui.lastWorldbookDirPath;
+                                if (typeof cfg.ui.lastPresetDirPath === 'string') lastPresetDirPath.value = cfg.ui.lastPresetDirPath;
                                 if (cfg.ui.wbCategoryMap && typeof cfg.ui.wbCategoryMap === 'object') {
                                     wbCategoryMap.value = { ...wbCategoryMap.value, ...cfg.ui.wbCategoryMap };
                                 }
@@ -2028,6 +2030,16 @@ export default {
                     addLog(`📂 自动记忆载入世界书库: ${lastWorldbookDirPath.value}`);
                 } catch (err) {
                     console.warn('自动加载世界书目录失败', err);
+                }
+            }
+
+            // ⚙️ 自动恢复上次预设目录：导入/复制后的文件会在重启后重新扫描
+            if (lastPresetDirPath.value) {
+                try {
+                    await scanPresetDir(lastPresetDirPath.value);
+                    addLog(`📂 自动记忆载入预设目录: ${lastPresetDirPath.value}`);
+                } catch (err) {
+                    console.warn('自动加载预设目录失败', err);
                 }
             }
 
@@ -2649,7 +2661,7 @@ export default {
         // 🌍 世界书管理器状态与逻辑（独立于角色卡库，主视图双引擎模式）
         // =========================================================
 
-        // 视图切换模式：'characters' (角色卡) | 'worldbooks' (世界书)
+        // 视图切换模式：'characters' (角色卡) | 'worldbooks' (世界书) | 'presets' (预设)
         const appMode = ref('characters');
 
         const worldbooks = ref([]);          // 世界书列表
@@ -2658,6 +2670,13 @@ export default {
         // 记忆上次打开的世界书目录（localStorage 持久化，重启自动静默恢复）
         const lastWorldbookDirPath = ref((() => {
             try { return localStorage.getItem('jsTavern_lastWbDir') || ''; } catch (e) { return ''; }
+        })());
+
+        // ⚙️ 预设管理状态
+        const presets = ref([]);             // 预设列表
+        const activePreset = ref(null);      // 当前正在编辑的预设
+        const lastPresetDirPath = ref((() => {
+            try { return localStorage.getItem('jsTavern_lastPresetDir') || ''; } catch (e) { return ''; }
         })());
 
         // =========================================================
@@ -3094,7 +3113,7 @@ export default {
         // 与此处建立集中 watch：所有相关 ref 已声明完毕（最后一个为 wbCategoryMap），
         // 回调里的 syncConfigToDisk 已内置 isRestoringConfig guard，恢复期触发的写盘会被自动拦截，无需 immediate。
         watch(
-            [theme, appSettings, sanitizeImportedTags, snapshotConfig, sidebarWidth, viewMode, isCompactMode, sortBy, systemPromptPresets, lastWorldbookDirPath, wbCategoryMap],
+            [theme, appSettings, sanitizeImportedTags, snapshotConfig, sidebarWidth, viewMode, isCompactMode, sortBy, systemPromptPresets, lastWorldbookDirPath, lastPresetDirPath, wbCategoryMap],
             // 🚀 v1.8.5 性能修复：改走 500ms 防抖落盘。旧版直接调 syncConfigToDisk（全量
             //    序列化 appSettings/cardOverlays/wbCategoryMap + 加密 IPC + 同步写盘），
             //    连续 UI 微调（拖侧栏宽度/切主题等）每次都全量写盘，千卡库 overlays 体积
@@ -3698,7 +3717,7 @@ export default {
             apiEndpoint, apiKey, apiModel, apiType,
             theme, appSettings, sanitizeImportedTags, snapshotConfig, localCategoryMap,
             sidebarWidth, viewMode, isCompactMode, sortBy,
-            systemPromptPresets, lastWorldbookDirPath, wbCategoryMap
+            systemPromptPresets, lastWorldbookDirPath, lastPresetDirPath, wbCategoryMap
         });
 
         // 🌍 角色卡内嵌世界书编辑：组合式函数注入（条目派生/uid/折叠展开/触发词工具）
@@ -3867,6 +3886,20 @@ export default {
             wbStats
         } = useWorldbookExtras({ worldbooks, activeWorldbook, lastWorldbookDirPath, nativeAlert, addLog, confirmDialog });
 
+        // ⚙️ 预设管理：组合式函数注入
+        const {
+            presetSearchQuery, isImportingPreset, importPresetUrl,
+            loadPresets, scanPresetDir, filteredPresets,
+            saveActivePreset, renamePreset, deletePreset, duplicatePreset,
+            openPresetContextMenu, openPresetInFolder,
+            importPresetFromUrl, exportPresetsBatch,
+            listPresetSnapshots, restorePresetSnapshot, deletePresetSnapshot
+        } = usePresets({
+            presets, activePreset, lastPresetDirPath,
+            nativeAlert, confirmDialog, addLog, appPrompt,
+            contextMenu, closeContextMenu, appMode
+        });
+
         // ✨ AI 打标 / 翻译 / 格式升维：组合式函数注入（共享状态与 API 配置保留在 App.vue）
         const {
             showAITagModal, aiCandidateTags, aiCustomPrompt, aiTaggingProgress, isAITagging, openAITagModal, startAITagging,
@@ -3995,6 +4028,13 @@ export default {
             // 🌍 世界书双引擎模式
             appMode, worldbooks, activeWorldbook, lastWorldbookDirPath, editorLogs, showEditorLogs, addLog,
             loadWorldbooks, scanWorldbookDir, saveActiveWorldbook, exportActiveWorldbook, exportFilteredWorldbook, saveCurrentAsset,
+            // ⚙️ 预设管理
+            presets, activePreset, lastPresetDirPath,
+            presetSearchQuery, isImportingPreset, importPresetUrl,
+            loadPresets, scanPresetDir, filteredPresets,
+            saveActivePreset, renamePreset, deletePreset, duplicatePreset,
+            openPresetContextMenu, openPresetInFolder, importPresetFromUrl, exportPresetsBatch,
+            listPresetSnapshots, restorePresetSnapshot, deletePresetSnapshot,
             // 🌍 世界书网址导入与重命名
             importUrl, isImportingWb, importWorldbookFromUrl, renameWorldbook,
             // 🌍 世界书文件夹导入 + 删除/克隆 + 专属右键菜单

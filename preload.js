@@ -110,6 +110,22 @@ contextBridge.exposeInMainWorld('electronAPI', {
     deleteWorldbookSnapshot: (snapshotPath) => ipcRenderer.invoke('wb:deleteSnapshot', snapshotPath),
     // 🌍 世界书专属通道：批量导出已落盘世界书
     exportWorldbooksBatch: (filePaths) => ipcRenderer.invoke('wb:exportBatch', filePaths),
+    // ⚙️ 预设专属通道：扫描目录下的 .json 预设文件
+    scanPresets: (dirPath) => ipcRenderer.invoke('preset:scan', dirPath),
+    // ⚙️ 预设专属通道：物理覆写预设文件（保存前自动快照备份）
+    savePreset: (params) => ipcRenderer.invoke('preset:save', params),
+    // ⚙️ 预设专属通道：新建预设文件
+    createPreset: (params) => ipcRenderer.invoke('preset:create', params),
+    // ⚙️ 预设专属通道：重命名预设物理文件
+    renamePresetFile: (params) => ipcRenderer.invoke('preset:rename', params),
+    // ⚙️ 预设专属通道：列表预设历史快照
+    listPresetSnapshots: (filePath) => ipcRenderer.invoke('preset:listSnapshots', filePath),
+    // ⚙️ 预设专属通道：回滚到指定预设快照
+    restorePresetSnapshot: (payload) => ipcRenderer.invoke('preset:restoreSnapshot', payload),
+    // ⚙️ 预设专属通道：删除一条预设历史快照
+    deletePresetSnapshot: (snapshotPath) => ipcRenderer.invoke('preset:deleteSnapshot', snapshotPath),
+    // ⚙️ 预设专属通道：批量导出已落盘预设
+    exportPresetsBatch: (filePaths) => ipcRenderer.invoke('preset:exportBatch', filePaths),
     // 🗑️ 智能查重清洗：将冗余文件移动到 userData 下的全局回收站（绝不物理删除）
     trashFiles: (paths) => ipcRenderer.invoke('sys:trashFiles', paths),
     // 🗑️ 打开全局回收站（世界书删除/查重清洗的 userData/jsTavern_Trash）

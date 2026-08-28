@@ -2468,6 +2468,240 @@ app.whenReady().then(() => {
     }
   });
 
+  // ==========================================
+  // ⚙️ 预设 (Preset) 专属物理文件接口
+  // ==========================================
+
+  // 智能校验：是否为酒馆预设 JSON（OpenAI Settings / Presets 目录下的 .json）
+  function isValidPreset(pData) {
+    if (!pData || typeof pData !== 'object') return false;
+    // 排除角色卡 / 世界书
+    if (pData.spec === 'chara_card_v2' || pData.spec === 'chara_card_v3') return false;
+    if (pData.entries) return false;
+    // 预设常见字段：prompts / prompt_order / temperature / max_tokens 等
+    const presetKeys = ['prompts', 'prompt_order', 'temperature', 'max_tokens', 'max_context', 'rep_pen', 'top_p', 'openai_model'];
+    const hasPresetField = presetKeys.some(k => k in pData);
+    return hasPresetField;
+  }
+
+  // 扫描预设目录（仅限 .json，经 isValidPreset 过滤）
+  ipcMain.handle('preset:scan', async (event, dirPath) => {
+    try {
+      if (!dirPath || !fs.existsSync(dirPath)) {
+        return { success: false, error: '目录不存在: ' + dirPath };
+      }
+      // 安全加固：未授权目录需通过预设指纹验证
+      if (!isPathAllowed(dirPath)) {
+        let hasPresetFingerprint = false;
+        try {
+          const names = fs.readdirSync(dirPath).filter(n => n.toLowerCase().endsWith('.json')).slice(0, 20);
+          for (const n of names) {
+            try {
+              if (isValidPreset(JSON.parse(fs.readFileSync(path.join(dirPath, n), 'utf-8')))) {
+                hasPresetFingerprint = true;
+                break;
+              }
+            } catch (e) { /* 单个损坏文件继续检查下一个 */ }
+          }
+        } catch (e) { /* 目录不可读按无指纹处理 */ }
+        if (!hasPresetFingerprint) {
+          return { success: false, error: '该目录不含有效预设文件，或目录来源未经验证，已拒绝授权。请通过「打开预设目录」按钮重新选择。' };
+        }
+        addAllowedRoot(dirPath);
+      }
+
+      const results = [];
+      const visitedDirs = new Set();
+      const walk = async (dir) => {
+        let realDir;
+        try { realDir = fs.realpathSync(dir); } catch (e) { return; }
+        if (visitedDirs.has(realDir)) return;
+        visitedDirs.add(realDir);
+        const entries = await fs.promises.readdir(dir, { withFileTypes: true });
+        for (const entry of entries) {
+          if (entry.name.startsWith('.')) continue;
+          const fullPath = path.join(dir, entry.name);
+          if (entry.isDirectory()) {
+            await walk(fullPath);
+            continue;
+          }
+          if (!entry.isFile() || path.extname(entry.name).toLowerCase() !== '.json') continue;
+          try {
+            const content = await fs.promises.readFile(fullPath, 'utf-8');
+            const pData = JSON.parse(content);
+            if (isValidPreset(pData)) {
+              results.push({ path: fullPath, name: entry.name, data: pData });
+            }
+          } catch (parseErr) {
+            console.warn('[preset:scan] 跳过非预设文件:', entry.name, parseErr.message);
+          }
+        }
+      };
+      await walk(dirPath);
+      return { success: true, data: results };
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  });
+
+  // 物理覆写预设文件（保存前自动快照备份）
+  ipcMain.handle('preset:save', async (event, { filePath, data }) => {
+    try {
+      if (!filePath) return { success: false, error: '文件路径为空。' };
+      if (!isPathAllowed(filePath)) return forbidden();
+      if (!fs.existsSync(filePath)) return { success: false, error: '原文件不存在，无法保存。' };
+
+      // 数据清洗（剔除 _ 前缀临时字段）
+      const cleanData = JSON.parse(JSON.stringify(data, (key, value) => {
+        if (key.startsWith('_')) return undefined;
+        return value;
+      }));
+      const fileContent = JSON.stringify(cleanData, null, 4);
+
+      // 快照备份
+      const backupDir = path.join(app.getPath('userData'), 'jsTavern_Backups', 'presets');
+      await backupWorldbookSnapshot(backupDir, path.basename(filePath, '.json'), filePath);
+
+      // 原子覆写
+      const tmpPath = `${filePath}.${process.pid}.${Date.now()}_${Math.floor(Math.random() * 1e6)}.tmp`;
+      try {
+        await fs.promises.writeFile(tmpPath, fileContent, 'utf-8');
+        await fs.promises.rename(tmpPath, filePath);
+      } catch (writeErr) {
+        await fs.promises.unlink(tmpPath).catch(() => { });
+        throw writeErr;
+      }
+      return { success: true };
+    } catch (err) {
+      console.error('保存预设失败:', err);
+      return { success: false, error: err.message };
+    }
+  });
+
+  // 新建预设文件
+  ipcMain.handle('preset:create', async (event, { filePath, data }) => {
+    try {
+      if (!filePath) return { success: false, error: '文件路径为空。' };
+      if (!isPathAllowed(filePath)) return forbidden();
+      if (fs.existsSync(filePath)) return { success: false, error: '目标文件已存在，请换一个文件名。' };
+      await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
+      const cleanData = JSON.parse(JSON.stringify(data, (key, value) => {
+        if (key.startsWith('_')) return undefined;
+        return value;
+      }));
+      await fs.promises.writeFile(filePath, JSON.stringify(cleanData, null, 4), 'utf-8');
+      return { success: true };
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  });
+
+  // 重命名预设物理文件
+  ipcMain.handle('preset:rename', async (event, { oldPath, newPath }) => {
+    try {
+      if (!oldPath || !newPath) return { success: false, error: '路径为空。' };
+      if (!isPathAllowed(oldPath) || !isPathAllowed(newPath)) return forbidden();
+      if (!fs.existsSync(oldPath)) return { success: false, error: '原文件不存在。' };
+      if (fs.existsSync(newPath)) return { success: false, error: '目标文件已存在，请换一个名称。' };
+      await fs.promises.rename(oldPath, newPath);
+      return { success: true, newPath };
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  });
+
+  // 预设快照：列表
+  ipcMain.handle('preset:listSnapshots', async (event, filePath) => {
+    try {
+      if (!filePath) return { success: false, error: '文件路径为空。' };
+      const backupDir = path.join(app.getPath('userData'), 'jsTavern_Backups', 'presets');
+      if (!fs.existsSync(backupDir)) return { success: true, data: [] };
+      const baseName = path.basename(filePath, '.json');
+      const files = await fs.promises.readdir(backupDir);
+      const snaps = files
+        .filter(f => isSnapshotOf(f, baseName) && f.endsWith('.json'))
+        .sort()
+        .reverse();
+      const detail = await Promise.all(snaps.map(async f => {
+        const p = path.join(backupDir, f);
+        const st = await fs.promises.stat(p).catch(() => null);
+        return { file: f, path: p, mtime: st ? st.mtimeMs : 0, size: st ? st.size : 0 };
+      }));
+      return { success: true, data: detail };
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  });
+
+  // 预设快照：回滚
+  ipcMain.handle('preset:restoreSnapshot', async (event, { filePath, snapshotPath }) => {
+    try {
+      if (!filePath || !snapshotPath) return { success: false, error: '参数缺失。' };
+      if (!isPathAllowed(filePath)) return forbidden();
+      const backupDir = path.join(app.getPath('userData'), 'jsTavern_Backups', 'presets');
+      const baseName = path.basename(filePath, '.json');
+      const resolvedSnapshot = path.resolve(snapshotPath);
+      const resolvedBackupDir = path.resolve(backupDir);
+      if (path.dirname(resolvedSnapshot).toLowerCase() !== resolvedBackupDir.toLowerCase()) {
+        return { success: false, error: '非法快照路径：仅能回滚预设快照目录内的文件。' };
+      }
+      if (!isSnapshotOf(path.basename(resolvedSnapshot), baseName) || !resolvedSnapshot.toLowerCase().endsWith('.json')) {
+        return { success: false, error: '非法快照文件：该快照不属于当前预设。' };
+      }
+      if (!fs.existsSync(resolvedSnapshot)) return { success: false, error: '快照文件不存在。' };
+      if (fs.existsSync(filePath)) {
+        await backupWorldbookSnapshot(backupDir, baseName, filePath);
+      }
+      await fs.promises.copyFile(resolvedSnapshot, filePath);
+      return { success: true };
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  });
+
+  // 预设快照：删除
+  ipcMain.handle('preset:deleteSnapshot', async (event, snapshotPath) => {
+    try {
+      if (!snapshotPath || typeof snapshotPath !== 'string') return { success: false, error: '参数缺失。' };
+      const backupDir = path.resolve(app.getPath('userData'), 'jsTavern_Backups', 'presets');
+      const resolved = path.resolve(snapshotPath);
+      if (path.dirname(resolved).toLowerCase() !== backupDir.toLowerCase()) {
+        return { success: false, error: '非法快照路径：仅能删除预设快照目录内的文件。' };
+      }
+      if (!/_\d{4}-\d{2}-\d{2}T/.test(path.basename(snapshotPath))) {
+        return { success: false, error: '非法快照文件名，操作被拒绝。' };
+      }
+      if (!fs.existsSync(snapshotPath)) return { success: false, error: '快照文件不存在。' };
+      await fs.promises.unlink(snapshotPath);
+      return { success: true };
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  });
+
+  // 预设批量导出
+  ipcMain.handle('preset:exportBatch', async (event, filePaths) => {
+    try {
+      if (!Array.isArray(filePaths) || filePaths.length === 0) return { success: false, error: '未选择任何预设。' };
+      const { canceled, filePaths: targetDirs } = await dialog.showOpenDialog({
+        properties: ['openDirectory'],
+        title: '选择预设批量导出的目标文件夹'
+      });
+      if (canceled || targetDirs.length === 0) return { success: false, error: '用户取消操作' };
+      const outDir = path.join(targetDirs[0], `Preset_Batch_Export_${Date.now()}`);
+      await fs.promises.mkdir(outDir, { recursive: true });
+      let count = 0;
+      for (const p of filePaths) {
+        if (!isPathAllowed(p) || !fs.existsSync(p)) continue;
+        await fs.promises.copyFile(p, path.join(outDir, path.basename(p)));
+        count++;
+      }
+      return { success: true, count, outDir };
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  });
+
   // 打开全局回收站（世界书删除/查重清洗移入的 userData/jsTavern_Trash；不存在则先创建）
   ipcMain.handle('sys:openGlobalTrash', async () => {
     try {
