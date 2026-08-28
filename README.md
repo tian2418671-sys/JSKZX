@@ -9,11 +9,11 @@
 
 **🖥️ 推荐 · 安装版**（双击安装，自动生成桌面/开始菜单快捷方式，免管理员权限，支持 OTA 自动更新）：
 
-[⬇️ 下载安装包 `sillytavern-card-manager-1.9.0.exe`](https://github.com/tian2418671-sys/JSKZX/releases/latest)
+[⬇️ 下载安装包 `sillytavern-card-manager-2.0.0.exe`](https://github.com/tian2418671-sys/JSKZX/releases/latest)
 
 **📦 绿色免安装版**（解压即用，无需安装）：
 
-[⬇️ 下载绿色版 `sillytavern-card-manager-1.9.0.zip`](https://github.com/tian2418671-sys/JSKZX/releases/latest)
+[⬇️ 下载绿色版 `sillytavern-card-manager-2.0.0.zip`](https://github.com/tian2418671-sys/JSKZX/releases/latest)
 
 > 💡 两个版本功能完全相同，任选其一即可。支持 Windows 10/11（64 位）。
 > 安装版内置 OTA 自动更新（检测 → 下载 → 静默安装 → 自动重启）；绿色版需手动下载新版覆盖。
@@ -52,6 +52,8 @@
 - **千卡库性能优化**：异步分片扫描、分块加载、Token 缓存、I/O 风暴治理——上千张卡片也能秒开
 - **OTA 自动更新**：新版本一键下载、静默安装、自动重启，全程无需手动操作
 
+> 📱 **安卓版预告**：安卓版正在编写中，未来将发布测试版，敬请期待！
+
 ---
 
 ## 📸 界面预览
@@ -76,7 +78,8 @@
 
 | 模块 | 说明 |
 |------|------|
-| 📂 卡片库 | 文件夹导入、自动分类、多选勾选、Ctrl/Shift 连选、右键快捷菜单、**列表/网格双视图 + 常规/紧凑双密度**、排序（名称/最新/Token） |
+| 📂 卡片库 | 文件夹导入、自动分类、多选勾选、Ctrl/Shift 连选、右键快捷菜单、**列表/网格双视图 + 常规/紧凑双密度**、**9 种排序方式**（导入最新/本地文件最新/A-Z 正序·倒序/修改时间/创建时间/大小正·倒序/Token，中文拼音+数字自然排序，稳定键链防乱飘） |
+| ⚙️ 预设管理 | **全新预设引擎**：加载酒馆预设目录、搜索、批量导出；脚本/正则分区在线编辑、沙箱 iframe 渲染预览；重命名/复制/回收站 |
 | 🔍 超级搜索 | 全字段穿透检索（含备选开场白、深度提示词、正则脚本、**世界书全部词条**、**物理文件名/路径**）、多关键词 AND、`tag:`/`author:`/`file:`/`wb:` 高级前缀语法、`-排除`、300ms 防抖 |
 | 🔎 全库词条搜索 | 一次性检索**全部独立世界书 + 全部角色卡内嵌词条**（触发词/次级词/备注/正文），点击直达并高亮 |
 | 🌍 世界书 | 独立世界书库（双引擎）+ 角色卡内嵌世界书；词条级 IDE（增删改/克隆/排序/启用/常驻/条件/插入位置/标签化触发词）、URL 直链导入、JSONL 批量导入、批量导出、内嵌提取为独立书、快照/一键恢复 |
@@ -182,7 +185,7 @@ npm run build
 
 产物输出到 `dist/`：
 - `dist/win-unpacked/` —— 免安装绿色版（可压缩为 zip 分发）
-- `dist/sillytavern-card-manager-1.9.0.exe` —— NSIS 安装包
+- `dist/sillytavern-card-manager-2.0.0.exe` —— NSIS 安装包
 - `dist/latest.yml` —— **OTA 更新必需**（与 exe 一起上传 GitHub Release）
 
 ---
@@ -436,10 +439,11 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File "build\generate-icon.ps1"
 
 完整发布流程：
 
-1. 修改 `package.json` 的 `version`（如 1.8.9 → 1.9.0）
+1. 修改 `package.json` 的 `version`（如 1.9.0 → 2.0.0）
 2. `RELEASE_NOTES.md` 顶部加新版本节
 3. README 下载链接/产物名同步版本号
 4. `npm run build`（或上面的离线打包）
+5. 上传 GitHub Release（exe + latest.yml + zip）
 5. 创建 GitHub Release（tag 用 `vX.Y.Z`，必须与 package.json version 对应）：
    ```powershell
    gh release create vX.Y.Z --repo tian2418671-sys/JSKZX --notes-file notes.md

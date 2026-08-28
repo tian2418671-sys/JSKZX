@@ -47,6 +47,12 @@ function writeCrashLog(err) {
 }
 
 process.on('uncaughtException', (err) => {
+  // 🛡️ EPIPE 属已知无害的 I/O 中断（日志管道对端关闭：终端退出/调试管道被剪断等），
+  //    只记录不弹窗——应用本身正常运行，仅日志输出管道断了，绝不打扰用户。
+  if (err && err.code === 'EPIPE') {
+    writeCrashLog(err);
+    return;
+  }
   writeCrashLog(err);
   console.error('未捕获异常:', err);
   try {
@@ -58,6 +64,20 @@ process.on('unhandledRejection', (reason) => {
   writeCrashLog(reason instanceof Error ? reason : new Error(String(reason)));
   console.error('未处理的 Promise 拒绝:', reason);
 });
+
+// 🛡️ EPIPE 容错（2026-08-28）：stdout/stderr 对端关闭（终端退出、调试管道被剪断、
+//    日志经 Select-String 管道提前截断等）时，Node 的 console.log/console.error 写管道
+//    会抛 "EPIPE: broken pipe"，冒泡到 uncaughtException 被误报为「程序崩溃」弹窗。
+//    这里在流层直接消费 EPIPE 错误——应用本身正常运行，仅日志管道断了，绝不弹窗打扰。
+try {
+  for (const stream of [process.stdout, process.stderr]) {
+    if (stream && typeof stream.on === 'function') {
+      stream.on('error', (err) => {
+        if (err && err.code === 'EPIPE') { /* 管道断开：静默忽略 */ }
+      });
+    }
+  }
+} catch (e) { /* 忽略 */ }
 
 // ================= [ 📸 历史快照配置与节流阀（可在设置面板动态更新） ] =================
 // snapshotConfig 默认值；前端通过 settings:updateSnapshotConfig IPC 实时同步
@@ -757,6 +777,29 @@ function createWindow() {
   // DOM 与 CSS 完全就绪后再显示视窗，杜绝启动闪烁
   win.once('ready-to-show', () => {
     win.show();
+  });
+
+  // 🩺 诊断：加载完成后记录页面 URL（排查加载失败）
+  win.webContents.on('did-finish-load', () => {
+    console.log('[diag] 页面 URL:', win.webContents.getURL());
+  });
+
+  // 🩺 诊断：渲染进程控制台日志转发到主进程终端（排查编辑工作区消失等渲染层错误）
+  // Electron 43 起 console-message 改为事件对象传参，兼容新旧两种签名
+  win.webContents.on('console-message', (e, levelOrEvent, message) => {
+    let level = levelOrEvent, msg = message;
+    if (levelOrEvent && typeof levelOrEvent === 'object') {
+      level = levelOrEvent.level;
+      msg = levelOrEvent.message;
+    }
+    const tag = ['VERBOSE', 'INFO', 'WARN', 'ERROR'][level] || 'LOG';
+    console.log(`[renderer:${tag}] ${msg}`);
+  });
+  win.webContents.on('did-fail-load', (event, errorCode, errorDescription, validatedURL) => {
+    console.error(`[renderer] 页面加载失败: ${errorCode} ${errorDescription} ${validatedURL}`);
+  });
+  win.webContents.on('render-process-gone', (event, details) => {
+    console.error('[renderer] 渲染进程崩溃:', JSON.stringify(details));
   });
 
   return win;
@@ -2053,7 +2096,7 @@ app.whenReady().then(() => {
           await fs.promises.writeFile(tmpPath, JSON.stringify(updatedJson, null, 2), 'utf-8');
           await fs.promises.rename(tmpPath, filePath);
           const st = await fs.promises.stat(filePath);
-          return { success: true, mtime: st.mtimeMs };
+          return { success: true, mtime: st.mtimeMs, size: st.size };
         } else if (ext === '.png') {
           const buffer = await fs.promises.readFile(filePath);
           const newBuffer = writeTavernPNGChunk(buffer, updatedJson);
@@ -2064,7 +2107,7 @@ app.whenReady().then(() => {
             await fs.promises.writeFile(tmpPath, newBuffer);
             await fs.promises.rename(tmpPath, filePath);
             const st = await fs.promises.stat(filePath);
-            return { success: true, mtime: st.mtimeMs };
+            return { success: true, mtime: st.mtimeMs, size: st.size };
           } else {
             return { success: false, error: "无法写入 PNG 结构。" };
           }
@@ -2088,6 +2131,23 @@ app.whenReady().then(() => {
   // ==========================================
   // 🌍 世界书 (Worldbook) 专属物理文件接口 (严格过滤版)
   // ==========================================
+
+  // 🚀 v1.8.6 扫描结果增量缓存：目录文件 mtime 未变则跳过 readFile+JSON.parse，
+  //    大目录（如 H:\01 含数百 JSON）二次启动从数秒降至毫秒级。
+  //    只缓存 { mtime, valid } 标记（不存 data，避免体积膨胀）；有效文件仍需读取 data。
+  const scanCachePath = path.join(app.getPath('userData'), 'scan_cache.json');
+  let scanCache = null;
+  const loadScanCache = () => {
+    if (scanCache) return scanCache;
+    try {
+      if (fs.existsSync(scanCachePath)) scanCache = JSON.parse(fs.readFileSync(scanCachePath, 'utf-8'));
+    } catch (e) { /* 缓存损坏忽略 */ }
+    if (!scanCache || typeof scanCache !== 'object') scanCache = {};
+    return scanCache;
+  };
+  const saveScanCache = () => {
+    try { fs.writeFileSync(scanCachePath, JSON.stringify(scanCache), 'utf-8'); } catch (e) { /* 忽略 */ }
+  };
 
   // 智能校验：是否为标准的酒馆世界书 JSON
   function isValidWorldbook(wbData) {
@@ -2155,42 +2215,71 @@ app.whenReady().then(() => {
       // 🛡️ v1.8.5：realpath + visited 集合防符号链接/junction 环路（指回祖先目录的
       //    链接会让递归无限循环、results 无限膨胀直至内存耗尽）
       const visitedDirs = new Set();
-      const walk = async (dir) => {
+      // 🚀 v1.8.6 性能优化：目录递归串行（防环路），目录内 JSON 32 路并发解析——
+      //    旧版逐个 readFile+JSON.parse，大目录（数百 JSON）串行耗时数秒；并发后毫秒级。
+      const SCAN_JSON_BATCH = 32;
+      const walk = async (dir, depth = 0) => {
         let realDir;
         try { realDir = fs.realpathSync(dir); } catch (e) { return; }
         if (visitedDirs.has(realDir)) return; // 环路保护：同一物理目录只扫一次
         visitedDirs.add(realDir);
         const entries = await fs.promises.readdir(dir, { withFileTypes: true });
+        const dirs = [];
+        const jsonFiles = [];
         for (const entry of entries) {
           if (entry.name.startsWith('.')) continue; // 忽略隐藏文件/目录
           const fullPath = path.join(dir, entry.name);
-
           if (entry.isDirectory()) {
-            await walk(fullPath); // 递归进入子文件夹
+            // 🚀 v1.8.6：黑名单目录（node_modules/.git 等海量垃圾）直接剪枝
+            if (skipFolders.includes(entry.name.toLowerCase())) continue;
+            dirs.push(fullPath);
             continue;
           }
-          if (!entry.isFile() || path.extname(entry.name).toLowerCase() !== '.json') continue;
-
-          try {
-            const content = await fs.promises.readFile(fullPath, 'utf-8');
-            const wbData = JSON.parse(content);
-
-            // 严格防伪校验：确保只拦截真正的世界书 JSON
-            if (isValidWorldbook(wbData)) {
-              results.push({
-                path: fullPath,
-                name: entry.name,
-                data: wbData
-              });
-            }
-          } catch (parseErr) {
-            // 静默跳过损坏或非标准 JSON 文件
-            console.warn('[wb:scan] 跳过非世界书文件:', entry.name, parseErr.message);
-          }
+          if (entry.isFile() && path.extname(entry.name).toLowerCase() === '.json') jsonFiles.push(fullPath);
         }
+        // 🚀 v1.8.6 深度剪枝：世界书有效文件实测都在浅层，限 5 层
+        if (depth >= 5) return;
+        // 本目录 JSON 并发解析（严格防伪校验：确保只拦截真正的世界书 JSON）
+        const cache = (loadScanCache().worldbook = loadScanCache().worldbook || {});
+        for (let i = 0; i < jsonFiles.length; i += SCAN_JSON_BATCH) {
+          const batch = jsonFiles.slice(i, i + SCAN_JSON_BATCH);
+          await Promise.all(batch.map(async (fullPath) => {
+            try {
+              const st = await fs.promises.stat(fullPath);
+              if (st.size > 5 * 1024 * 1024) return;
+              const mt = Math.round(st.mtimeMs);
+              const cached = cache[fullPath];
+              // 🚀 增量缓存：已知无效且 mtime 未变 → 跳过 readFile+JSON.parse
+              if (cached && cached.mtime === mt && cached.valid === false) return;
+              // 🚀 大文件预检：世界书必有 entries 字段；超过 512KB 的先读头 64KB 查关键字，
+              //    不含则跳过（避免 readFile+JSON.parse 大文件——目录里常有 table_data/模板等大 JSON）
+              if (st.size > 512 * 1024) {
+                let fh;
+                try {
+                  fh = await fs.promises.open(fullPath, 'r');
+                  const head = Buffer.alloc(64 * 1024);
+                  await fh.read(head, 0, head.length, 0);
+                  if (!head.toString('utf-8').includes('"entries"')) { cache[fullPath] = { mtime: mt, valid: false }; return; }
+                } finally { if (fh) await fh.close().catch(() => {}); }
+              }
+              const content = await fs.promises.readFile(fullPath, 'utf-8');
+              const wbData = JSON.parse(content);
+              const valid = isValidWorldbook(wbData);
+              cache[fullPath] = { mtime: mt, valid };
+              if (valid) {
+                results.push({ path: fullPath, name: path.basename(fullPath), data: wbData });
+              }
+            } catch (parseErr) {
+              // 静默跳过损坏或非标准 JSON 文件
+              console.warn('[wb:scan] 跳过非世界书文件:', path.basename(fullPath), parseErr.message);
+            }
+          }));
+        }
+        for (const d of dirs) await walk(d, depth + 1); // 递归子目录
       };
 
       await walk(dirPath);
+      saveScanCache();
       return { success: true, data: results };
     } catch (err) {
       return { success: false, error: err.message };
@@ -2512,32 +2601,71 @@ app.whenReady().then(() => {
 
       const results = [];
       const visitedDirs = new Set();
-      const walk = async (dir) => {
+      // 🚀 v1.8.6 性能优化：目录递归串行（防环路），目录内 JSON 32 路并发解析
+      const SCAN_JSON_BATCH = 32;
+      const walk = async (dir, depth = 0) => {
         let realDir;
         try { realDir = fs.realpathSync(dir); } catch (e) { return; }
         if (visitedDirs.has(realDir)) return;
         visitedDirs.add(realDir);
         const entries = await fs.promises.readdir(dir, { withFileTypes: true });
+        const dirs = [];
+        const jsonFiles = [];
         for (const entry of entries) {
           if (entry.name.startsWith('.')) continue;
           const fullPath = path.join(dir, entry.name);
           if (entry.isDirectory()) {
-            await walk(fullPath);
+            // 🚀 v1.8.6：黑名单目录（node_modules/.git 等海量垃圾）直接剪枝
+            if (skipFolders.includes(entry.name.toLowerCase())) continue;
+            dirs.push(fullPath);
             continue;
           }
-          if (!entry.isFile() || path.extname(entry.name).toLowerCase() !== '.json') continue;
-          try {
-            const content = await fs.promises.readFile(fullPath, 'utf-8');
-            const pData = JSON.parse(content);
-            if (isValidPreset(pData)) {
-              results.push({ path: fullPath, name: entry.name, data: pData });
-            }
-          } catch (parseErr) {
-            console.warn('[preset:scan] 跳过非预设文件:', entry.name, parseErr.message);
-          }
+          if (entry.isFile() && path.extname(entry.name).toLowerCase() === '.json') jsonFiles.push(fullPath);
         }
+        // 🚀 v1.8.6 深度剪枝：预设有效文件实测都在一级/二级目录内，限 2 层
+        //    （H:\01 这种根级预设目录含 3 万+ 深层子目录，深度限制是启动提速关键）
+        if (depth >= 2) return;
+        const cache = (loadScanCache().preset = loadScanCache().preset || {});
+        for (let i = 0; i < jsonFiles.length; i += SCAN_JSON_BATCH) {
+          const batch = jsonFiles.slice(i, i + SCAN_JSON_BATCH);
+          await Promise.all(batch.map(async (fullPath) => {
+            try {
+              const st = await fs.promises.stat(fullPath);
+              if (st.size > 5 * 1024 * 1024) return;
+              const mt = Math.round(st.mtimeMs);
+              const cached = cache[fullPath];
+              // 🚀 增量缓存：已知无效且 mtime 未变 → 跳过 readFile+JSON.parse（大目录提速关键）
+              if (cached && cached.mtime === mt && cached.valid === false) return;
+              // 🚀 大文件预检：预设常见字段 prompts/temperature/max_tokens 等；超过 512KB 的
+              //    先读头 64KB 查关键字，不含则跳过（避免 readFile+JSON.parse 大文件）
+              const PRESET_HINTS = ['prompts', 'prompt_order', 'temperature', 'max_tokens', 'max_context', 'rep_pen', 'top_p', 'openai_model'];
+              if (st.size > 512 * 1024) {
+                let fh;
+                try {
+                  fh = await fs.promises.open(fullPath, 'r');
+                  const head = Buffer.alloc(64 * 1024);
+                  await fh.read(head, 0, head.length, 0);
+                  const headStr = head.toString('utf-8');
+                  if (!PRESET_HINTS.some(k => headStr.includes('"' + k + '"'))) { cache[fullPath] = { mtime: mt, valid: false }; return; }
+                } finally { if (fh) await fh.close().catch(() => {}); }
+              }
+              const content = await fs.promises.readFile(fullPath, 'utf-8');
+              const pData = JSON.parse(content);
+              const valid = isValidPreset(pData);
+              cache[fullPath] = { mtime: mt, valid };
+              if (valid) {
+                results.push({ path: fullPath, name: path.basename(fullPath), data: pData });
+              }
+            } catch (parseErr) {
+              // 静默跳过损坏或非标准 JSON 文件
+              console.warn('[preset:scan] 跳过非预设文件:', path.basename(fullPath), parseErr.message);
+            }
+          }));
+        }
+        for (const d of dirs) await walk(d, depth + 1);
       };
       await walk(dirPath);
+      saveScanCache();
       return { success: true, data: results };
     } catch (err) {
       return { success: false, error: err.message };
@@ -3177,6 +3305,34 @@ app.on('window-all-closed', () => {
 const YIELD_EVERY = 25; // 每处理 25 张卡让出一次事件循环（UI 心跳粒度）
 const yieldToEventLoop = () => new Promise(resolve => setImmediate(resolve));
 
+// 🚀 v1.8.6 性能优化：并发批量提取 PNG 内嵌卡片 JSON
+//    旧版在 walkLibraryDir 中逐张串行 open/read(1MB)/parse，1 万张卡 = 1 万次串行磁盘
+//    IO + JSON 解析，扫描耗时数分钟。现改为遍历完成后 64 路并发批量提取（批间让出
+//    事件循环，避免 EMFILE 句柄爆炸与主线程长阻塞），万卡库提速一个数量级。
+const EMBED_BATCH = 64;
+async function extractPngEmbedded(pngFiles) {
+  for (let i = 0; i < pngFiles.length; i += EMBED_BATCH) {
+    const batch = pngFiles.slice(i, i + EMBED_BATCH);
+    await Promise.all(batch.map(async (file) => {
+      if (!file.path || !file.size) { file.embeddedData = null; return; }
+      const headLen = Math.min(1024 * 1024, file.size);
+      // 🔐 文件句柄 try/finally 防泄漏（代码审查修复 4）
+      let fh = null;
+      try {
+        fh = await fsp.open(file.path, 'r');
+        const head = Buffer.alloc(headLen);
+        await fh.read(head, 0, headLen, 0);
+        file.embeddedData = readTavernPNGChunk(head) || null;
+      } catch (e) {
+        file.embeddedData = null; // 提取失败 → 前端自动回退完整 readBuffer，绝不漏卡
+      } finally {
+        if (fh) { try { await fh.close(); } catch (e) { /* 关闭失败忽略 */ } }
+      }
+    }));
+    if (i + EMBED_BATCH < pngFiles.length) await yieldToEventLoop();
+  }
+}
+
 async function walkLibraryDir(dirPath, relPath, files, categories, visitedDirs) {
   // 🛡️ v1.8.5：realpath + visited 集合防符号链接/junction 环路（同 wb:scan walk；
   //    指回祖先的链接会让异步递归无限循环、files 数组无限膨胀直至内存耗尽）
@@ -3212,35 +3368,21 @@ async function walkLibraryDir(dirPath, relPath, files, categories, visitedDirs) 
         birthtime = st.birthtimeMs || 0; // 文件创建时间（Windows 支持；可 0，排序时自动回退）
         size = st.size || 0;
       } catch (e) { /* 文件被占用/删除时忽略 */ }
-      // 🚀 性能优化：扫描时主进程本地提取 PNG 内嵌卡片 JSON（只读文件头 1MB，
-      // chara/ccv3 块位于 IHDR 之后、IDAT 之前），随 files 一起返回，
-      // 前端直接复用，彻底省掉"整张 PNG 跨 IPC 读回渲染端"的最大瓶颈。
-      // 提取失败（异常 iTXt/截断）→ embeddedData=null，前端自动回退完整 readBuffer，绝不漏卡
-      let embeddedData = null;
-      if (ext === '.png' && size > 0) {
-        const headLen = Math.min(1024 * 1024, size);
-        // 🔐 文件句柄 try/finally 防泄漏（代码审查修复 4）
-        let fh = null;
-        try {
-          fh = await fsp.open(absPath, 'r');
-          const head = Buffer.alloc(headLen);
-          await fh.read(head, 0, headLen, 0);
-          embeddedData = readTavernPNGChunk(head) || null;
-        } catch (e) {
-          embeddedData = null;
-        } finally {
-          if (fh) { try { await fh.close(); } catch (e) { /* 关闭失败忽略 */ } }
-        }
-      }
+      // 🚀 v1.8.6 性能优化：PNG 内嵌 JSON 提取改为「延迟并发批量」——
+      //    旧版在此逐张串行 open/read(1MB)/parse，1 万张卡 = 1 万次串行磁盘 IO，
+      //    扫描耗时数分钟。现仅标记 _needsEmbed，由 scanAndSaveFolder 在遍历完成后
+      //    用 64 路并发批量提取（extractPngEmbedded），万卡库提速一个数量级。
       files.push({
         name: f.name,
         path: absPath,
         url: isImage ? 'local-file://img/?path=' + encodeURIComponent(absPath) : null,
         mtime,
         birthtime,
+        size, // 供并发提取计算读头长度
         subFolder: relPath || '', // 相对库根的文件夹路径（'' = 根目录）
         category: relPath ? relPath.split(path.sep)[0] : '未分类', // 一级文件夹名 = 物理分组
-        embeddedData // 🚀 内嵌 card JSON（无则 null），前端解析优先复用
+        embeddedData: null, // 由 scanAndSaveFolder 并发提取后回填
+        _needsEmbed: ext === '.png' && size > 0 // 标记待并发提取内嵌 JSON
       });
       // 🫀 让出事件循环：保证扫描期间主进程仍能处理窗口绘制/IPC，杜绝「未响应」
       if (files.length % YIELD_EVERY === 0) await yieldToEventLoop();
@@ -3262,9 +3404,26 @@ async function scanAndSaveFolder(folderPath) {
     fs.writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf-8');
 
     // 📁 递归扫描库目录：子文件夹名自动识别为物理分组（🚀 异步分片，不再阻塞事件循环）
+    const scanStart = Date.now();
     const files = [];
     const categories = new Set();
     await walkLibraryDir(folderPath, '', files, categories, new Set());
+
+    // 🦾 v1.9.x 文件级稳定排序：扫描结果按「文件名 → 相对子路径」自然排序（中文拼音+数字），
+    //    默认加载顺序 = 文件系统顺序（与资源管理器一致），彻底杜绝 readdir 顺序不稳定
+    //    导致的列表乱序/排序"飘"（readdir 在 Windows 上不保证稳定顺序）。
+    try {
+        const fileCollator = new Intl.Collator('zh-Hans-CN', { numeric: true, sensitivity: 'variant' });
+        files.sort((a, b) =>
+            fileCollator.compare(a.name, b.name)
+            || fileCollator.compare(a.subFolder || '', b.subFolder || '')
+            || fileCollator.compare(a.path, b.path));
+    } catch (e) { /* 排序失败不影响功能 */ }
+
+    // 🚀 v1.8.6 并发批量提取 PNG 内嵌 JSON（大幅缩短万卡库启动扫描耗时）
+    const pngFiles = files.filter(f => f._needsEmbed);
+    if (pngFiles.length > 0) await extractPngEmbedded(pngFiles);
+    console.log(`[scan] 扫描完成: ${files.length} 个文件 (${pngFiles.length} 张 PNG), 耗时 ${Date.now() - scanStart}ms`);
 
     // 🧹 修复「卡片导入/扫描出现空分组」：空文件夹不再产生"幽灵分组"。
     // 物理分组只保留确实包含卡片文件的文件夹；误建/残留的空文件夹（如 123/、555/）不再显示为分组。

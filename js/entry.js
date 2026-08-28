@@ -9,7 +9,9 @@ const app = createApp(App);
 
 // Vue 全局错误兜底（原 js/app.js 末尾逻辑，迁移至此）
 app.config.errorHandler = (err, _instance, info) => {
-    console.error('[Vue 错误]', info, err);
+    // 🩺 诊断增强：带上组件名与堆栈，便于定位渲染崩溃源
+    const compName = _instance?.$options?.name || _instance?.type?.name || _instance?.type?.__name || '(匿名组件)';
+    console.error('[Vue 错误]', info, '| 组件:', compName, '|', err && err.message, '\n', err && err.stack);
     // 🔔 统一错误兜底提示（代码审查修复 6）：渲染层异常时给出用户可见提示
     try {
         window.__vueErrorTips?.('发生未预期错误，请查看控制台（F12）。');

@@ -1,7 +1,32 @@
-# SillyTavern 角色卡管理器 · v1.6.2 → v1.8.9 更新汇总
+# SillyTavern 角色卡管理器 · v1.6.2 → v2.0.0 更新汇总
 
-> 更新周期：2026-08-15 ~ 2026-08-23
+> 更新周期：2026-08-15 ~ 2026-08-29
 > 技术栈：Electron + Vue3 + Tailwind + ECharts
+
+---
+
+## ✨ v2.0.0 —— 预设管理 + 九种排序 + 千库扫描提速（覆盖发布）
+
+> 内部详细版（对外精简版见 RELEASE_NOTES.md v2.0.0）
+
+### ⚙️ 预设管理引擎（全新）
+- `usePresets.js` + main.js（`preset:scan` 异步扫描 / `preset:save` / 回收站）+ preload 4 API + App.vue / EditorPanel / SidebarPanel 全新「预设」页签
+- 预设深度编辑器：脚本 / 正则分区编辑（`presetScripts` / `presetRegexScripts`，启用开关、折叠、说明字段、增删），渲染型脚本沙箱 iframe 渲染预览（`sandbox="allow-scripts"` 隔离）
+- 预设管理操作：重命名 / 复制副本 / 移入回收站 / 批量导出
+
+### 🔀 排序功能全面升级（9 种排序方式，`useSearch.js` sortList 重构）
+- 排序选项：importTime 导入最新 / time 本地文件最新（mtime+ctime 取较新）/ name A-Z 正序 / nameDesc A-Z 倒序 / mtime 修改时间 / ctime 创建时间 / sizeDesc 大小倒序 / sizeAsc 大小正序 / tokens Token
+- 排序键：`_mtime`（物理 mtime）/ `_ctime`（物理 birthtime）/ `_size`（物理字节数）/ `_importTime`（首次入库持久化）/ 全部纯本地文件级
+- `Intl.Collator('zh-Hans-CN', {numeric:true, sensitivity:'variant'})` 拼音 + 数字自然排序；稳定链 `路径→文件名→id` 兜底，重扫/重启/升级顺序完全确定
+- 导入时间持久化：`cardImportTimes` 映射落盘 `app_config.json`（useConfigPersistence payload 增加）；A-Z 倒序整体取反（含稳定链翻转，互为精确逆序）
+- Token 排序：`tokenCache.js`（WeakMap 缓存 + stats）+ Schwartzian transform 预计算
+
+### ⚡ 搜索性能升级（`searchIndex.js`）
+- 高性能倒排索引：`buildAsync` 异步分片构建（requestIdleCallback / setTimeout yield），倒排 Map + WeakMap 文本/标签缓存
+
+### 🚀 扫描性能大幅提速（main.js）
+- 世界书 / 预设扫描：`scan_cache.json` 增量缓存（mtime 未变且已知无效则跳过）+ 32 路并发 JSON 解析 + >512KB 先读头 64KB 关键字预检 + 深度限制（世界书 5 层 / 预设 2 层）+ `skipFolders` 黑名单目录剪枝
+- PNG 内嵌提取：`extractPngEmbedded` 64 路并发批量提取（EMBED_BATCH=64，批间让出事件循环），walkLibraryDir 只标记 `_needsEmbed` 不再串行逐张解析
 
 ---
 

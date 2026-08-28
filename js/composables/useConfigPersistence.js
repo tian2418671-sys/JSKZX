@@ -23,7 +23,9 @@ export function useConfigPersistence({
     // —— 收集源：UI 状态 ——
     theme, appSettings, sanitizeImportedTags, snapshotConfig, localCategoryMap,
     sidebarWidth, viewMode, isCompactMode, sortBy,
-    systemPromptPresets, lastWorldbookDirPath, lastPresetDirPath, wbCategoryMap
+    systemPromptPresets, lastWorldbookDirPath, lastPresetDirPath, wbCategoryMap,
+    // —— 收集源：导入时间映射（卡片首次入库时刻持久化） ——
+    cardImportTimes
 }) {
     // 🛡️ 启动配置恢复保护：loadAppConfig 恢复字段时置 true，防止各 watch 触发写盘把「恢复值/旧残留」回写 app_config.json
     //    （否则旧文件 / localStorage 残留会在加载竞态中被写回权威文件，导致「删除/清空后重启复活」）
@@ -72,7 +74,9 @@ export function useConfigPersistence({
                 lastWorldbookDirPath: lastWorldbookDirPath.value || '',
                 lastPresetDirPath: lastPresetDirPath.value || '',
                 wbCategoryMap: JSON.parse(JSON.stringify(wbCategoryMap.value || {}))
-            }
+            },
+            // 📥 卡片导入时间映射 { [path]: timestampMs }（「导入时间」排序持久化）
+            cardImportTimes: JSON.parse(JSON.stringify(cardImportTimes.value || {}))
         };
         window.electronAPI.saveAppConfig(payload).catch(() => { });
     };

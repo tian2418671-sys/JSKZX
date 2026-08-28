@@ -9,22 +9,23 @@
            ref="sidebarEl"
            class="bg-zinc-900 border-r border-zinc-800 flex flex-col shrink-0 relative"
            :style="sidebarStyle">
-        <!-- ⚡ 双引擎模式切换 -->
+        <!-- ⚡ 双引擎模式切换（🔧 UI 修复：按钮加 whitespace-nowrap + min-w-0 + 徽标 shrink-0，
+            窄侧边栏/万级数量下不再换行错乱，文字超出省略） -->
         <div class="px-3 py-2.5 border-b border-zinc-800 bg-zinc-900 flex gap-2 select-none">
             <button @click="appMode = 'characters'"
                     :class="appMode === 'characters' ? 'bg-indigo-600 text-white shadow-md shadow-indigo-900/30' : 'bg-zinc-800 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700'"
-                    class="flex-1 py-1.5 text-xs font-bold rounded-lg shadow transition flex items-center justify-center gap-1.5">
-                🎎 角色卡库 <span class="opacity-70 font-normal">({{ library.length }})</span>
+                    class="flex-1 py-1.5 text-xs font-bold rounded-lg shadow transition flex items-center justify-center gap-1.5 whitespace-nowrap min-w-0 overflow-hidden">
+                🎎 角色卡库 <span class="opacity-70 font-normal shrink-0">({{ library.length }})</span>
             </button>
             <button @click="appMode = 'worldbooks'"
                     :class="appMode === 'worldbooks' ? 'bg-amber-600 text-white shadow-md shadow-amber-900/30' : 'bg-zinc-800 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700'"
-                    class="flex-1 py-1.5 text-xs font-bold rounded-lg shadow transition flex items-center justify-center gap-1.5">
-                🌍 世界书库 <span class="opacity-70 font-normal">({{ worldbooks.length }})</span>
+                    class="flex-1 py-1.5 text-xs font-bold rounded-lg shadow transition flex items-center justify-center gap-1.5 whitespace-nowrap min-w-0 overflow-hidden">
+                🌍 世界书库 <span class="opacity-70 font-normal shrink-0">({{ worldbooks.length }})</span>
             </button>
             <button @click="appMode = 'presets'"
                     :class="appMode === 'presets' ? 'bg-sky-600 text-white shadow-md shadow-sky-900/30' : 'bg-zinc-800 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700'"
-                    class="flex-1 py-1.5 text-xs font-bold rounded-lg shadow transition flex items-center justify-center gap-1.5">
-                ⚙️ 预设 <span class="opacity-70 font-normal">({{ presets.length }})</span>
+                    class="flex-1 py-1.5 text-xs font-bold rounded-lg shadow transition flex items-center justify-center gap-1.5 whitespace-nowrap min-w-0 overflow-hidden">
+                ⚙️ 预设 <span class="opacity-70 font-normal shrink-0">({{ presets.length }})</span>
             </button>
         </div>
 
@@ -76,9 +77,15 @@
                         📁 {{ getCategoryDisplayName(cat) }}
                     </option>
                 </select>
-                <select v-model="sortBy" title="列表排序方式" class="w-28 h-7 bg-zinc-800/80 border border-zinc-700/60 rounded-lg px-2 text-zinc-400 focus:outline-none focus:border-blue-500/80 truncate shrink-0">
-                    <option value="name">排序: 名称</option>
-                    <option value="time">排序: 最新</option>
+                <select v-model="sortBy" title="列表排序方式" class="w-40 h-7 bg-zinc-800/80 border border-zinc-700/60 rounded-lg px-2 text-zinc-400 focus:outline-none focus:border-blue-500/80 truncate shrink-0" @change="handleSortChange">
+                    <option value="importTime">排序: 导入最新</option>
+                    <option value="time">排序: 本地文件最新</option>
+                    <option value="name">排序: A-Z 正序</option>
+                    <option value="nameDesc">排序: A-Z 倒序</option>
+                    <option value="mtime">排序: 修改时间</option>
+                    <option value="ctime">排序: 创建时间</option>
+                    <option value="sizeDesc">排序: 大小倒序</option>
+                    <option value="sizeAsc">排序: 大小正序</option>
                     <option value="tokens">排序: Token</option>
                 </select>
             </div>
@@ -530,16 +537,24 @@ export default {
         const showAdvancedFilters = ref(false);
         // 漏斗高亮提示：有激活的筛选条件（非全部 或 非默认双语）时点亮
         const hasActiveFilters = computed(() =>
-            ctx.currentCategoryKey.value !== 'all' || ctx.tagLangMode.value !== 'both'
+            (ctx.currentCategoryKey?.value || 'all') !== 'all' || ctx.tagLangMode.value !== 'both'
         );
 
         // ✅ [世界书模式] 顶部高级功能区折叠面板（URL导入/目录/分组/筛选收进面板，与角色卡模式一致）
         const showWbAdvanced = ref(false);
 
+        // 🦾 排序切换后检查数据有效性：日期类排序键在当前库无法区分时提示原因（防误以为没反应）
+        const handleSortChange = () => {
+            setTimeout(() => {
+                try { ctx.notifySortDataStatus?.(ctx.sortBy.value); } catch (e) { /* 忽略 */ }
+            }, 0);
+        };
+
         return {
             showAdvancedFilters,
             hasActiveFilters,
             showWbAdvanced,
+            handleSortChange,
             viewOptions: ctx.viewOptions,
             sidebarEl: ctx.sidebarEl,
             sidebarStyle: ctx.sidebarStyle,

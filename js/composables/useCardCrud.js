@@ -28,6 +28,8 @@ export function useCardCrud({
     nativeAlert, showToast, appPrompt, safeData,
     // —— 配置中枢（必须先于本组合式函数定义，TDZ 约束） ——
     syncConfigToDisk, syncConfigToDiskDebounced,
+    // —— 卡片导入时间映射（首次入库时刻，持久化；「导入时间」排序数据源） ——
+    cardImportTimes,
     // —— 跨域回调（UI 域 / 分组域，注入而非搬移，斩断循环依赖） ——
     reset,                // 关闭编辑面板（删除当前打开卡片时）
     openFromLibrary,      // 打开库中卡片（切库后重绑）
@@ -305,6 +307,19 @@ export function useCardCrud({
                     // 保证新导入的卡在"最新"排序中正确排到最前（否则回退 create_date 可能排到旧卡后面）
                     _mtime: file.mtime || Date.now(),
                     _ctime: file.birthtime || 0, // 物理文件创建时间（mtime 缺失时排序回退）
+                    _size: file.size || 0, // 🦾 物理文件字节数（「大小正/倒序」排序数据源）
+                    // 🦾 导入时间：首次遇到该文件路径时记录并持久化（重启后保持），
+                    //    回退文件创建时间/当前时刻，保证「导入时间」排序永远有值且不随重启漂移
+                    _importTime: (() => {
+                        const impKey = String(file.path || '');
+                        if (!impKey) return Number(file.birthtime) || 0;
+                        let t = Number(cardImportTimes.value[impKey]) || 0;
+                        if (!t) {
+                            t = Number(file.birthtime) || Date.now();
+                            cardImportTimes.value[impKey] = t; // 由 App.vue 集中 watch 自动落盘
+                        }
+                        return t;
+                    })(),
                     subFolder: file.subFolder || '' // 相对库根的文件夹路径（'' = 根目录；物理分组用）
                 };
 

@@ -778,41 +778,63 @@
                     </section>
 
                     </template>
-                    <section v-if="presetEditorMode === 'scripts'" class="rounded-xl border border-zinc-800 bg-zinc-900/60 shadow-xl overflow-hidden">
-                        <div class="px-4 py-3 border-b border-zinc-800 flex items-center justify-between">
-                            <div><h3 class="text-xs font-bold text-violet-300">📜 脚本</h3><p class="text-[10px] text-zinc-500 mt-0.5">编辑当前预设附加的脚本</p></div>
+                    <section v-if="presetEditorMode === 'scripts'" class="rounded-xl border-[color:var(--border-color)] bg-[color:var(--bg-surface)] shadow-xl overflow-hidden">
+                        <div class="px-4 py-3 border-b border-[color:var(--border-color)] flex items-center justify-between">
+                            <div><h3 class="text-xs font-bold text-violet-400">📜 脚本</h3><p class="text-[10px] text-[color:var(--text-sub)] mt-0.5">编辑当前预设附加的脚本</p></div>
                             <button @click="addPresetScript" class="px-2.5 py-1 rounded bg-violet-600 hover:bg-violet-500 text-white text-[10px] font-bold">＋ 添加脚本</button>
                         </div>
                         <div v-if="presetScripts.length" class="p-3 space-y-3">
-                            <article v-for="(script, index) in presetScripts" :key="index" class="rounded-lg border border-zinc-800 bg-zinc-950/70 p-3 space-y-2">
-                                <div class="flex items-center gap-2"><input v-model="script.name" @input="syncPresetResources('scripts')" class="flex-1 bg-transparent border-b border-zinc-700 text-xs text-zinc-200 px-1 py-1 outline-none focus:border-violet-500" :placeholder="`脚本 ${index + 1} 名称`"><label class="text-[10px] text-zinc-500 whitespace-nowrap"><input type="checkbox" v-model="script.enabled" @change="syncPresetResources('scripts')" class="accent-violet-500"> 启用</label><button @click="removePresetScript(index)" class="text-red-400 text-xs">删除</button></div>
-                                <textarea v-model="script.content" @input="syncPresetResources('scripts')" class="w-full min-h-[180px] resize-y rounded-md bg-[#181818] border border-zinc-800 p-3 font-mono text-[11px] leading-relaxed text-zinc-300 outline-none focus:border-violet-500" placeholder="脚本内容"></textarea>
-                                <input v-if="script.info !== undefined" v-model="script.info" @input="syncPresetResources('scripts')" class="w-full bg-[#181818] border border-zinc-800 rounded-md px-2 py-1 text-[10px] text-zinc-400" placeholder="脚本说明">
+                            <article v-for="(script, index) in presetScripts" :key="index" class="rounded-lg border-[color:var(--border-color)] bg-[color:var(--bg-element)] p-3 space-y-2">
+                                <!-- 头部：折叠按钮 + 名称 + 标记 + 操作 -->
+                                <div class="flex items-center gap-2 flex-wrap">
+                                    <button @click="togglePresetScriptCollapse(index)" class="text-[color:var(--text-sub)] hover:text-[color:var(--text-main)] text-xs shrink-0 w-4 text-center" :title="presetScriptCollapsed[getScriptPreviewKey(script, index)] ? '展开脚本' : '折叠脚本'">{{ presetScriptCollapsed[getScriptPreviewKey(script, index)] ? '▸' : '▾' }}</button>
+                                    <input v-model="script.name" @input="syncPresetResources('scripts')" class="flex-1 min-w-[120px] bg-transparent border-b border-[color:var(--border-color)] text-xs text-[color:var(--text-main)] px-1 py-1 outline-none focus:border-violet-500" :placeholder="`脚本 ${index + 1} 名称`">
+                                    <span v-if="isRenderScript(script)" class="text-[9px] px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 whitespace-nowrap" title="脚本含 DOM 渲染逻辑，识别为渲染脚本，可预览渲染效果">✨ 渲染脚本</span>
+                                    <label class="text-[10px] text-[color:var(--text-sub)] whitespace-nowrap"><input type="checkbox" v-model="script.enabled" @change="syncPresetResources('scripts')" class="accent-violet-500"> 启用</label>
+                                    <button @click="togglePresetScriptPreview(index)" class="text-[10px] text-emerald-400 hover:text-emerald-300 whitespace-nowrap" :title="presetScriptPreviews[getScriptPreviewKey(script, index)]?.open ? '收起渲染预览' : '在沙箱 iframe 中预览脚本渲染效果'">✨ {{ presetScriptPreviews[getScriptPreviewKey(script, index)]?.open ? '收起预览' : '渲染预览' }}</button>
+                                    <button @click="removePresetScript(index)" class="text-red-400 text-xs">删除</button>
+                                </div>
+                                <!-- 主体：折叠时隐藏（代码 / 渲染预览 / 说明） -->
+                                <template v-if="!presetScriptCollapsed[getScriptPreviewKey(script, index)]">
+                                    <!-- ✨ 渲染脚本预览区（沙箱 iframe 隔离，脚本运行于无权限环境） -->
+                                    <div v-if="isRenderScript(script) && presetScriptPreviews[getScriptPreviewKey(script, index)]?.open" class="rounded-md border border-emerald-800/50 overflow-hidden bg-[color:var(--bg-surface)]">
+                                        <div v-if="presetScriptPreviews[getScriptPreviewKey(script, index)]?.url" class="relative">
+                                            <div class="px-2 py-1 bg-[color:var(--bg-element)] border-b border-[color:var(--border-color)] flex items-center justify-between">
+                                                <span class="text-[9px] text-emerald-400">✨ 渲染效果（沙箱隔离预览 · 依赖酒馆环境的 API 可能无法运行）</span>
+                                                <button @click="buildPresetScriptPreview(index)" class="text-[9px] text-[color:var(--text-sub)] hover:text-[color:var(--text-main)]">🔄 重新渲染</button>
+                                            </div>
+                                            <iframe :src="presetScriptPreviews[getScriptPreviewKey(script, index)]?.url" sandbox="allow-scripts" class="w-full h-[260px] bg-[#18181b] border-0" title="渲染脚本预览"></iframe>
+                                        </div>
+                                        <div v-else class="p-3 text-[10px] text-red-400">{{ presetScriptPreviews[getScriptPreviewKey(script, index)]?.error || '无法预览' }}</div>
+                                    </div>
+                                    <textarea v-model="script.content" @input="syncPresetResources('scripts')" class="w-full min-h-[180px] resize-y rounded-md bg-[color:var(--bg-element)] border border-[color:var(--border-color)] p-3 font-mono text-[11px] leading-relaxed text-[color:var(--text-main)] outline-none focus:border-violet-500" placeholder="脚本内容"></textarea>
+                                    <input v-if="script.info !== undefined" v-model="script.info" @input="syncPresetResources('scripts')" class="w-full bg-[color:var(--bg-element)] border border-[color:var(--border-color)] rounded-md px-2 py-1 text-[10px] text-[color:var(--text-sub)]" placeholder="脚本说明">
+                                </template>
                             </article>
                         </div>
-                        <div v-else class="p-10 text-center text-xs text-zinc-600">当前预设没有脚本，点击右上角添加。</div>
+                        <div v-else class="p-10 text-center text-xs text-[color:var(--text-sub)]">当前预设没有脚本，点击右上角添加。</div>
                     </section>
-                    <section v-if="presetEditorMode === 'regex'" class="rounded-xl border border-zinc-800 bg-zinc-900/60 shadow-xl overflow-hidden">
-                        <div class="px-4 py-3 border-b border-zinc-800 flex items-center justify-between"><div><h3 class="text-xs font-bold text-amber-300">⚡ 正则脚本</h3><p class="text-[10px] text-zinc-500 mt-0.5">编辑当前预设附加的正则脚本</p></div><button @click="addPresetRegex" class="px-2.5 py-1 rounded bg-amber-600 hover:bg-amber-500 text-white text-[10px] font-bold">＋ 添加正则</button></div>
+                    <section v-if="presetEditorMode === 'regex'" class="rounded-xl border-[color:var(--border-color)] bg-[color:var(--bg-surface)] shadow-xl overflow-hidden">
+                        <div class="px-4 py-3 border-b border-[color:var(--border-color)] flex items-center justify-between"><div><h3 class="text-xs font-bold text-amber-400">⚡ 正则脚本</h3><p class="text-[10px] text-[color:var(--text-sub)] mt-0.5">编辑当前预设附加的正则脚本</p></div><button @click="addPresetRegex" class="px-2.5 py-1 rounded bg-amber-600 hover:bg-amber-500 text-white text-[10px] font-bold">＋ 添加正则</button></div>
                         <div v-if="presetRegexScripts.length" class="p-3 space-y-3">
-                            <article v-for="(regex, index) in presetRegexScripts" :key="index" class="rounded-lg border border-zinc-800 bg-zinc-950/70 p-3 space-y-2">
-                                <div class="flex items-center gap-2"><input v-model="regex.scriptName" @input="syncPresetResources('regex')" class="flex-1 bg-transparent border-b border-zinc-700 text-xs text-zinc-200 px-1 py-1 outline-none focus:border-amber-500" :placeholder="`正则 ${index + 1} 名称`"><label class="text-[10px] text-zinc-500 whitespace-nowrap"><input type="checkbox" :checked="!regex.disabled" @change="regex.disabled = !$event.target.checked; syncPresetResources('regex')" class="accent-amber-500"> 启用</label><button @click="removePresetRegex(index)" class="text-red-400 text-xs">删除</button></div>
-                                <div class="grid grid-cols-1 md:grid-cols-2 gap-2"><label class="text-[10px] text-zinc-500">匹配表达式<textarea v-model="regex.findRegex" @input="syncPresetResources('regex')" class="mt-1 w-full min-h-[100px] resize-y rounded-md bg-[#181818] border border-zinc-800 p-2 font-mono text-[11px] text-amber-200 outline-none focus:border-amber-500"></textarea></label><label class="text-[10px] text-zinc-500">替换文本<textarea v-model="regex.replaceString" @input="syncPresetResources('regex')" class="mt-1 w-full min-h-[100px] resize-y rounded-md bg-[#181818] border border-zinc-800 p-2 font-mono text-[11px] text-emerald-200 outline-none focus:border-amber-500"></textarea></label></div>
-                                <div v-if="regex.trimStrings !== undefined" class="grid grid-cols-1 md:grid-cols-3 gap-2"><label class="text-[10px] text-zinc-500">去除字符串<textarea v-model="regex.trimStrings" @input="syncPresetResources('regex')" class="mt-1 w-full min-h-[60px] resize-y rounded-md bg-[#181818] border border-zinc-800 p-2 font-mono text-[10px] text-zinc-300 outline-none focus:border-amber-500"></textarea></label><label class="text-[10px] text-zinc-500">应用位置<textarea v-model="regex.placement" @input="syncPresetResources('regex')" class="mt-1 w-full min-h-[60px] resize-y rounded-md bg-[#181818] border border-zinc-800 p-2 font-mono text-[10px] text-zinc-300 outline-none focus:border-amber-500"></textarea></label><label class="text-[10px] text-zinc-500">深度范围<input v-model="regex.minDepth" @input="syncPresetResources('regex')" class="mt-1 w-full bg-[#181818] border border-zinc-800 rounded-md px-2 py-1 text-[10px] text-zinc-300"></label></div>
+                            <article v-for="(regex, index) in presetRegexScripts" :key="index" class="rounded-lg border-[color:var(--border-color)] bg-[color:var(--bg-element)] p-3 space-y-2">
+                                <div class="flex items-center gap-2"><input v-model="regex.scriptName" @input="syncPresetResources('regex')" class="flex-1 bg-transparent border-b border-[color:var(--border-color)] text-xs text-[color:var(--text-main)] px-1 py-1 outline-none focus:border-amber-500" :placeholder="`正则 ${index + 1} 名称`"><label class="text-[10px] text-[color:var(--text-sub)] whitespace-nowrap"><input type="checkbox" :checked="!regex.disabled" @change="regex.disabled = !$event.target.checked; syncPresetResources('regex')" class="accent-amber-500"> 启用</label><button @click="removePresetRegex(index)" class="text-red-400 text-xs">删除</button></div>
+                                <div class="grid grid-cols-1 md:grid-cols-2 gap-2"><label class="text-[10px] text-[color:var(--text-sub)]">匹配表达式<textarea v-model="regex.findRegex" @input="syncPresetResources('regex')" class="mt-1 w-full min-h-[100px] resize-y rounded-md bg-[color:var(--bg-element)] border border-[color:var(--border-color)] p-2 font-mono text-[11px] text-amber-400 outline-none focus:border-amber-500"></textarea></label><label class="text-[10px] text-[color:var(--text-sub)]">替换文本<textarea v-model="regex.replaceString" @input="syncPresetResources('regex')" class="mt-1 w-full min-h-[100px] resize-y rounded-md bg-[color:var(--bg-element)] border border-[color:var(--border-color)] p-2 font-mono text-[11px] text-emerald-400 outline-none focus:border-amber-500"></textarea></label></div>
+                                <div v-if="regex.trimStrings !== undefined" class="grid grid-cols-1 md:grid-cols-3 gap-2"><label class="text-[10px] text-[color:var(--text-sub)]">去除字符串<textarea v-model="regex.trimStrings" @input="syncPresetResources('regex')" class="mt-1 w-full min-h-[60px] resize-y rounded-md bg-[color:var(--bg-element)] border border-[color:var(--border-color)] p-2 font-mono text-[10px] text-[color:var(--text-main)] outline-none focus:border-amber-500"></textarea></label><label class="text-[10px] text-[color:var(--text-sub)]">应用位置<textarea v-model="regex.placement" @input="syncPresetResources('regex')" class="mt-1 w-full min-h-[60px] resize-y rounded-md bg-[color:var(--bg-element)] border border-[color:var(--border-color)] p-2 font-mono text-[10px] text-[color:var(--text-main)] outline-none focus:border-amber-500"></textarea></label><label class="text-[10px] text-[color:var(--text-sub)]">深度范围<input v-model="regex.minDepth" @input="syncPresetResources('regex')" class="mt-1 w-full bg-[color:var(--bg-element)] border border-[color:var(--border-color)] rounded-md px-2 py-1 text-[10px] text-[color:var(--text-main)]"></label></div>
                             </article>
                         </div>
-                        <div v-else class="p-10 text-center text-xs text-zinc-600">当前预设没有正则脚本，点击右上角添加。</div>
+                        <div v-else class="p-10 text-center text-xs text-[color:var(--text-sub)]">当前预设没有正则脚本，点击右上角添加。</div>
                     </section>
-                    <section v-if="presetEditorMode === 'json'" class="min-h-[460px] flex flex-col rounded-xl border border-zinc-800 bg-zinc-900/60 shadow-2xl shadow-black/20 overflow-hidden">
-                        <div class="px-4 py-3 border-b border-zinc-800 bg-zinc-900/80 flex items-center justify-between gap-2 shrink-0">
+                    <section v-if="presetEditorMode === 'json'" class="min-h-[460px] flex flex-col rounded-xl border-[color:var(--border-color)] bg-[color:var(--bg-surface)] shadow-2xl shadow-black/20 overflow-hidden">
+                        <div class="px-4 py-3 border-b border-[color:var(--border-color)] bg-[color:var(--bg-surface)] flex items-center justify-between gap-2 shrink-0">
                             <div>
-                                <h3 class="text-xs font-bold text-zinc-200">预设内容</h3>
-                                <p class="text-[10px] text-zinc-500 mt-0.5">直接编辑 JSON，支持酒馆不同版本的预设字段</p>
+                                <h3 class="text-xs font-bold text-[color:var(--text-main)]">预设内容</h3>
+                                <p class="text-[10px] text-[color:var(--text-sub)] mt-0.5">直接编辑 JSON，支持酒馆不同版本的预设字段</p>
                             </div>
-                            <span class="px-2 py-1 rounded-md text-[10px] font-mono text-zinc-500 bg-zinc-950 border border-zinc-800">JSON</span>
+                            <span class="px-2 py-1 rounded-md text-[10px] font-mono text-[color:var(--text-sub)] bg-[color:var(--bg-element)] border border-[color:var(--border-color)]">JSON</span>
                         </div>
-                        <div class="flex-1 p-3 bg-[#181818]">
-                            <textarea v-model="presetJsonText" @change="applyPresetJson" class="w-full h-full min-h-[400px] resize-none bg-[#1e1e1e] text-[#d4d4d4] p-4 rounded-lg border border-zinc-800 font-mono text-xs leading-relaxed focus:outline-none focus:border-sky-500/70 focus:ring-1 focus:ring-sky-500/30 transition" spellcheck="false"></textarea>
+                        <div class="flex-1 p-3 bg-[color:var(--bg-element)]">
+                            <textarea v-model="presetJsonText" @change="applyPresetJson" class="w-full h-full min-h-[400px] resize-none bg-[color:var(--bg-element)] text-[color:var(--text-main)] p-4 rounded-lg border border-[color:var(--border-color)] font-mono text-xs leading-relaxed focus:outline-none focus:border-sky-500/70 focus:ring-1 focus:ring-sky-500/30 transition" spellcheck="false"></textarea>
                         </div>
                     </section>
                 </div>
@@ -1133,7 +1155,7 @@ export default {
             batchSelectedTags.value = s;
         };
         const selectAllBatchTags = () => {
-            batchSelectedTags.value = new Set(ctx.globalAvailableTags.value || []);
+            batchSelectedTags.value = new Set(ctx.globalAvailableTags?.value || []);
         };
         const exitBatchDeleteTags = () => {
             isBatchDeleteTags.value = false;
@@ -1152,7 +1174,7 @@ export default {
         const currentEntry = ref(null);
         // 【修复】切换世界书时清空当前选中词条（防旧书词条残留，详情面板 v-model 误改旧书对象）
         watch(
-            () => (ctx.activeWorldbook ? ctx.activeWorldbook.value : null),
+            () => (ctx.activeWorldbook?.value || null),
             () => { currentEntry.value = null; }
         );
         const selectEntry = (entry) => {
@@ -1204,12 +1226,15 @@ export default {
             scripts: ['scripts', 'script', 'custom_scripts', 'customScripts'],
             regex: ['regex_scripts', 'regexScripts', 'regex', 'regexes']
         };
-        // 酒馆预设的资源并不统一放在顶层：酒馆助手脚本通常位于
-        // extensions["tavern_helper/scripts"]，正则也可能位于 SPreset.RegexBinding.regexes。
+        // 酒馆预设的资源并不统一放在顶层：酒馆助手脚本实际存于
+        // extensions.tavern_helper.scripts（嵌套对象），旧版误用路径式键名
+        // extensions["tavern_helper/scripts"] 永远匹配不到 → 预设脚本读不出来（v1.8.6 修复）。
+        // 正则也可能位于 SPreset.RegexBinding.regexes。
         const resourceSource = (data, type) => {
             const extensions = data?.extensions;
             const candidates = type === 'scripts'
                 ? [
+                    [extensions?.tavern_helper, 'scripts'], // 🔧 修复：嵌套对象，酒馆助手脚本真实位置
                     [extensions, 'tavern_helper/scripts'],
                     [extensions, 'tavern_helper\u002fscripts'],
                     [data, 'scripts'], [data, 'script'],
@@ -1252,10 +1277,74 @@ export default {
             presetJsonText.value = JSON.stringify(data, null, 4);
         };
         const addPresetScript = () => {
-            presetScripts.value.push({ name: `脚本 ${presetScripts.value.length + 1}`, content: '', enabled: true });
+            presetScripts.value.push({ name: `脚本 ${presetScripts.value.length + 1}`, content: '', enabled: true, type: 'script' });
             syncPresetResources('scripts');
         };
         const removePresetScript = index => { presetScripts.value.splice(index, 1); syncPresetResources('scripts'); };
+
+        // =========================================================
+        // ✨ 预设「渲染脚本」识别与预览（v1.8.6 新增）
+        //   酒馆助手（tavern_helper）脚本的 content 是向聊天 DOM 注入 UI 的 JS 代码
+        //   （悬浮窗/状态栏/面板等），读出来不应只是代码文本 —— 识别为「渲染脚本」
+        //   并在脚本工作区提供沙箱 iframe 预览渲染效果（所见即所得）。
+        // =========================================================
+        const isRenderScript = (script) => {
+            const c = String(script?.content || '');
+            if (!c) return false;
+            // 渲染特征：DOM 注入 / HTML 模板 / 外链加载
+            return /\x3C(?:\/?\s*(?:body|div|span|table|iframe|style|link)\b)|innerHTML|insertAdjacentHTML|createElement|document\.write|\.load\(\s*['"]|srcdoc/i.test(c);
+        };
+        // 每个脚本的预览状态（open 展开 / url 沙箱地址 / error 构建失败信息）
+        const presetScriptPreviews = ref({});
+        // 🔧 v1.8.6 脚本卡片折叠状态（独立 ref map，不写回预设数据，避免污染 JSON）
+        const presetScriptCollapsed = ref({});
+        const getScriptPreviewKey = (script, index) => script?.id || `idx_${index}`;
+        const togglePresetScriptCollapse = (index) => {
+            const script = presetScripts.value[index];
+            if (!script) return;
+            const key = getScriptPreviewKey(script, index);
+            presetScriptCollapsed.value[key] = !presetScriptCollapsed.value[key];
+        };
+        // 构建沙箱 iframe srcdoc：注入最小兼容环境（$ / jQuery / errorCatched 占位），执行脚本 content
+        const buildPresetScriptPreview = (index) => {
+            const script = presetScripts.value[index];
+            if (!script) return;
+            const key = getScriptPreviewKey(script, index);
+            const state = presetScriptPreviews.value[key] || (presetScriptPreviews.value[key] = { open: false, url: null, error: null });
+            try {
+                const content = String(script.content || '');
+                if (!content) { state.error = '脚本内容为空，无法预览。'; state.url = null; return; }
+                // 🔒 安全：data: URL + iframe sandbox（无 allow-same-origin），脚本运行于隔离环境，无法访问应用
+                // ⚠️ 所有 HTML 标签的尖括号用 \x3C 十六进制转义（\x3C → 左尖括号）：源码不含
+                //    script 与 style 标签序列，Vue SFC 解析器不会把 script 块内的 HTML 字符串
+                //    误当成标签 tokenize（否则报 Invalid end tag）；运行时 \x3C 还原为左尖括号，
+                //    HTML 输出完全正常。content 内 script 闭合标签替换为带反斜杠形式防提前终止。
+                const html = [
+                    '\x3C!DOCTYPE html>\x3Chtml>\x3Chead>\x3Cmeta charset="utf-8">',
+                    '\x3Cstyle>html,body{width:100%;height:100%;margin:0;background:#18181b;color:#e4e4e7;font-family:system-ui,sans-serif;overflow:auto}\x3C/style>',
+                    '\x3C/head>\x3Cbody>',
+                    '\x3Cscript>',
+                    "window.errorCatched = (fn) => function(...a){ try { return fn.apply(this, a); } catch (e) { try{console.error('脚本异常:', e);}catch(_){} } };",
+                    "window.$ = window.jQuery = (fn) => { const obj = { ready:(cb)=>{try{cb&&cb();}catch(e){}}, on:()=>obj, off:()=>obj, load:()=>obj, css:()=>obj, html:(v)=>v===undefined?null:obj, text:(v)=>v===undefined?'':obj, append:()=>obj, prepend:()=>obj, remove:()=>obj, show:()=>obj, hide:()=>obj, toggle:()=>obj, attr:()=>obj, addClass:()=>obj, removeClass:()=>obj, val:(v)=>v===undefined?'':obj, find:()=>[], each:(cb)=>{try{cb&&cb(0,obj);}catch(e){}} }; if (typeof fn === 'function') { try { fn(); } catch (e) { try{console.error(e);}catch(_){} } } return obj; };",
+                    "window.jQuery.ajax = () => ({ done: (cb)=>{try{cb&&cb({});}catch(e){}} , fail: (cb)=>{try{cb&&cb();}catch(e){}} });",
+                    '\x3C/script>\x3Cscript>' + content.replace(/<\/script>/gi, '<\\/script>') + '\x3C/script>',
+                    '\x3C/body>\x3C/html>'
+                ].join('\n');
+                state.url = 'data:text/html;charset=utf-8,' + encodeURIComponent(html);
+                state.error = null;
+            } catch (e) {
+                state.url = null;
+                state.error = '渲染预览构建失败: ' + e.message;
+            }
+        };
+        const togglePresetScriptPreview = (index) => {
+            const script = presetScripts.value[index];
+            if (!script) return;
+            const key = getScriptPreviewKey(script, index);
+            const state = presetScriptPreviews.value[key] || (presetScriptPreviews.value[key] = { open: false, url: null, error: null });
+            state.open = !state.open;
+            if (state.open) buildPresetScriptPreview(index);
+        };
         const addPresetRegex = () => {
             presetRegexScripts.value.push({ scriptName: `正则 ${presetRegexScripts.value.length + 1}`, findRegex: '', replaceString: '', disabled: false });
             syncPresetResources('regex');
@@ -1388,6 +1477,13 @@ export default {
             removePresetScript,
             addPresetRegex,
             removePresetRegex,
+            isRenderScript,
+            presetScriptPreviews,
+            presetScriptCollapsed,
+            getScriptPreviewKey,
+            togglePresetScriptPreview,
+            buildPresetScriptPreview,
+            togglePresetScriptCollapse,
             presetBasicParams,
             presetAdvancedParams,
             getPresetParam,

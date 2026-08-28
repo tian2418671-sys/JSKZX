@@ -120,6 +120,32 @@ textarea, input, select { transition: border-color 0.15s ease-in-out; }
 [data-theme="light"] .hover\:bg-zinc-800:hover { background-color: #e4e4e7; }
 [data-theme="light"] .hover\:bg-zinc-700:hover { background-color: #d4d4d8; }
 [data-theme="light"] .hover\:bg-zinc-700\/50:hover { background-color: rgba(212, 212, 216, 0.5); }
+/* 深色类带透明度变体：浅色下按同色系映射（避免半透明深色残留黑块） */
+[data-theme="light"] .bg-zinc-950\/30 { background-color: rgba(244, 244, 245, 0.3); }
+[data-theme="light"] .bg-zinc-950\/50 { background-color: rgba(244, 244, 245, 0.5); }
+[data-theme="light"] .bg-zinc-950\/70 { background-color: rgba(244, 244, 245, 0.7); }
+[data-theme="light"] .bg-zinc-950\/80 { background-color: rgba(244, 244, 245, 0.8); }
+[data-theme="light"] .bg-zinc-900\/40 { background-color: rgba(255, 255, 255, 0.4); }
+[data-theme="light"] .bg-zinc-900\/50 { background-color: rgba(255, 255, 255, 0.5); }
+[data-theme="light"] .bg-zinc-900\/60 { background-color: rgba(255, 255, 255, 0.6); }
+[data-theme="light"] .bg-zinc-900\/70 { background-color: rgba(255, 255, 255, 0.7); }
+[data-theme="light"] .bg-zinc-900\/80 { background-color: rgba(255, 255, 255, 0.8); }
+[data-theme="light"] .bg-zinc-900\/95 { background-color: rgba(255, 255, 255, 0.95); }
+[data-theme="light"] .bg-zinc-800\/40 { background-color: rgba(244, 244, 245, 0.4); }
+[data-theme="light"] .bg-zinc-800\/90 { background-color: rgba(244, 244, 245, 0.9); }
+[data-theme="light"] .bg-zinc-800\/95 { background-color: rgba(244, 244, 245, 0.95); }
+[data-theme="light"] .bg-zinc-700\/50 { background-color: rgba(228, 228, 231, 0.5); }
+[data-theme="light"] .bg-zinc-700\/80 { background-color: rgba(228, 228, 231, 0.8); }
+[data-theme="light"] .bg-gray-800\/95 { background-color: rgba(244, 244, 245, 0.95); }
+[data-theme="light"] .bg-gray-900\/80 { background-color: rgba(255, 255, 255, 0.8); }
+[data-theme="light"] .border-zinc-700\/40 { border-color: rgba(228, 228, 231, 0.4); }
+[data-theme="light"] .border-zinc-700\/60 { border-color: rgba(228, 228, 231, 0.6); }
+[data-theme="light"] .border-zinc-700\/70 { border-color: rgba(228, 228, 231, 0.7); }
+[data-theme="light"] .border-zinc-800\/80 { border-color: rgba(228, 228, 231, 0.8); }
+[data-theme="light"] .bg-slate-800 { background-color: #e4e4e7; }
+[data-theme="light"] .disabled\:bg-zinc-700:disabled { background-color: #d4d4d8; }
+[data-theme="light"] .disabled\:text-zinc-500:disabled { color: #a1a1aa; }
+[data-theme="light"] .disabled\:text-gray-500:disabled { color: #a1a1aa; }
 
 /* gray 系同层级适配 */
 [data-theme="light"] .bg-gray-50 { background-color: #fafafa; }
@@ -190,11 +216,25 @@ textarea, input, select { transition: border-color 0.15s ease-in-out; }
 [data-theme="light"] .regex-input-find { color: #b45309 !important; }
 [data-theme="light"] .regex-input-replace { color: #047857 !important; }
 [data-theme="light"] .hover\:text-blue-300:hover { color: #2563eb; }
+[data-theme="light"] .hover\:text-blue-400:hover { color: #2563eb; }
 [data-theme="light"] .hover\:text-amber-400:hover { color: #d97706; }
 [data-theme="light"] .hover\:text-red-400:hover { color: #dc2626; }
+[data-theme="light"] .hover\:text-red-300:hover { color: #dc2626; }
 [data-theme="light"] .hover\:text-indigo-400:hover { color: #4f46e5; }
 [data-theme="light"] .hover\:text-purple-300:hover { color: #9333ea; }
+[data-theme="light"] .hover\:text-emerald-300:hover { color: #047857; }
+[data-theme="light"] .hover\:text-emerald-400:hover { color: #059669; }
+[data-theme="light"] .hover\:text-sky-400:hover { color: #0284c7; }
 [data-theme="light"] .group:hover .group-hover\:text-blue-400 { color: #2563eb; }
+[data-theme="light"] .group:hover .group-hover\:text-red-400 { color: #dc2626; }
+/* 浅色强调文字 -200/-300/-400 级在浅色底上加深（保持语义色相） */
+[data-theme="light"] .text-amber-300 { color: #b45309; }
+[data-theme="light"] .text-emerald-300 { color: #047857; }
+[data-theme="light"] .text-indigo-300 { color: #4338ca; }
+[data-theme="light"] .text-sky-300 { color: #0369a1; }
+[data-theme="light"] .text-sky-400 { color: #0284c7; }
+[data-theme="light"] .text-rose-400 { color: #e11d48; }
+[data-theme="light"] .text-rose-400\/50 { color: rgba(225, 29, 72, 0.55); }
 [data-theme="light"] .bg-amber-500\/10 { background-color: rgba(245, 158, 11, 0.14); }
 [data-theme="light"] .bg-indigo-500\/10 { background-color: rgba(99, 102, 241, 0.12); }
 [data-theme="light"] .bg-red-500\/10 { background-color: rgba(239, 68, 68, 0.1); }

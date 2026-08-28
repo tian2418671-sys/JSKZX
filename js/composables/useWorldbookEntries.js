@@ -110,10 +110,22 @@ export function useWorldbookEntries({ activeWorldbook, addLog, confirmDialog, na
         else if (st === 'selective') list = list.filter(e => !!e.selective);
 
         // 排序（仅影响展示顺序，不改变底层数组顺序；moveEntry 才是真实调序）
+        // 🦾 排序增强：名称排序用与角色卡一致的 Intl.Collator（中文拼音 + 数字自然排序），
+        //    再叠加「触发词 → uid → index」稳定链，同名条目顺序也完全确定（不随渲染抖动）
         const sort = entrySortBy.value;
         if (sort === 'orderAsc')       list = [...list].sort((a, b) => (a.order ?? 100) - (b.order ?? 100));
         else if (sort === 'orderDesc') list = [...list].sort((a, b) => (b.order ?? 100) - (a.order ?? 100));
-        else if (sort === 'name')      list = [...list].sort((a, b) => String(a.comment || a.key?.[0] || '').localeCompare(String(b.comment || b.key?.[0] || ''), 'zh'));
+        else if (sort === 'name')      list = [...list].sort((a, b) => {
+            const coll = (() => { try { return new Intl.Collator('zh-Hans-CN', { numeric: true }); } catch (e) { return null; } })();
+            const na = String(a.comment || a.key?.[0] || '');
+            const nb = String(b.comment || b.key?.[0] || '');
+            let r = 0;
+            if (coll) r = coll.compare(na, nb);
+            else r = na.localeCompare(nb, 'zh');
+            return r
+                || String(a.key?.[0] ?? a.key ?? '').localeCompare(String(b.key?.[0] ?? b.key ?? ''))
+                || String(a.uid ?? a.index ?? 0).localeCompare(String(b.uid ?? b.index ?? 0));
+        });
         else if (sort === 'contentLen') list = [...list].sort((a, b) => (b.content?.length || 0) - (a.content?.length || 0));
 
         return list;
