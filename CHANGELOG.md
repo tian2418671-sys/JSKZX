@@ -15,7 +15,13 @@
 - 入口：`AITagModal.vue` 向量引擎区底部「📝 管理规则表」（系统预设已内置，可自定义）
 - 持久化：`autoTagRules` / `customKeywords` 落盘 `app_config.json`（useConfigPersistence payload 增加）
 - 消费：`useAITools`（AI 打标三层漏斗第一层）/ `useCardCrud`（导入自动分类）由 App.vue 注入编译结果
-
+### 🧠 小型本地向量引擎（全新 · 三层漏斗第二层：免费离线语义匹配）
+- 模型：`Xenova/paraphrase-multilingual-MiniLM-L12-v2`（多语言语义向量，支持中文，量化版约 113MB，完全本地离线推理）
+- 定位：AI 打标三层漏斗 **① 规则 → ② 本地向量语义匹配 → ③ LLM API**，规则未命中但语义相似的卡片由向量层免费打标，**不消耗 Token**
+- 推理架构：`main/vectorManager.js` 调度 `main/vectorWorker.js`（worker_threads）执行 ONNX 推理（onnxruntime-node），主进程零阻塞
+- **标签向量索引持久化**：`vector_index_cache.json`（模型版本 + 标签池 sha256 双校验），重启不重算；批量匹配 500 卡/块 + 32 条/批推理防序列化瓶颈
+- **三源下载自动切换**：hf-mirror 国内镜像 → HuggingFace 官方 → GitHub 仓库分片兜底（onnx 113MB 切 8 片 + gh-proxy/ghfast 代理加速），注入浏览器 UA 绕过 hf-mirror 连接重置，断点续传 + 超时保护
+- UI（`AITagModal.vue`）：启用开关、模型状态（就绪/缓存大小）、下载进度（多源标识）、相似度阈值滑条（默认 0.65）、每卡 TopK（默认 3）、一键删除缓存；向量阶段进度合并进打标进度条
 ### 🧬 智能查重全面升级（同名 + 内容级 + 预设）
 - `useDedupe.js` 重构扩展：同名查重按名称聚类 + 批量 `getFileStats`（空安全保护）+ 一键清理移回收站（失败回滚提示）
 - `ContentDedupeModal.vue`（新组件）：**内容级版本查重** —— 跨名称识别改名/复制的相似内容（内容指纹，与名称无关）

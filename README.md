@@ -86,7 +86,7 @@
 | ⚙️ 正则脚本 | 查看 / 在线编辑、正则作用域可读化展示 |
 | � 状态栏预览 | **所见即所得调试**：AI 输出的 `<status>` 文本块应用卡内渲染型正则脚本实时预览 HTML 效果、一键注入内置状态栏模板、脚本勾选隔离、渲染/源码双视图（DOMPurify 安全清洗）；内置 **15 套渲染模板** + **11 套世界书指令模板（三合一：初始值+显示格式+更新规则）**，模板库可折叠收起 |
 | �💬 聊天测卡 | OpenAI 兼容 / Anthropic 双协议、渲染/代码双模式、API Key 可配置、系统提示词预设 |
-| 🤖 AI 智能打标 | 候选标签池 + 自由提取开关、自定义提示词、**破限（Jailbreak）机制**、429 退避重试、批量打标限流 |
+| 🤖 AI 智能打标 | 候选标签池 + 自由提取开关、自定义提示词、**破限（Jailbreak）机制**、429 退避重试、批量打标限流；**三层漏斗**：①可配置规则 → ②**小型本地向量引擎**（免费离线语义匹配，MiniLM 多语言模型、余弦相似度、标签索引持久化、三源下载自动切换）→ ③LLM API（仅剩余卡片消耗额度） |
 | ✨ AI 工具 | 一键汉化、格式升维（W++/JSON → 高密度 Markdown 降 Token） |
 | 🏷️ 标签系统 | 单卡/批量标签、53 个中英预设、全局标签池、快捷添加、**全部操作物理落盘**（重启不丢） |
 | 📁 分组系统 | **物理文件夹分组**（建文件夹 = 建分组、移动卡片 = 物理移动文件）、预设 + 自定义、中英双语、批量移分组、空分组自动清理 |
@@ -116,6 +116,7 @@
 | 打包 | [electron-builder](https://www.electron.build/) `26.x`（NSIS 安装包 + zip 绿色版） |
 | 自动更新 | [electron-updater](https://github.com/electron-userland/electron-builder/tree/master/packages/electron-updater) `6.x`（OTA） |
 | 图像处理 | [sharp](https://sharp.pixelplumbing.com/)（换卡图转 PNG） |
+| 本地向量引擎 | [@xenova/transformers](https://github.com/xenova/transformers.js) `2.x` + [onnxruntime-node](https://github.com/microsoft/onnxruntime)（Worker 线程 ONNX 推理） |
 | 安全 | [DOMPurify](https://github.com/cure53/DOMPurify)（渲染层 XSS 清洗） |
 
 ---
