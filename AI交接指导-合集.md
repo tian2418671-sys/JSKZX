@@ -21,7 +21,7 @@
 
 > 本文件是**给下一个 AI 接手时阅读的总纲**：把所有历史会话、当前状态、架构、关键坑、工作流浓缩在此。
 > 下一任 AI 只需读完本文件 + 必要时查阅 `README.md` / `RELEASE_NOTES.md` / `CHANGELOG.md` / 仓库记忆 `electron-notes.md`，即可无缝续写。
-> 最后更新：2026-08-23
+> 最后更新：2026-08-29
 
 ---
 
@@ -32,7 +32,7 @@
 | 项目 | SillyTavern（酒馆）角色卡本地管理桌面工具 |
 | 技术栈 | Electron 43.x + Vue 3.5 (Composition API + SFC) + Vite 8 + Tailwind 3 + ECharts 6 + electron-builder 26 + electron-updater + sharp |
 | 仓库 | `https://github.com/tian2418671-sys/JSKZX.git`（远端 `origin`） |
-| 当前版本 | **v2.0.0**（已发布）；本地开发分支领先 origin 若干 commit（含向量下载+打标崩溃修复），**待用户指令推送** |
+| 当前版本 | **v2.1.0**（本地开发版，已推送）；最新发布 v2.0.0；含向量引擎 + AI 打标崩溃修复 + 启动 TDZ 修复 |
 | 当前分支 | 本地 `master`；远端还有 `trae/agent-Fxvvsf`（已合入 master，可删） |
 | 构建产物 | `dist/sillytavern-card-manager-<版本>.exe`（NSIS 安装版）+ `latest.yml` + `.blockmap` + zip 绿色版 |
 | 用户习惯 | 「一条龙服务」= 升版本号 → 更新文档 → 打包 → 推送 → 发 GitHub Release（含 latest.yml 保 OTA） |
@@ -45,18 +45,18 @@
 
 ### 2.1 Git 状态
 ```
-本地 master:  df3b78b (HEAD)  领先 origin 2 个提交
-  ├─ 332c437  fix: 世界书库条目显示触发词被当作名字——列表与导入弹窗改为名字主显示、触发词副显示
-  └─ df3b78b  fix: 世界书库IDE名字输入框标签改为「名称 / 备注 (Comment)」，与角色卡内嵌一致
-origin/master: 573176d = v1.8.9 发布提交
-远端分支:      origin/trae/agent-Fxvvsf（内容已合入 master，可删除）
+本地 master:  3918724 (HEAD)  与 origin/master 同步（领先 0，已推送）
+  ├─ 3918724  fix: 启动TDZ崩溃(watch移至useAITools解构后)+配置原子写tmp清理+安装@xenova/transformers向量依赖
+  └─ 55c18aa  docs: 交接文档三合一+旧文档归档docs/history+清理多余文件(pnpm-lock/release_notes_164/日志)
+origin/master: 3918724 = 最新（已推送）
+远端分支:      origin/trae/agent-Fxvvsf（已合入 master，可删）；origin/perf/fix-1000-card-freeze（安卓版，另一项目，勿动）
 工作区:        干净（无未提交改动）
 ```
 
-### 2.2 待办（用户最后指令是「不打包等待命令」）
-- ⏸️ **未推送** 2 个 commit（`332c437` / `df3b78b`）——用户确认后可 `git push`
-- ⏸️ **未打包 / 未发 Release** —— 用户说「需要时告诉我」，下一版升 **1.8.10**
+### 2.2 待办（用户最后指令：不打包 exe/zip、不发 Release、保持本地）
+- ⏸️ **未打包 / 未发 Release** —— 用户 08-29 明确「只构建开发版」，如需发布再升版本号
 - ⏸️ 远端多余分支 `trae/agent-Fxvvsf` 待用户确认后删除
+- 🟡 `dist/win-unpacked/` 空目录被 360 锁定（重启后 `Remove-Item dist\win-unpacked -Recurse -Force` 可删）
 
 ### 2.3 最近一次「一条龙」流程回顾（v1.8.9，供复制）
 拉取合入远端新分支 → bump 1.8.8→1.8.9 → RELEASE_NOTES/README 同步 → `npm run build`（⚠️ 需先杀进程防 EBUSY，且 `build:web` 的 rmSync 曾未真正清空 web/ 需强删）→ asar 校验 → 冒烟 → commit+push → `gh release create v1.8.9` 上传 exe+latest.yml+blockmap+zip → 验证 OTA 链路 HTTP 200。
@@ -72,15 +72,15 @@ main.js            Electron 主进程（CJS）：app:// 自定义协议、全部
                    世界书扫描、全盘打捞真伪鉴定、OTA(electron-updater)
 preload.js         contextBridge 暴露 window.electronAPI（~30+ API）
 js/entry.js        渲染进程入口（createApp(App) + errorHandler）——注意不是 js/main.js（已改名避免混淆）
-js/components/     30 个 SFC 组件（App.vue 根 + 21 子组件 + 弹窗）
-js/composables/    17 个组合式函数（业务逻辑主体，App.vue setup 尾部调用注入）
+js/components/     31 个 SFC 组件（App.vue 根 + 子组件 + 弹窗）
+js/composables/    19 个组合式函数（业务逻辑主体，App.vue setup 尾部调用注入）
 js/utils/          cardLoader.js（卡解析/规范化）、pngParser.js（PNG 块解析）、tokenEstimate.js
 css/               tailwind.css（源）/ style.css（自定义）
 web/               vite build 产物（生产加载，gitignore）
-test/              46 个单测（node:test，`npm test`）
+test/              6 个测试文件 / 47 个单测（node:test，`npm test`）
 ```
 
-### 3.2 Composables 职责速查（17 个）
+### 3.2 Composables 职责速查（19 个）
 | 文件 | 职责 |
 |---|---|
 | `useCardCrud.js` | 卡片 CRUD 域（导入/删除/持久化/自动分类打标/导出重命名），v1.8.8 迁出（-460 行） |
@@ -89,7 +89,7 @@ test/              46 个单测（node:test，`npm test`）
 | `useWorldbooks.js` | 世界书库与分组 |
 | `useWorldbookEntries.js` | 世界书词条 IDE 编辑 |
 | `useWorldbookExtras.js` | 世界书扩展（提取为世界书/JSONL 导入等） |
-| `useAITools.js` | AI 打标/翻译/格式升维 |
+| `useAITools.js` | AI 打标（三层漏斗：规则→本地向量→LLM）/ 翻译 / 格式升维 |
 | `useChat.js` | 聊天测卡 |
 | `useGraph.js` | 关系图谱（v4：头像限流/连线预算/位置种子/构建缓存） |
 | `useDedupe.js` | 查重与差异比对 |
@@ -100,6 +100,8 @@ test/              46 个单测（node:test，`npm test`）
 | `useGlobalEntrySearch.js` | 全库词条搜索 |
 | `useSearch.js` | 搜索过滤 |
 | `useTags.js` | 标签系统 |
+| `usePresets.js` | 预设管理（v2.0 新增：多预设导入/管理/切换） |
+| `useStatusbarPreview.js` | 状态栏模板渲染/预览（v1.8.9 新增） |
 
 ### 3.3 组件依赖关系
 - `App.vue` 是唯一根组件，setup 里集中所有状态/方法 → `provide('appCtx', ctx)` → 子组件 `inject('appCtx')` 解构使用
@@ -460,7 +462,7 @@ const flushDeferredAutoTagSaves = async () => {
 
 ## 模块三：AI 智能打标引擎（组合式函数）
 
-来源：`js/composables/useAITools.js` 全文（L1-468）
+来源：`js/composables/useAITools.js` 全文（L1-586，含三层漏斗 Map 索引 + 进度条 + 本地向量引擎）
 
 ```js
 /**
@@ -469,7 +471,8 @@ const flushDeferredAutoTagSaves = async () => {
  * 一键汉化、提示词智能重构（格式升维）。共享状态与工具（selectedIds/library/cardData/API 配置等）
  * 保留在 App.vue 并注入；行为保持不变。
  */
-import { ref, watch } from 'vue';
+import { ref, watch, onMounted, onUnmounted } from 'vue';
+import { autoTagRules } from '../utils/cardLoader.js';
 
 export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey, apiType, resolveApiModel, extractReplyContent, persistCardUpdate, refreshCardData, nativeAlert, confirmDialog, showToast, systemPromptPresets }) {
     // ================= [ AI 智能批量打标系统 ] =================
@@ -640,25 +643,119 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
             return;
         }
 
-        // ⚠️ 前置校验：关闭「允许 AI 自由提取」时必须先提供候选标签池
-        if (!enableAIExtraction.value && aiCandidateTags.value.length === 0) {
-            nativeAlert('错误：已关闭AI自由提取，但未提供候选标签池！\n请先在上方点击添加候选标签，或开启「允许 AI 自由提取标签」。', 'warning');
-            return;
-        }
-
         isAITagging.value = true;
-        let successCount = 0;
-        let failCount = 0;
+        // 分层统计（修正 3.3：严格区分规则命中/向量命中/LLM/无匹配/失败）
+        const stats = { rule: 0, vector: 0, llm: 0, empty: 0, fail: 0 };
         const failReasons = []; // 收集失败明细（卡片名 + 原因）
 
-        for (let i = 0; i < targetIds.length; i++) {
-            const currentId = targetIds[i];
-            const card = library.value.find(c => c.id === currentId);
-            if (!card) continue;
+        // 统一落盘辅助：双层级写标签（内存显示层 customTags + 酒馆 PNG 元数据层 data.tags）+ 持久化
+        const applyAutoTags = async (card, tags) => {
+            if (!Array.isArray(card.customTags)) card.customTags = [];
+            const dataLayer = card.data?.data || card.data || {};
+            if (!Array.isArray(dataLayer.tags)) dataLayer.tags = [];
+            let addedAny = false;
+            for (const tag of tags) {
+                const cleanTag = String(tag).trim();
+                if (!cleanTag) continue;
+                if (!card.customTags.includes(cleanTag)) { card.customTags.push(cleanTag); addedAny = true; }
+                if (!dataLayer.tags.includes(cleanTag)) { dataLayer.tags.push(cleanTag); addedAny = true; }
+            }
+            if (addedAny) await persistCardUpdate(card, { tags: card.customTags, category: card.category });
+        };
 
+        // ============ 第一层：规则匹配（autoTagRules 正则，零成本） ============
+        const rulePassedIds = [];
+        // 🚀 建 O(1) 卡片索引：避免 targetIds 内每张卡都 O(n) find（千卡库 → 千万级比较）
+        const cardIndex = new Map();
+        for (const c of library.value) if (c && c.id) cardIndex.set(c.id, c);
+        for (let i = 0; i < targetIds.length; i++) {
+            const id = targetIds[i];
+            const card = cardIndex.get(id);
+            if (!card) continue;
+            const d = card.data?.data || card.data || {};
+            const text = [d.description, d.personality, d.scenario, d.first_mes].filter(Boolean).join('\n');
+            const matched = [];
+            for (const [tag, regex] of Object.entries(autoTagRules)) {
+                if (regex.test(text)) matched.push(tag);
+            }
+            if (matched.length >= 1) { // 阈值 ≥1（原 ≥3 在 5 条规则下几乎无命中）
+                await applyAutoTags(card, matched);
+                stats.rule++;
+            } else {
+                rulePassedIds.push(id);
+            }
+            // 🚀 实时进度：每张卡推进一次 current，进度条不再“卡 0”
             aiTaggingProgress.value.current = i + 1;
             aiTaggingProgress.value.total = targetIds.length;
-            aiTaggingProgress.value.status = `正在分析 (${i + 1}/${targetIds.length}): ${card.name || '未知角色'}`;
+            aiTaggingProgress.value.status = `① 规则匹配中 (${i + 1}/${targetIds.length})...`;
+            // 每 64 张让出主线程一拍，避免长同步循环阻塞 UI / 诱发渲染层崩溃
+            if ((i & 63) === 63) await new Promise(r => setTimeout(r, 0));
+        }
+        aiTaggingProgress.value = {
+            current: targetIds.length,
+            total: targetIds.length,
+            status: `① 规则匹配完成: 命中 ${stats.rule}，剩余 ${rulePassedIds.length} 张待处理`
+        };
+
+        // ============ 第二层：本地向量匹配（免费离线，不消耗 Token） ============
+        let llmTargetIds = [...rulePassedIds];
+        if (useLocalVector.value && rulePassedIds.length > 0 && vectorStatus.value.ready && aiCandidateTags.value.length > 0) {
+            // 🚀 进度条联动：记录基准（规则命中数）并激活向量阶段进度合并
+            vectorMatchBase.value = targetIds.length - rulePassedIds.length;
+            vectorMatchActive.value = true;
+            aiTaggingProgress.value.current = vectorMatchBase.value;
+            aiTaggingProgress.value.status = `② 向量匹配中 (0/${rulePassedIds.length})...`;
+            try {
+                const payloads = rulePassedIds.map(id => {
+                    const card = cardIndex.get(id);
+                    if (!card) return null;
+                    const d = card.data?.data || card.data || {};
+                    const text = [d.description, d.personality, d.scenario, d.first_mes].filter(Boolean).join('\n').substring(0, 800);
+                    return { id, name: card.name, text };
+                }).filter(Boolean);
+                const resp = await window.electronAPI.vectorEngine.batchMatch(
+                    payloads, aiCandidateTags.value, vectorTopK.value, vectorThreshold.value
+                );
+                vectorMatchActive.value = false; // 匹配完成，停止合并
+                llmTargetIds = [];
+                if (resp && resp.success && Array.isArray(resp.results)) {
+                    for (const vr of resp.results) {
+                        const card = cardIndex.get(vr.id);
+                        if (!card) continue;
+                        if (vr.tags && vr.tags.length > 0) {
+                            await applyAutoTags(card, vr.tags);
+                            stats.vector++;
+                        } else {
+                            llmTargetIds.push(vr.id); // ← 关键修正：未命中收集到第三层，绝不静默丢弃
+                        }
+                    }
+                } else {
+                    llmTargetIds = [...rulePassedIds]; // 引擎异常 → 全部降级 LLM
+                }
+            } catch (e) {
+                vectorMatchActive.value = false; // 异常也停止合并
+                console.warn('向量匹配失败，全部降级到 LLM:', e);
+                llmTargetIds = [...rulePassedIds];
+            }
+            aiTaggingProgress.value.status = `② 向量匹配完成: 命中 ${stats.vector}，剩余 ${llmTargetIds.length} 张交 LLM`;
+        }
+
+        // ============ 第三层：LLM 兜底（保留原有完整逻辑：重试/退避/Prompt/解析/落盘） ============
+        if (llmTargetIds.length > 0) {
+            // ⚠️ 前置校验（仅 LLM 层需要 API 配置）
+            if (!apiEndpoint.value || !apiEndpoint.value.trim()) {
+                nativeAlert(`规则命中 ${stats.rule} 张，向量命中 ${stats.vector} 张，剩余 ${llmTargetIds.length} 张需要调用 AI 但未配置 API！`, 'warning');
+            } else if (!enableAIExtraction.value && aiCandidateTags.value.length === 0) {
+                nativeAlert('错误：已关闭AI自由提取，但未提供候选标签池！\n请先在上方点击添加候选标签，或开启「允许 AI 自由提取标签」。', 'warning');
+            } else {
+        for (let i = 0; i < llmTargetIds.length; i++) {
+            const currentId = llmTargetIds[i];
+            const card = cardIndex.get(currentId);
+            if (!card) continue;
+
+            aiTaggingProgress.value.current = targetIds.length - llmTargetIds.length + i + 1;
+            aiTaggingProgress.value.total = targetIds.length;
+            aiTaggingProgress.value.status = `③ LLM 兜底 (${i + 1}/${llmTargetIds.length}): ${card.name || '未知角色'}`;
 
             try {
                 // 3. 深度提取卡片设定（防爆 Token 截断）
@@ -705,7 +802,7 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
                     ],
                     temperature: 0.2 // 偏低温度保证 JSON 格式稳定性
                 };
-                const authKey = (apiKey.value && apiKey.value.trim()) ? apiKey.value : '';
+                const authKey = (apiKey.value && apiKey.value.trim()) ? apiKey.value : 'test-key';
                 // 429 限流 / 网络抖动时自动退避重试，避免批量打标大面积失败
                 const result = await callAIWithRetry(payload, authKey);
 
@@ -724,54 +821,42 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
                 }
 
                 if (Array.isArray(newTags) && newTags.length > 0) {
-                    // 防错初始化层级（兼容 V2/V3 结构，不强制嵌套 data.data）
-                    if (!Array.isArray(card.customTags)) card.customTags = [];
-                    const dataLayer = card.data?.data || card.data || {};
-                    if (!Array.isArray(dataLayer.tags)) dataLayer.tags = [];
-
-                    let addedAny = false;
-                    newTags.forEach(tag => {
-                        const cleanTag = String(tag).trim();
-                        if (!cleanTag) return;
-                        // 内存显示层（library 深度响应式，push 即触发界面刷新）
-                        if (!card.customTags.includes(cleanTag)) { card.customTags.push(cleanTag); addedAny = true; }
-                        // 酒馆 PNG 元数据层 data.tags
-                        if (!dataLayer.tags.includes(cleanTag)) { dataLayer.tags.push(cleanTag); addedAny = true; }
-                    });
-
-                    // 7. 统一持久化中枢：写覆盖层 + 物理覆写本地 PNG 文件（剥离 Proxy 转纯对象）
-                    if (addedAny) {
-                        await persistCardUpdate(card, { tags: card.customTags, category: card.category });
-                    }
-                    successCount++;
+                    await applyAutoTags(card, newTags);
+                    stats.llm++;
+                } else {
+                    stats.empty++; // 修正 3.3：模型返回空 → 归入"无匹配"，不是成功
                 }
             } catch (err) {
                 console.error(`❌ 卡片 [${card.name}] 打标失败:`, err);
-                failCount++;
+                stats.fail++;
                 failReasons.push(`${card.name || '未知角色'}: ${(err && err.message) ? err.message : String(err)}`);
             }
 
             // 请求节流：卡片之间留出间隔，配合重试退避，防止触发上游 429 限流（最后一张无需再等）
-            if (i < targetIds.length - 1) await sleep(AI_TAG_DELAY_MS);
+            if (i < llmTargetIds.length - 1) await sleep(AI_TAG_DELAY_MS);
+            }
+            }
         }
 
         // 8. 扫尾工作
         isAITagging.value = false;
         aiTaggingProgress.value.status = '✅ 全部处理完成！';
 
-        // 组装结果提示：失败时逐条展示具体原因（最多 6 条，超长截断防刷屏）
-        let resultMsg = `🎉 批量处理完成！成功更新: ${successCount} 张，失败: ${failCount} 张`;
-        if (failReasons.length > 0) {
+        // 组装结果提示：分层展示 + 失败明细（最多 6 条，超长截断防刷屏）
+        let resultMsg = `🎉 三层漏斗完成！\n① 规则命中: ${stats.rule} | ② 向量命中: ${stats.vector} | ③ LLM: ${stats.llm}`;
+        if (stats.empty > 0) resultMsg += `\n⚠️ 无匹配标签: ${stats.empty} 张`;
+        if (stats.fail > 0) {
+            resultMsg += `\n❌ 失败: ${stats.fail} 张`;
             const shown = failReasons.slice(0, 6);
-            resultMsg += '\n\n❌ 失败原因：\n' + shown.map(r => '· ' + r).join('\n');
+            resultMsg += '\n\n失败原因：\n' + shown.map(r => '· ' + r).join('\n');
             if (failReasons.length > 6) resultMsg += `\n... 等共 ${failReasons.length} 条`;
         }
-        nativeAlert(resultMsg, successCount > 0 ? 'info' : 'warning');
+        nativeAlert(resultMsg, stats.fail > 0 ? 'warning' : 'info');
 
         // 延迟一点关闭弹窗，让用户看到最后的状态
         setTimeout(() => {
             showAITagModal.value = false;
-        }, 1500);
+        }, 2000);
     };
 
     // ================= [ 🌐 AI 一键汉化功能 ] =================
@@ -817,7 +902,7 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
                 ],
                 temperature: 0.3 // 偏低温度保证翻译稳定
             };
-            const authKey = (apiKey.value && apiKey.value.trim()) ? apiKey.value : '';
+            const authKey = (apiKey.value && apiKey.value.trim()) ? apiKey.value : 'test-key';
             const result = await window.electronAPI.sendChatMessage(apiEndpoint.value, payload, authKey, apiType.value);
             if (!result || !result.success) throw new Error((result && result.error) || 'API 请求失败');
             return extractReplyContent(result).trim();
@@ -897,7 +982,7 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
                 ],
                 temperature: 0.3
             };
-            const authKey = (apiKey.value && apiKey.value.trim()) ? apiKey.value : '';
+            const authKey = (apiKey.value && apiKey.value.trim()) ? apiKey.value : 'test-key';
             const result = await window.electronAPI.sendChatMessage(apiEndpoint.value, payload, authKey, apiType.value);
             if (!result || !result.success) throw new Error((result && result.error) || 'API 请求失败');
 
@@ -917,6 +1002,101 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
         }
     };
 
+    // ============= 🧠 本地向量引擎（三层漏斗第二层：免费离线语义匹配） =============
+    const useLocalVector = ref(false);          // UI 开关
+    const vectorThreshold = ref(0.65);          // 相似度阈值（建议 0.55-0.70）
+    const vectorTopK = ref(3);                  // 每卡最多匹配标签数
+    const vectorStatus = ref({ ready: false, cacheExists: false, cacheSizeMB: 0, cachePath: '' });
+    const vectorDownloading = ref(false);       // 下载中
+    const vectorDownloadProgress = ref({ status: '', file: '', progress: 0 });
+    const vectorDownloadSource = ref({ source: '', attempt: 0, total: 0, label: '' });
+    const vectorBatchProgress = ref({ current: 0, total: 0 });
+    // 🚀 打标进度条联动：向量匹配阶段把 batchProgress 合并进 aiTaggingProgress，
+    //    避免“② 向量匹配中”时进度条卡住不动。
+    const vectorMatchBase = ref(0);   // 向量匹配开始前已完成的卡数（规则命中数）
+    const vectorMatchActive = ref(false); // 是否处于向量匹配阶段
+
+    const sourceLabel = (url) => {
+        if (!url) return '';
+        if (url.includes('hf-mirror.com')) return '国内镜像 hf-mirror.com';
+        if (url.includes('huggingface.co') || url.includes('hf.co')) return 'HuggingFace 官方';
+        return url;
+    };
+
+    const _dlHandler = (p) => {
+        vectorDownloadProgress.value = { status: p?.status || '', file: p?.file || '', progress: p?.progress || 0 };
+    };
+    const _srcHandler = (p) => {
+        vectorDownloadSource.value = {
+            source: p?.source || '',
+            attempt: p?.attempt || 0,
+            total: p?.total || 0,
+            label: sourceLabel(p?.source)
+        };
+    };
+    const _batchHandler = (p) => {
+        const cur = p?.current || 0;
+        const tot = p?.total || 0;
+        vectorBatchProgress.value = { current: cur, total: tot };
+        // 向量匹配阶段：把已处理张数叠加到打标进度条（基准 = 规则命中数）
+        if (vectorMatchActive.value && tot > 0) {
+            aiTaggingProgress.value.current = vectorMatchBase.value + cur;
+            aiTaggingProgress.value.total = Math.max(aiTaggingProgress.value.total, vectorMatchBase.value + tot);
+            aiTaggingProgress.value.status = `② 向量匹配中 (${cur}/${tot})...`;
+        }
+    };
+
+    // 修正 3.6：防御性检查，preload 未更新时不崩
+    onMounted(async () => {
+        if (!window.electronAPI?.vectorEngine) return;
+        window.electronAPI.vectorEngine.onDownloadProgress(_dlHandler);
+        window.electronAPI.vectorEngine.onDownloadSource?.(_srcHandler);
+        window.electronAPI.vectorEngine.onBatchProgress(_batchHandler);
+        try {
+            const resp = await window.electronAPI.vectorEngine.getStatus();
+            if (resp && resp.success) vectorStatus.value = resp;
+        } catch (e) {
+            console.warn('向量状态获取失败:', e);
+        }
+    });
+    onUnmounted(() => {
+        // preload 内部用 removeAllListeners 重新绑定，组件卸载时无需再清理（IPC 通道仅有一个消费者）
+        // 若未来多实例，需在此调用 removeAllListeners；当前架构安全
+    });
+
+    const initVectorEngine = async () => {
+        if (!window.electronAPI?.vectorEngine) {
+            showToast('当前环境不支持本地向量引擎（需要 Electron 桌面版）', 'warning');
+            return;
+        }
+        vectorDownloading.value = true;
+        try {
+            const resp = await window.electronAPI.vectorEngine.init();
+            if (resp && !resp.success) throw new Error(resp.error || '初始化失败');
+            const statusResp = await window.electronAPI.vectorEngine.getStatus();
+            if (statusResp && statusResp.success) vectorStatus.value = statusResp;
+            showToast('🎉 向量模型已就绪', 'info');
+        } catch (e) {
+            showToast('模型下载失败: ' + e.message, 'error');
+        } finally {
+            vectorDownloading.value = false;
+        }
+    };
+
+    const deleteVectorCache = async () => {
+        const ok = await confirmDialog('确认删除本地向量模型缓存（约 120MB）？\n下次使用需重新下载。');
+        if (!ok) return;
+        try {
+            const resp = await window.electronAPI.vectorEngine.deleteCache();
+            if (resp && !resp.success) throw new Error(resp.error || '删除失败');
+            const statusResp = await window.electronAPI.vectorEngine.getStatus();
+            if (statusResp && statusResp.success) vectorStatus.value = statusResp;
+            showToast('缓存已清理', 'info');
+        } catch (e) {
+            showToast('删除失败: ' + e.message, 'error');
+        }
+    };
+
     return {
         // AI 智能批量打标
         showAITagModal, aiCandidateTags, aiCustomPrompt, aiTaggingProgress, isAITagging, openAITagModal, startAITagging,
@@ -928,10 +1108,13 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
         // 破限
         useJailbreak, jailbreakPrompt, jailbreakPresets,
         // 翻译 / 格式升维
-        isTranslating, translateCardContent, isRefactoring, refactorCardFormat
+        isTranslating, translateCardContent, isRefactoring, refactorCardFormat,
+        // 🧠 向量引擎
+        useLocalVector, vectorThreshold, vectorTopK,
+        vectorStatus, vectorDownloading, vectorDownloadProgress, vectorDownloadSource, vectorBatchProgress,
+        initVectorEngine, deleteVectorCache
     };
-}
-```
+}```
 
 **依赖注入**（`useAITools` 的参数，均来自 App.vue）：`selectedIds`、`library`、`cardData`、`apiEndpoint`、`apiKey`、`apiType`、`resolveApiModel`、`extractReplyContent`、`persistCardUpdate`、`refreshCardData`、`nativeAlert`、`confirmDialog`、`showToast`、`systemPromptPresets`。
 
@@ -939,7 +1122,7 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
 
 ## 模块四：AI 打标弹窗组件（Vue 单文件组件）
 
-来源：`js/components/AITagModal.vue` 全文（L1-236）
+来源：`js/components/AITagModal.vue` 全文（L1-283，含「🧠 本地向量引擎」UI 区块）
 
 ```vue
 <!--
@@ -995,6 +1178,62 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
                                     ✕
                                 </button>
                             </div>
+                        </div>
+                    </div>
+
+                    <!-- 🧠 1.5 本地向量引擎（三层漏斗第二层：免费离线语义匹配） -->
+                    <div class="bg-gray-50 p-3 rounded-lg border border-gray-200">
+                        <label class="flex items-center gap-2 font-bold text-gray-700 mb-2 cursor-pointer">
+                            <input type="checkbox" :checked="useLocalVector"
+                                   @change="$emit('update:useLocalVector', $event.target.checked)" :disabled="isAITagging"
+                                   class="w-4 h-4 text-purple-600 bg-white border-gray-300 rounded focus:ring-purple-600">
+                            🧠 启用本地向量匹配 <span class="text-[10px] font-normal text-gray-500">(免费·离线·不消耗 Token)</span>
+                        </label>
+
+                        <div v-if="useLocalVector" class="space-y-2 ml-6">
+                            <!-- 状态行 -->
+                            <div class="flex items-center gap-3 text-[11px]">
+                                <span v-if="vectorStatus.ready" class="text-green-600">✅ 模型已就绪 ({{ vectorStatus.cacheSizeMB }}MB)</span>
+                                <span v-else-if="vectorDownloading" class="text-blue-600">⏳ 下载中... {{ Math.round(vectorDownloadProgress.progress || 0) }}%<span v-if="vectorDownloadSource.label" class="text-gray-400"> ({{ vectorDownloadSource.label }}{{ vectorDownloadSource.total > 1 ? ' · 源 ' + vectorDownloadSource.attempt + '/' + vectorDownloadSource.total : '' }})</span></span>
+                                <span v-else-if="vectorStatus.cacheExists" class="text-amber-600">📦 缓存已存在，点击加载</span>
+                                <span v-else class="text-gray-500">未下载 (约 120MB)</span>
+
+                                <button v-if="!vectorStatus.ready && !vectorDownloading"
+                                        @click="$emit('init-vector-engine')"
+                                        class="px-2 py-0.5 bg-purple-600 hover:bg-purple-700 text-white rounded text-[11px] transition">
+                                    📥 下载模型
+                                </button>
+                                <button v-if="vectorStatus.cacheExists"
+                                        @click="$emit('delete-vector-cache')" :disabled="isAITagging"
+                                        class="px-2 py-0.5 bg-gray-300 hover:bg-red-500 hover:text-white text-gray-600 rounded text-[11px] transition">
+                                    🗑️ 删除缓存
+                                </button>
+                            </div>
+
+                            <!-- 下载进度条 -->
+                            <div v-if="vectorDownloading" class="w-full bg-gray-200 rounded-full h-2 overflow-hidden">
+                                <div class="bg-purple-600 h-2 rounded-full transition-all duration-300"
+                                     :style="{ width: Math.min(100, Math.round(vectorDownloadProgress.progress || 0)) + '%' }"></div>
+                            </div>
+
+                            <!-- 阈值与 TopK -->
+                            <div class="flex gap-4 items-center">
+                                <label class="text-[11px] text-gray-600 flex items-center gap-1">
+                                    相似度阈值:
+                                    <input type="range" min="0.3" max="0.9" step="0.05"
+                                           :value="vectorThreshold" :disabled="isAITagging"
+                                           @input="$emit('update:vectorThreshold', parseFloat($event.target.value))"
+                                           class="w-20 accent-purple-600">
+                                    {{ Number(vectorThreshold).toFixed(2) }}
+                                </label>
+                                <label class="text-[11px] text-gray-600 flex items-center gap-1">
+                                    Top-K:
+                                    <input type="number" min="1" max="10" :value="vectorTopK" :disabled="isAITagging"
+                                           @input="$emit('update:vectorTopK', parseInt($event.target.value))"
+                                           class="w-12 border border-gray-300 rounded px-1 text-xs">
+                                </label>
+                            </div>
+                            <p class="text-[10px] text-gray-500">阈值越高越精确（漏标多），越低越宽泛（误标多）。建议 0.55-0.70。规则层优先，其次向量，未命中才调用 LLM。</p>
                         </div>
                     </div>
 
@@ -1166,7 +1405,15 @@ export default {
         isFetchingModels: { type: Boolean, default: false },
         fetchModelStatus: { type: String, default: '' },
         isAITagging: { type: Boolean, default: false },
-        aiTaggingProgress: { type: Object, default: () => ({ current: 0, total: 0, status: '' }) }
+        aiTaggingProgress: { type: Object, default: () => ({ current: 0, total: 0, status: '' }) },
+        // 🧠 本地向量引擎
+        useLocalVector: { type: Boolean, default: false },
+        vectorThreshold: { type: Number, default: 0.65 },
+        vectorTopK: { type: Number, default: 3 },
+        vectorStatus: { type: Object, default: () => ({ ready: false, cacheExists: false, cacheSizeMB: 0, cachePath: '' }) },
+        vectorDownloading: { type: Boolean, default: false },
+        vectorDownloadProgress: { type: Object, default: () => ({ status: '', file: '', progress: 0 }) },
+        vectorDownloadSource: { type: Object, default: () => ({ source: '', attempt: 0, total: 0, label: '' }) }
     },
     emits: [
         'close', 'remove-ai-candidate-tag', 'update:newAICandidateTag', 'add-ai-candidate-tag-manual',
@@ -1174,7 +1421,10 @@ export default {
         'update:useJailbreak', 'update:jailbreakPrompt',
         'add-system-prompt-preset', 'update:activeSystemPromptId', 'save-system-prompts',
         'delete-system-prompt-preset', 'fetch-available-models', 'update:apiEndpoint',
-        'update:apiKey', 'update:apiModel', 'start-tagging', 'remove-system-common-tag'
+        'update:apiKey', 'update:apiModel', 'start-tagging', 'remove-system-common-tag',
+        // 🧠 本地向量引擎
+        'update:useLocalVector', 'update:vectorThreshold', 'update:vectorTopK',
+        'init-vector-engine', 'delete-vector-cache'
     ]
 };
 </script>
