@@ -5,9 +5,8 @@
  * 保留在 App.vue 并注入；行为保持不变。
  */
 import { ref, watch, onMounted, onUnmounted } from 'vue';
-import { autoTagRules } from '../utils/cardLoader.js';
 
-export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey, apiType, resolveApiModel, extractReplyContent, persistCardUpdate, refreshCardData, nativeAlert, confirmDialog, showToast, systemPromptPresets }) {
+export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey, apiType, resolveApiModel, extractReplyContent, persistCardUpdate, refreshCardData, nativeAlert, confirmDialog, showToast, systemPromptPresets, autoTagRules }) {
     // ================= [ AI 智能批量打标系统 ] =================
     const showAITagModal = ref(false);
     const aiCandidateTags = ref([]); // AI 候选标签池（点击常用标签快速添加 / ✕ 移除）
@@ -208,7 +207,7 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
             const d = card.data?.data || card.data || {};
             const text = [d.description, d.personality, d.scenario, d.first_mes].filter(Boolean).join('\n');
             const matched = [];
-            for (const [tag, regex] of Object.entries(autoTagRules)) {
+            for (const [tag, regex] of Object.entries(autoTagRules.value)) {
                 if (regex.test(text)) matched.push(tag);
             }
             if (matched.length >= 1) { // 阈值 ≥1（原 ≥3 在 5 条规则下几乎无命中）

@@ -18,6 +18,8 @@ export function useConfigPersistence({
     appConfig,
     // —— 收集源：全局状态 ——
     tagLangMode, customCategories, removedDefaultKeys, systemCommonTags,
+    // —— 收集源：自动打标规则表（可配置，v2.1） ——
+    autoTagRules, customKeywords,
     // —— 收集源：API 配置 ——
     apiEndpoint, apiKey, apiModel, apiType,
     // —— 收集源：UI 状态 ——
@@ -52,6 +54,10 @@ export function useConfigPersistence({
             customCategories: JSON.parse(JSON.stringify(Array.isArray(customCategories.value) ? customCategories.value : [])),
             removedDefaultKeys: JSON.parse(JSON.stringify(Array.isArray(removedDefaultKeys.value) ? removedDefaultKeys.value : [])),
             globalTags: JSON.parse(JSON.stringify(Array.isArray(systemCommonTags.value) ? systemCommonTags.value : [])),
+            // 🏷️ 自动打标规则表（可配置：[{name, regex}]，v2.1 新增）——空数组 = 用默认规则
+            autoTagRules: JSON.parse(JSON.stringify(Array.isArray(autoTagRules.value) ? autoTagRules.value : [])),
+            // ✏️ 自定义关键词库（候选词池，v2.1）
+            customKeywords: JSON.parse(JSON.stringify(Array.isArray(customKeywords.value) ? customKeywords.value : [])),
             cardOverlays: JSON.parse(JSON.stringify(appConfig.value.cardOverlays || {})),
             api: {
                 endpoint: apiEndpoint ? apiEndpoint.value : (appConfig.value.api && appConfig.value.api.endpoint) || '',

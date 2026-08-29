@@ -7,8 +7,47 @@
  * 迁移原则：函数体逐字保留（含 v1.8.5 性能修复与影分身修复注释），不做顺手优化。
  */
 import { triggerRef } from 'vue';
-import { normalizeCardData, isCharacterCardData, autoTagRules } from '../utils/cardLoader.js';
+import { normalizeCardData, isCharacterCardData } from '../utils/cardLoader.js';
 import { parsePNGChunk, deepScanForJSON } from '../utils/pngParser.js';
+
+// 🚀 v2.3 Web Worker：批量角色卡解析（CPU 多线程）。把「JSON.parse + 血统鉴定 +
+//    规范化」从主线程搬到 Worker，与主线程的「自动分类/打标/组装」流水线并行。
+//    Worker 不可用（受限环境）时回退主线程解析，功能不受影响。
+let cardParseWorker = null;
+let cardParseWorkerFailed = false;
+function getParseWorker() {
+  if (cardParseWorkerFailed) return null;
+  if (cardParseWorker) return cardParseWorker;
+  try {
+    cardParseWorker = new Worker(new URL('../utils/cardParseWorker.js', import.meta.url), { type: 'module' });
+    return cardParseWorker;
+  } catch (e) {
+    cardParseWorkerFailed = true;
+    return null;
+  }
+}
+// 把一块卡的原始数据发往 Worker 解析（不 await，返回 Promise；null = Worker 不可用）
+function parseChunkInWorker(chunk) {
+  const w = getParseWorker();
+  if (!w) return null;
+  const items = [];
+  for (const f of chunk) {
+    const rawText = (f.rawText != null) ? f.rawText : undefined;
+    const embeddedData = (f.embeddedData && typeof f.embeddedData === 'object') ? f.embeddedData : undefined;
+    if (rawText != null || embeddedData) {
+      items.push({ path: f.path, rawText, embeddedData });
+    }
+  }
+  if (items.length === 0) return Promise.resolve([]);
+  return new Promise((resolve) => {
+    const handler = (ev) => {
+      w.removeEventListener('message', handler);
+      resolve(ev.data && ev.data.results || []);
+    };
+    w.addEventListener('message', handler);
+    w.postMessage({ items });
+  });
+}
 
 export function useCardCrud({
     // —— 共享状态：App.vue 顶层持有，ref/computed 原样注入 ——
@@ -22,6 +61,7 @@ export function useCardCrud({
     importedConfig,       // 外部导入的库配置（历史分类/标签恢复）
     localCategoryMap,     // localStorage 分类映射
     sanitizeImportedTags, // 导入时忽略卡片自带标签开关
+    autoTagRules,         // 自动打标规则表（compileAutoTagRules 编译结果，v2.1 可配置；导入自动分类用）
     isDragging,           // 拖拽遮罩状态
     dragCounter,          // 拖拽深度计数器
     importFileInput,      // 隐藏文件输入 ref（HeaderBar 模板绑定回写）
@@ -180,7 +220,7 @@ export function useCardCrud({
         let assignedCategory = '未分类';
 
         // 匹配自动标签
-        for (const [tag, regex] of Object.entries(autoTagRules)) {
+        for (const [tag, regex] of Object.entries(autoTagRules.value)) {
             if (regex.test(fullText) && !generatedTags.includes(tag)) {
                 generatedTags.push(tag);
                 // 【修复】自动分类仅落到已知预设分组：
@@ -266,7 +306,10 @@ export function useCardCrud({
 
             let parsedData = null;
 
-            if (file.name.toLowerCase().endsWith('.json')) {
+            if (file.preParsed) {
+                // 🚀 v2.3 Worker 已 JSON.parse + 血统鉴定 + 规范化（跳过重复解析）
+                parsedData = file.preParsed;
+            } else if (file.name.toLowerCase().endsWith('.json')) {
                 // 🛡️ 优先使用内存内容（文件菜单导入已用 File API 读取，绕过 IPC 白名单）
                 let text = null;
                 if (typeof file.rawText === 'string') {
@@ -307,7 +350,9 @@ export function useCardCrud({
             }
 
             if (parsedData) {
-                const normalized = normalizeCardData(parsedData);
+                // 🚀 v2.3 优化：批量加载路径 noClone —— parsedData 为每次新 parse 对象（用完即弃），
+                //    原地规范化省掉 1 万次 structuredClone 深拷贝（真实大库解析 CPU 最大开销）
+                const normalized = normalizeCardData(parsedData, true);
                 // 前端专用唯一随机 ID（时间戳 + 随机串），保证 Vue key / 多选 / 图谱标识永不冲突
                 const cardId = 'card_' + Date.now().toString(36) + '_' + Math.random().toString(36).substr(2, 9);
                 const cardInfo = {
@@ -368,11 +413,16 @@ export function useCardCrud({
                 // 🔧 v1.8.5 配套：保存成功后回写 _mtime（saveCard 返回新 mtime）——
                 //    否则下次"刷新库"按 mtime 差分会把本卡误判为"已变化"重新解析，
                 //    再次触发自动打标写盘 → mtime 又变 → 每次刷新全量重写的死循环
-                if (oldCategory !== cardInfo.category || oldTagsLen !== (cardInfo.customTags || []).length) {
-                    if (window.electronAPI && !/\.json$/i.test(cardInfo.path)) {
-                        // 只写入原生 data 的 tags，保证卡片格式不被污染
-                        const dataLayer = cardInfo.data?.data || cardInfo.data || {};
-                        dataLayer.tags = Array.from(new Set([...(dataLayer.tags || []), ...(cardInfo.customTags || [])]));
+                if (window.electronAPI && !/\.json$/i.test(cardInfo.path)) {
+                    // 只写入原生 data 的 tags，保证卡片格式不被污染
+                    const dataLayer = cardInfo.data?.data || cardInfo.data || {};
+                    // 🚀 v2.3 写盘降噪：仅当「真正新增了标签」才落盘 —— 规则命中的标签
+                    //    若已存在于原生 data.tags（作者已打标 / 上次已写入），不再重写 PNG，
+                    //    消除万卡库重复写盘 IO（首次写入后 mtime 更新，后续启动零重写）。
+                    const existingTags = new Set(Array.isArray(dataLayer.tags) ? dataLayer.tags : []);
+                    const newTags = (cardInfo.customTags || []).filter(t => !existingTags.has(t));
+                    if (newTags.length > 0) {
+                        dataLayer.tags = Array.from(new Set([...dataLayer.tags, ...newTags]));
                         if (opts.deferAutoTagSave) {
                             deferredAutoTagSaves.push(cardInfo);
                         } else {
@@ -431,10 +481,11 @@ export function useCardCrud({
         } // 清空当前库
         let addedCount = 0;
 
-        const staging = []; // 🚀 暂存数组：加载完成前不触发任何全库 computed
+        const staging = []; // 🚀 全量暂存数组：加载完成前不触发任何全库 computed
         const seenPaths = new Set(); // 🚀 v2.0：批量加载 O(1) 去重
-        const CONCURRENCY = 8;
-        const READ_BATCH = 64; // 🚀 v2.0：单条批量 IPC 载荷上限（与主进程一致）
+        // 🚀 v2.2 提速：并发 8 → 16、批量 64 → 256 —— 万卡库减少 4 倍 IPC 往返与分批轮数
+        const CONCURRENCY = 16;
+        const READ_BATCH = 256; // 🚀 v2.2：单条批量 IPC 载荷上限（主进程内部按 128 分批读取）
         const files = folderData.files;
 
         // 🚀 v2.0 修复：流式批量拉取 —— 扫描阶段已不回填 embeddedData，正文改为按
@@ -444,9 +495,12 @@ export function useCardCrud({
             && typeof window.electronAPI.readTextBatch === 'function'
             && typeof window.electronAPI.readEmbeddedBatch === 'function';
 
-        for (let i = 0; i < files.length; i += READ_BATCH) {
-            const chunk = files.slice(i, i + READ_BATCH);
-
+        // 🚀 v2.3 流水线预取：把「批量拉取（IO）」与「并发解析（CPU）」重叠执行 ——
+        //    旧版先拉整块再解析整块（IO 与 CPU 串行，总耗时 ≈ IO + CPU）；
+        //    现预取下一块的同时解析当前块，总耗时 ≈ max(IO, CPU)，万卡/真实大库首屏再提速。
+        const fetchChunk = async (start) => {
+            if (start >= files.length) return null;
+            const chunk = files.slice(start, start + READ_BATCH);
             // 1) 按类型分组，经批量 IPC 一次拉取整块正文（失败则保留空，交 parseAndAddCard 逐卡兜底）
             if (hasBatchApi) {
                 const jsonFiles = chunk.filter(f => f.name.toLowerCase().endsWith('.json'));
@@ -468,7 +522,8 @@ export function useCardCrud({
                     (async () => {
                         if (pngFiles.length === 0) return;
                         try {
-                            const res = await window.electronAPI.readEmbeddedBatch(pngFiles.map(f => ({ path: f.path, size: f.size || 0 })));
+                            // 🚀 v2.3 附带 mtime，供主进程 PNG 内嵌提取缓存判新（path+mtime+size）
+                            const res = await window.electronAPI.readEmbeddedBatch(pngFiles.map(f => ({ path: f.path, size: f.size || 0, mtime: f.mtime || 0 })));
                             const map = new Map((res || []).map(r => [r.path, r]));
                             for (const f of pngFiles) {
                                 const r = map.get(f.path);
@@ -481,24 +536,73 @@ export function useCardCrud({
                     })()
                 ]);
             }
+            return chunk;
+        };
 
-            // 2) 并发解析本块（沿用原顺序与 CONCURRENCY 限制）
+        // 🚀 v2.3 组装一块：把 Worker 解析结果写回 file.preParsed，主线程做自动分类/打标/组装，
+        //    组装结果并入 staging（全量收集，加载完成后再一次性入库），并释放本块原始正文引用。
+        const assembleChunk = async (chunk, workerResults) => {
+            const resultMap = new Map((workerResults || []).map(r => [r.path, r]));
+            for (const f of chunk) {
+                const r = resultMap.get(f.path);
+                f.preParsed = (r && r.ok && r.data) ? r.data : null;
+            }
             for (let j = 0; j < chunk.length; j += CONCURRENCY) {
                 const batch = chunk.slice(j, j + CONCURRENCY);
                 const results = await Promise.all(batch.map(file => parseAndAddCard(file, {
-                    target: staging,             // 推入暂存数组而非 library
+                    target: staging,             // 推入全量暂存数组
                     deferAutoTagSave: true,      // 写盘延迟到加载完成后批量执行
                     seenPaths                   // O(1) 去重
                 })));
                 addedCount += results.filter(Boolean).length;
             }
-
-            // 3) 释放本块原始正文引用，峰值内存从「三份」压到「一份半」
             for (const f of chunk) {
+                f.preParsed = undefined;
                 if (f.rawText) f.rawText = undefined;
                 if (f.embeddedData) f.embeddedData = null;
             }
+        };
+
+        let pendingFetch = fetchChunk(0);
+        // 🚀 v2.3 Worker 流水线：Worker 解析块 N 的同时，主线程组装块 N-1（CPU 双线程并行）
+        let pendingParse = null;   // 上一块发起的 Worker 解析 Promise（null = Worker 不可用/无数据）
+        let prevChunk = null;      // 上一块原始数据（供组装）
+        let prevParseRes = null;   // 上一块的 Worker 解析结果
+        // 🔬 临时 profiling：定位真实大库解析瓶颈（fetch IO / Worker 解析 / 主线程组装）
+        let _tFetch = 0, _tWorker = 0, _tAssemble = 0;
+
+        for (let i = 0; i < files.length; i += READ_BATCH) {
+            const _f0 = performance.now();
+            const chunk = await pendingFetch;        // 等本块就绪（已由上一轮预取）
+            _tFetch += performance.now() - _f0;
+            pendingFetch = fetchChunk(i + READ_BATCH); // 🚀 v2.3 预取下一块，与下方解析并行
+            if (!chunk) break;
+
+            // 发起本块 Worker 解析（不 await —— 与下方「组装上一块」并行）
+            const _w0 = performance.now();
+            pendingParse = parseChunkInWorker(chunk);
+            if (pendingParse) {
+                const _wp = pendingParse;
+                pendingParse = _wp.then((r) => { _tWorker += performance.now() - _w0; return r; });
+            }
+
+            // 组装上一块的 Worker 结果（主线程 CPU 与 Worker 解析本块并行），并入 staging
+            if (prevChunk && prevParseRes) {
+                const _a0 = performance.now();
+                await assembleChunk(prevChunk, prevParseRes);
+                _tAssemble += performance.now() - _a0;
+            }
+
+            prevChunk = chunk;
+            prevParseRes = pendingParse ? await pendingParse : null; // 等本块 Worker 完成，供下一轮组装
         }
+        // 最后一块组装
+        if (prevChunk && prevParseRes) {
+            const _a0 = performance.now();
+            await assembleChunk(prevChunk, prevParseRes);
+            _tAssemble += performance.now() - _a0;
+        }
+        console.log(`[profile] 解析分项: fetch=${Math.round(_tFetch)}ms worker=${Math.round(_tWorker)}ms assemble=${Math.round(_tAssemble)}ms 总文件=${files.length}`);
         // 🚀 一次性并入（分块 push，同一同步批内 computed 只重算一次）。
         //    ⚠️ 不能写 `library.value = staging` 整体换引用：加载窗口（大库数秒~数十秒）
         //    期间拖拽导入 / 文件菜单导入 / URL 下载等不带 opts 的 parseAndAddCard

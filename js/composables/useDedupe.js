@@ -7,6 +7,7 @@ import { ref } from 'vue';
 
 export function useDedupe({
     library, worldbooks, activeWorldbook, cardData,
+    presets, activePreset, appMode,
     estimateCardTokens,
     nativeAlert, confirmDialog, addLog, reset, cleanupEmptyCategories, deleteCardOverlays
 }) {
@@ -136,7 +137,12 @@ export function useDedupe({
             const currentTrashed = !!(currentLibItem && trashedPaths.includes(currentLibItem.path));
 
             library.value = library.value.filter(c => !trashedPaths.includes(c.path));
-            duplicateGroups.value.splice(groupIndex, 1);
+            // 组内全部删净才移除该组；有残留则只剔除已删项，保持弹窗数据与磁盘一致
+            if (failedPaths.size === 0) {
+                duplicateGroups.value.splice(groupIndex, 1);
+            } else {
+                group.cards = group.cards.filter(c => !trashedPaths.includes(c.path));
+            }
 
             if (currentTrashed) reset();
 
@@ -284,7 +290,7 @@ export function useDedupe({
             if (failedPaths.size === 0) {
                 wbDuplicateGroups.value.splice(groupIndex, 1);
             } else {
-                group.list = group.list.filter(wb => trashedPaths.includes(wb.path));
+                group.list = group.list.filter(wb => !trashedPaths.includes(wb.path));
             }
             if (activeWorldbook.value && trashedPaths.includes(activeWorldbook.value.path)) {
                 activeWorldbook.value = worldbooks.value[0] || null;
@@ -296,6 +302,179 @@ export function useDedupe({
                 nativeAlert(`已清理 ${res.count} 本；${failedPaths.size} 本失败（可能被占用）：\n${names}`, 'warning');
             } else {
                 nativeAlert(`清理完成！已移入回收站 ${res.count} 本世界书。`, 'info');
+            }
+        } else {
+            nativeAlert(`清理失败: ${(res && res.error) || '未知错误'}`, 'error');
+        }
+    };
+
+    // =========================================================
+    // ⚙️ 预设查重弹窗状态
+    // =========================================================
+    const showPresetDedupeModal = ref(false);  // 预设对比查重弹窗开关
+    const presetDuplicateGroups = ref([]);     // 预设查重分组
+
+    // 预设关键采样参数字段（用于「内容指纹」与差异提示）
+    const PRESET_KEYS = [
+        'temperature', 'max_tokens', 'max_context', 'rep_pen', 'rep_pen_range',
+        'top_p', 'top_k', 'top_a', 'min_p', 'typical_p', 'tfs',
+        'epsilon_cutoff', 'eta_cutoff', 'openai_model', 'prompt_order'
+    ];
+
+    // 预设关键采样参数摘要（用于卡片展示，人类可读）
+    const getPresetSettingsSummary = (p) => {
+        const d = p.data || {};
+        const map = {
+            temperature: 'temp', max_context: 'ctx', max_tokens: 'max',
+            rep_pen: 'rep', top_p: 'top_p', top_k: 'top_k', min_p: 'min_p',
+            typical_p: 'typical', tfs: 'tfs', openai_model: 'model'
+        };
+        const parts = [];
+        for (const [k, label] of Object.entries(map)) {
+            if (d[k] !== undefined && d[k] !== null) {
+                // 🔧 对象/数组值序列化，避免摘要出现 [object Object]
+                const v = typeof d[k] === 'object' ? JSON.stringify(d[k]) : d[k];
+                parts.push(`${label}=${v}`);
+            }
+        }
+        return parts.join(' · ') || '（无采样参数）';
+    };
+
+    // 预设提示词条数（prompts 对象或数组、prompt_order 数组）
+    const getPresetPromptCount = (p) => {
+        const d = p.data || {};
+        if (Array.isArray(d.prompts) && d.prompts.length) return d.prompts.length;
+        // 🔧 SillyTavern 预设的 prompts 通常是对象 {"0":"…","1":"…"}，按键数统计，与指纹逻辑一致
+        if (d.prompts && typeof d.prompts === 'object') return Object.keys(d.prompts).length;
+        if (Array.isArray(d.prompt_order)) return d.prompt_order.length;
+        return 0;
+    };
+
+    // 预设「内容指纹」：采样参数 + 归一化提示词正文，用于判定「完全相同」
+    const getPresetFingerprint = (p) => {
+        const d = p.data || {};
+        const subset = {};
+        PRESET_KEYS.forEach(k => { if (d[k] !== undefined) subset[k] = d[k]; });
+        if (d.prompts && typeof d.prompts === 'object') {
+            const prompts = {};
+            // 🔧 数字键按数值升序（字典序会把 "10" 排在 "2" 前，导致同内容不同键集合误判）
+            Object.keys(d.prompts).map(Number).sort((a, b) => a - b).forEach(k => { prompts[k] = String(d.prompts[k] || '').trim(); });
+            subset._prompts = prompts;
+        }
+        return JSON.stringify(subset);
+    };
+
+    // 启动预设智能查重扫描
+    const startPresetDedupeScan = async () => {
+        try {
+            if (presets.value.length === 0) {
+                nativeAlert('预设库为空，无法进行查重！', 'warning');
+                return;
+            }
+            if (!window.electronAPI || typeof window.electronAPI.getFileStats !== 'function') {
+                nativeAlert('❌ 预设查重引擎启动失败：preload.js 中未找到 getFileStats 接口！', 'error');
+                return;
+            }
+
+            const groups = {};
+            // 1. 按预设名称聚类（data.name 优先，兜底文件名）
+            presets.value.forEach(p => {
+                const name = ((p.data && p.data.name) || (p.name || '').replace(/\.json$/i, '') || '未命名预设').trim();
+                if (!groups[name]) groups[name] = [];
+                groups[name].push(p);
+            });
+
+            const potentialGroups = Object.entries(groups).filter(([_, list]) => list.length > 1);
+            if (potentialGroups.length === 0) {
+                nativeAlert('🎉 恭喜！当前库中未发现同名的重复预设！', 'info');
+                return;
+            }
+
+            // 2. 批量获取物理文件状态（带空安全保护）
+            const pathsToStat = [];
+            potentialGroups.forEach(([_, list]) => list.forEach(p => pathsToStat.push(p.path)));
+            let fileStats = {};
+            try {
+                const statsRes = await window.electronAPI.getFileStats(pathsToStat);
+                if (statsRes && statsRes.success) fileStats = statsRes.data || {};
+            } catch (e) {
+                console.warn('获取预设文件信息失败:', e);
+            }
+
+            presetDuplicateGroups.value = potentialGroups.map(([name, list]) => {
+                list.forEach(p => {
+                    p._settings = getPresetSettingsSummary(p);
+                    p._promptCount = getPresetPromptCount(p);
+                    p._fingerprint = getPresetFingerprint(p);
+                    p._fingerLen = p._fingerprint.length;
+                    p._mtime = fileStats?.[p.path]?.mtimeMs || Date.now();
+                    p._dateStr = new Date(p._mtime).toLocaleString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+                    p._sizeKb = ((fileStats?.[p.path]?.size || 0) / 1024).toFixed(1);
+                });
+
+                // 排序：提示词更全的排前面，参数更丰富的其次，再按修改时间新→旧
+                list.sort((a, b) => {
+                    if (b._promptCount !== a._promptCount) return b._promptCount - a._promptCount;
+                    if (b._fingerLen !== a._fingerLen) return b._fingerLen - a._fingerLen;
+                    return b._mtime - a._mtime;
+                });
+
+                // 计算相对第一份（推荐保留）的差异
+                const masterFp = list[0]._fingerprint;
+                list.forEach((p, idx) => {
+                    if (idx === 0) {
+                        p._diffInfo = '👑 建议保留 (参数最全/最新)';
+                    } else if (p._fingerprint === masterFp) {
+                        p._diffInfo = '⚠️ 参数内容完全一致 (可安全清理)';
+                    } else {
+                        p._diffInfo = '🔍 参数配置存在差异';
+                    }
+                });
+
+                return { name, list };
+            });
+
+            showPresetDedupeModal.value = true;
+        } catch (err) {
+            console.error('预设查重引擎崩溃:', err);
+            nativeAlert(`❌ 预设查重系统发生异常: ${err.message}`, 'error');
+        }
+    };
+
+    // 一键清理重复预设
+    const resolvePresetDedupeGroup = async (groupIndex, keepPath) => {
+        const group = presetDuplicateGroups.value[groupIndex];
+        if (!group) return;
+        const pathsToTrash = group.list.filter(p => p.path !== keepPath).map(p => p.path);
+        if (pathsToTrash.length === 0) return;
+
+        const ok = await confirmDialog(`确定要将另外 ${pathsToTrash.length} 个冗余/旧版预设移入回收站吗？`);
+        if (!ok) return;
+
+        const res = await window.electronAPI.trashFiles(pathsToTrash);
+        if (res && res.success) {
+            const failedPaths = new Set((res.failed || []).map(f => f.path));
+            const trashedPaths = pathsToTrash.filter(p => !failedPaths.has(p));
+            if (trashedPaths.length === 0) {
+                return nativeAlert('全部预设移入回收站失败（可能被其他程序占用），未做任何更改。', 'error');
+            }
+
+            presets.value = presets.value.filter(p => !trashedPaths.includes(p.path));
+            if (failedPaths.size === 0) {
+                presetDuplicateGroups.value.splice(groupIndex, 1);
+            } else {
+                group.list = group.list.filter(p => !trashedPaths.includes(p.path));
+            }
+            if (activePreset.value && trashedPaths.includes(activePreset.value.path)) {
+                activePreset.value = presets.value[0] || null;
+            }
+            addLog(`🗑️ 已清理 ${res.count} 个冗余预设`, 'warning');
+
+            if (failedPaths.size > 0) {
+                const names = [...failedPaths].map(p => p.split(/[\\/]/).pop()).join('、');
+                nativeAlert(`已清理 ${res.count} 个；${failedPaths.size} 个失败（可能被占用）：\n${names}`, 'warning');
+            } else {
+                nativeAlert(`清理完成！已移入回收站 ${res.count} 个预设。`, 'info');
             }
         } else {
             nativeAlert(`清理失败: ${(res && res.error) || '未知错误'}`, 'error');
@@ -350,8 +529,12 @@ export function useDedupe({
         diffCompareItem.value = compareItem;
         diffFieldResults.value = [];
 
-        // 智能识别：当前是在查重世界书还是角色卡？
+        // 智能识别：当前是在查重世界书 / 角色卡 / 预设？
         const isWorldbook = !!(masterItem.data && Array.isArray(masterItem.data.entries));
+        const isPreset = !isWorldbook && !!(
+            masterItem.data &&
+            ('temperature' in masterItem.data || 'prompts' in masterItem.data || 'prompt_order' in masterItem.data)
+        );
 
         const masterData = (masterItem.data && (masterItem.data.data || masterItem.data)) || {};
         const compareData = (compareItem.data && (compareItem.data.data || compareItem.data)) || {};
@@ -396,6 +579,55 @@ export function useDedupe({
                 diffText: isTextSame ? null : computeTextDiffLines(text1, text2)
             });
 
+        } else if (isPreset) {
+            // ---------- ⚙️ 预设对比逻辑 ----------
+            const presetFields = [
+                { key: 'temperature', label: '🌡️ 温度 (Temperature)' },
+                { key: 'max_tokens', label: '📏 最大输出 (Max Tokens)' },
+                { key: 'max_context', label: '🧠 上下文 (Context)' },
+                { key: 'rep_pen', label: '🚫 重复惩罚 (Rep Pen)' },
+                { key: 'top_p', label: '🎯 Top P' },
+                { key: 'top_k', label: '🔝 Top K' },
+                { key: 'min_p', label: '📉 Min P' },
+                { key: 'openai_model', label: '🧩 模型 (Model)' }
+            ];
+            const presetVal = (d, k) => {
+                const v = d[k];
+                if (v === undefined || v === null) return '';
+                return typeof v === 'object' ? JSON.stringify(v) : String(v);
+            };
+            presetFields.forEach(f => {
+                const v1 = presetVal(masterData, f.key);
+                const v2 = presetVal(compareData, f.key);
+                diffFieldResults.value.push({
+                    label: f.label,
+                    isSame: v1 === v2,
+                    len1: v1 || '未设置',
+                    len2: v2 || '未设置',
+                    diffText: (v1 === v2) ? null : computeTextDiffLines(v1, v2)
+                });
+            });
+
+            // 提示词正文对比
+            const formatPrompts = (d) => {
+                const prompts = d.prompts;
+                if (!prompts) return '';
+                if (Array.isArray(prompts)) return prompts.join('\n');
+                if (typeof prompts === 'object') {
+                    return Object.keys(prompts).map(k => `${k}: ${String(prompts[k] || '')}`).join('\n');
+                }
+                return String(prompts);
+            };
+            const promptText1 = formatPrompts(masterData);
+            const promptText2 = formatPrompts(compareData);
+            const isPromptSame = promptText1 === promptText2;
+            diffFieldResults.value.push({
+                label: '💬 提示词正文 (Prompts)',
+                isSame: isPromptSame,
+                len1: `${promptText1.length} 字`,
+                len2: `${promptText2.length} 字`,
+                diffText: isPromptSame ? null : computeTextDiffLines(promptText1, promptText2)
+            });
         } else {
             // ---------- 🎴 角色卡对比逻辑 ----------
             const fieldsToCompare = [
@@ -436,9 +668,289 @@ export function useDedupe({
         showDiffDetailModal.value = true;
     };
 
+    // =========================================================
+    // 🧬 内容级跨名称版本查重引擎（MinHash + LSH 预过滤 + Union-Find 聚类）
+    //    与「同名查重」互补：即使名字/文件名不同，只要内容高度相似也归为一组。
+    //    角色卡/世界书/预设通用，由当前 appMode 决定数据源。
+    // =========================================================
+    const showContentDedupeModal = ref(false);
+    const contentDuplicateGroups = ref([]);
+
+    // 1) 按资产类型提取对比文本（角色卡：描述/人格/场景/开场白；世界书：词条 key+content；预设：提示词+采样参数）
+    const extractContentText = (item) => {
+        if (appMode.value === 'worldbooks') {
+            const entries = (item.data && Array.isArray(item.data.entries)) ? item.data.entries : [];
+            return entries.map(e => {
+                if (!e || typeof e !== 'object') return '';
+                const keys = Array.isArray(e.key) ? e.key.join(',') : (e.key || '');
+                return `${keys} ${e.content || ''}`;
+            }).join('\n');
+        }
+        if (appMode.value === 'presets') {
+            const d = item.data || {};
+            const promptTexts = [];
+            if (d.prompts && typeof d.prompts === 'object') {
+                Object.keys(d.prompts).map(Number).sort((a, b) => a - b)
+                    .forEach(k => promptTexts.push(String(d.prompts[k] || '')));
+            } else if (Array.isArray(d.prompts)) {
+                d.prompts.forEach(p => promptTexts.push(typeof p === 'string' ? p : JSON.stringify(p)));
+            }
+            const params = PRESET_KEYS.filter(k => d[k] !== undefined)
+                .map(k => `${k}=${JSON.stringify(d[k])}`).join('|');
+            return promptTexts.join('\n') + '\n' + params;
+        }
+        // 角色卡
+        const d = item.data?.data || item.data || {};
+        return [d.description, d.personality, d.scenario, d.first_mes, d.mes_example]
+            .filter(Boolean).join('\n');
+    };
+
+    // 2) 文本规范化（去空白/标点/大小写）
+    const normalizeText = (t) => String(t || '')
+        .replace(/\s+/g, ' ')
+        .replace(/[^\p{L}\p{N}]+/gu, ' ')
+        .toLowerCase()
+        .trim();
+
+    // 3) 字符 4-gram shingle 集合
+    const getShingles = (text) => {
+        const set = new Set();
+        for (let i = 0; i + 4 <= text.length; i++) set.add(text.slice(i, i + 4));
+        return set;
+    };
+
+    // 4) 确定性 MinHash 哈希函数族（固定种子，同一文本签名稳定）
+    const MINHASH_HASHES = 96;
+    const LSH_BANDS = 8;
+    const LSH_ROWS = MINHASH_HASHES / LSH_BANDS; // 12
+    const minhashSeeds = (() => {
+        const seeds = [];
+        let s = 0x9e3779b9;
+        for (let i = 0; i < MINHASH_HASHES; i++) {
+            s = (s * 1103515245 + 12345) & 0x7fffffff;
+            seeds.push(s);
+        }
+        return seeds;
+    })();
+    const hashString = (str, seed) => {
+        let h = seed >>> 0;
+        for (let i = 0; i < str.length; i++) h = (h * 31 + str.charCodeAt(i)) >>> 0;
+        return h;
+    };
+
+    // 5) MinHash 签名（每 shingle 求 96 个哈希的最小值）
+    const computeMinHash = (shingles) => {
+        const sig = new Array(MINHASH_HASHES).fill(0x7fffffff);
+        shingles.forEach(sh => {
+            for (let i = 0; i < MINHASH_HASHES; i++) {
+                const h = hashString(sh, minhashSeeds[i]);
+                if (h < sig[i]) sig[i] = h;
+            }
+        });
+        return sig;
+    };
+
+    // 6) Jaccard 估计 = 签名中相同分量比例
+    const estimateSimilarity = (a, b) => {
+        let same = 0;
+        for (let i = 0; i < a.length; i++) if (a[i] === b[i]) same++;
+        return same / a.length;
+    };
+
+    // 7) LSH band 分桶 key（同一 band 内签名段完全一致的项互为候选）
+    const bandKey = (sig, band) => {
+        let key = '';
+        for (let r = 0; r < LSH_ROWS; r++) key += sig[band * LSH_ROWS + r].toString(16).padStart(8, '0');
+        return key;
+    };
+
+    // 8) Union-Find 并查集
+    const unionFind = (n) => {
+        const parent = Array.from({ length: n }, (_, i) => i);
+        const find = (x) => { while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; };
+        const union = (a, b) => { const ra = find(a), rb = find(b); if (ra !== rb) parent[rb] = ra; };
+        return { find, union };
+    };
+
+    // 9) 内容级版本查重主流程
+    const startContentDedupeScan = async () => {
+        try {
+            const items = appMode.value === 'worldbooks' ? worldbooks.value
+                : appMode.value === 'presets' ? presets.value
+                : library.value;
+            if (!items || items.length === 0) {
+                nativeAlert('当前库为空，无法进行版本查重！', 'warning');
+                return;
+            }
+            if (!window.electronAPI || typeof window.electronAPI.getFileStats !== 'function') {
+                nativeAlert('❌ 版本查重引擎启动失败：preload.js 中未找到 getFileStats 接口！', 'error');
+                return;
+            }
+
+            // 提取规范化文本，内容过短（<20 字符）无法可靠判定，跳过
+            const valid = [];
+            items.forEach((item, idx) => {
+                const text = normalizeText(extractContentText(item));
+                if (text.length < 20) return;
+                valid.push({ item, idx, text });
+            });
+            const n = valid.length;
+            if (n < 2) {
+                nativeAlert('🎉 未发现可判定的内容重复项（内容过短的项已跳过）。', 'info');
+                return;
+            }
+
+            // 计算 MinHash 签名（挂回条目，供相似度展示复用）
+            const sigs = valid.map(v => computeMinHash(getShingles(v.text)));
+            valid.forEach((v, i) => { v.sig = sigs[i]; });
+
+            // LSH 候选 + 精确相似度确认（阈值 85%，复制改名/微调版本均命中）
+            const buckets = new Map();
+            valid.forEach((_, i) => {
+                for (let b = 0; b < LSH_BANDS; b++) {
+                    const k = bandKey(sigs[i], b);
+                    if (!buckets.has(k)) buckets.set(k, []);
+                    buckets.get(k).push(i);
+                }
+            });
+
+            const THRESHOLD = 0.85;
+            const uf = unionFind(n);
+            const seenPairs = new Set();
+            buckets.forEach(list => {
+                if (list.length < 2) return;
+                for (let x = 0; x < list.length; x++) {
+                    for (let y = x + 1; y < list.length; y++) {
+                        const a = list[x], b = list[y];
+                        const pairKey = a < b ? `${a}:${b}` : `${b}:${a}`;
+                        if (seenPairs.has(pairKey)) continue;
+                        seenPairs.add(pairKey);
+                        if (estimateSimilarity(sigs[a], sigs[b]) >= THRESHOLD) uf.union(a, b);
+                    }
+                }
+            });
+
+            // 聚类分组（单例忽略）
+            const clusters = new Map();
+            valid.forEach((_, i) => {
+                const root = uf.find(i);
+                if (!clusters.has(root)) clusters.set(root, []);
+                clusters.get(root).push(i);
+            });
+
+            const rawGroups = [];
+            clusters.forEach(members => {
+                if (members.length < 2) return;
+                rawGroups.push(members.map(i => valid[i]));
+            });
+
+            if (rawGroups.length === 0) {
+                nativeAlert('🎉 未发现内容高度相似的重复项！', 'info');
+                return;
+            }
+
+            // 批量获取物理状态（修改时间/大小）用于展示与排序
+            const flatPaths = rawGroups.flat().map(v => v.item.path);
+            let fileStats = {};
+            try {
+                const res = await window.electronAPI.getFileStats(flatPaths);
+                if (res && res.success) fileStats = res.data || {};
+            } catch (e) { /* 降级为无物理状态 */ }
+
+            contentDuplicateGroups.value = rawGroups.map(list => {
+                list.forEach(v => {
+                    const st = fileStats[v.item.path];
+                    v._sizeKb = st ? (st.size / 1024).toFixed(1) : '?';
+                    v._mtime = st ? st.mtimeMs : Date.now();
+                    v._dateStr = new Date(v._mtime).toLocaleString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+                });
+                // 内容最长者排最前（更可能是完整版）
+                list.sort((a, b) => b.text.length - a.text.length);
+                const master = list[0];
+                list.forEach(v => {
+                    v._simPct = v === master ? 100 : Math.round(estimateSimilarity(v.sig, master.sig) * 100);
+                    const d = v.item.data?.data || v.item.data || {};
+                    v._name = d.name || v.item.name || v.item.path.split(/[\\/]/).pop();
+                });
+                return { name: master._name, kind: 'content', list };
+            });
+
+            showContentDedupeModal.value = true;
+            addLog(`🧬 内容级版本查重完成，发现 ${contentDuplicateGroups.value.length} 组疑似重复`, 'info');
+        } catch (err) {
+            console.error('内容级版本查重异常:', err);
+            nativeAlert(`❌ 版本查重系统发生异常: ${err.message}`, 'error');
+        }
+    };
+
+    // 一键清理：保留指定项，其余疑似重复版本移入回收站
+    const resolveContentDedupeGroup = async (groupIndex, keepPath) => {
+        const group = contentDuplicateGroups.value[groupIndex];
+        if (!group) return;
+        const pathsToTrash = group.list.filter(v => v.item.path !== keepPath).map(v => v.item.path);
+        if (pathsToTrash.length === 0) return;
+
+        const ok = await confirmDialog(`确定要将另外 ${pathsToTrash.length} 个疑似重复版本移入回收站吗？`);
+        if (!ok) return;
+
+        const res = await window.electronAPI.trashFiles(pathsToTrash);
+        if (res && res.success) {
+            const failedPaths = new Set((res.failed || []).map(f => f.path));
+            const trashedPaths = pathsToTrash.filter(p => !failedPaths.has(p));
+
+            // 同步内存库（按当前视图移除已删项）
+            if (appMode.value === 'worldbooks') {
+                worldbooks.value = worldbooks.value.filter(w => !trashedPaths.includes(w.path));
+                if (activeWorldbook.value && trashedPaths.includes(activeWorldbook.value.path)) {
+                    activeWorldbook.value = worldbooks.value[0] || null;
+                }
+            } else if (appMode.value === 'presets') {
+                presets.value = presets.value.filter(p => !trashedPaths.includes(p.path));
+                if (activePreset.value && trashedPaths.includes(activePreset.value.path)) {
+                    activePreset.value = presets.value[0] || null;
+                }
+            } else {
+                const currentLibItem = library.value.find(item => item.data === cardData.value);
+                const currentTrashed = !!(currentLibItem && trashedPaths.includes(currentLibItem.path));
+                library.value = library.value.filter(c => !trashedPaths.includes(c.path));
+                if (currentTrashed) reset();
+                deleteCardOverlays(trashedPaths);
+                await cleanupEmptyCategories();
+            }
+
+            // 组内全部删净才移除该组；有残留则只剔除已删项
+            if (failedPaths.size === 0) {
+                contentDuplicateGroups.value.splice(groupIndex, 1);
+            } else {
+                group.list = group.list.filter(v => !trashedPaths.includes(v.item.path));
+            }
+
+            if (failedPaths.size > 0) {
+                const names = [...failedPaths].map(p => p.split(/[\\/]/).pop()).join('、');
+                nativeAlert(`已清理 ${res.count} 个；${failedPaths.size} 个失败（可能被占用）：\n${names}`, 'warning');
+            } else {
+                nativeAlert(`清理完成！已将 ${res.count} 个疑似重复版本移入回收站。`, 'info');
+            }
+        } else {
+            nativeAlert(`清理失败: ${(res && res.error) || '未知错误'}`, 'error');
+        }
+    };
+
+    // =========================================================
+    // 🎯 智能查重统一入口：根据当前视图（角色卡 / 世界书 / 预设）自动分发
+    // =========================================================
+    const startSmartDedupe = () => {
+        if (appMode.value === 'worldbooks') return startWorldbookDedupeScan();
+        if (appMode.value === 'presets') return startPresetDedupeScan();
+        return startDedupeScan();
+    };
+
     return {
         showDedupeModal, duplicateGroups, startDedupeScan, resolveDedupeGroup,
         showWbDedupeModal, wbDuplicateGroups, startWorldbookDedupeScan, resolveWbDedupeGroup,
+        showPresetDedupeModal, presetDuplicateGroups, startPresetDedupeScan, resolvePresetDedupeGroup,
+        showContentDedupeModal, contentDuplicateGroups, startContentDedupeScan, resolveContentDedupeGroup,
+        startSmartDedupe,
         showDiffDetailModal, diffMasterItem, diffCompareItem, diffFieldResults, openDiffDetailModal
     };
 }

@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
 import { useCardCrud } from '../js/composables/useCardCrud.js';
+import { compileAutoTagRules } from '../js/utils/cardLoader.js';
 
 // ---------- 测试夹具 ----------
 
@@ -35,6 +36,8 @@ function makeMock(overrides = {}) {
         importedConfig,
         localCategoryMap,
         sanitizeImportedTags,
+        // 使用系统预设规则表（含「魔法/精灵 → Fantasy (奇幻)」等默认规则）编译结果
+        autoTagRules: { value: compileAutoTagRules(null) },
         isDragging: { value: false },
         dragCounter: { value: 0 },
         importFileInput: { value: null },

@@ -293,15 +293,11 @@
                            class="w-full h-8 bg-zinc-800/80 border border-zinc-700/60 rounded-lg pl-8 pr-2 text-xs text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-amber-500/80 transition">
                 </div>
 
-                <!-- 行2：高频操作（合并/查重/全库 等宽）+ 更多工具折叠 -->
+                <!-- 行2：高频操作（合并/全库 等宽）+ 更多工具折叠 -->
                 <div class="flex items-center gap-1.5">
                     <button @click="openWbMergeModal" title="选择多本世界书进行合并"
                             class="flex-1 h-8 flex items-center justify-center gap-1 rounded-lg text-xs font-bold transition bg-zinc-800 hover:bg-amber-600 text-amber-400 hover:text-white border border-amber-500/30">
                         🔗 合并
-                    </button>
-                    <button @click="startWorldbookDedupeScan" title="世界书对比与查重"
-                            class="flex-1 h-8 flex items-center justify-center gap-1 rounded-lg text-xs font-bold transition bg-amber-600 hover:bg-amber-500 text-white">
-                        🔍 查重
                     </button>
                     <button @click="openGlobalEntrySearch" title="跨独立世界书 + 角色卡内嵌世界书搜索词条，定位来源"
                             class="flex-1 h-8 flex items-center justify-center gap-1 rounded-lg text-xs font-bold transition bg-zinc-800 hover:bg-blue-600 text-blue-400 hover:text-white border border-blue-500/30">
@@ -658,7 +654,6 @@ export default {
             wbFilterType: ctx.wbFilterType,
             filteredWorldbooks: ctx.filteredWorldbooks,
             openWbMergeModal: ctx.openWbMergeModal,
-            startWorldbookDedupeScan: ctx.startWorldbookDedupeScan,
             openGlobalEntrySearch: ctx.openGlobalEntrySearch,
             importWbFromJsonl: ctx.importWbFromJsonl,
             exportWorldbooksBatch: ctx.exportWorldbooksBatch,

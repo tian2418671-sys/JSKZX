@@ -17,7 +17,7 @@
             <div class="grid grid-cols-2 border-b border-zinc-800 bg-zinc-900/50 shrink-0 text-xs font-bold">
                 <div class="p-3 border-r border-zinc-800 flex items-center gap-3">
                     <img v-if="masterItem && masterItem.avatar" :src="masterItem.avatar" class="w-10 h-10 rounded object-cover border border-emerald-500/50">
-                    <span v-else class="text-3xl opacity-50">{{ masterItem && masterItem.data && masterItem.data.entries ? '🌍' : '🎎' }}</span>
+                    <span v-else class="text-3xl opacity-50">{{ iconFor(masterItem) }}</span>
                     <div class="flex flex-col min-w-0">
                         <span class="text-emerald-400 truncate">👑 推荐版: {{ (masterItem && masterItem.data && masterItem.data.name) || (masterItem ? masterItem.name : '未知') }}</span>
                         <span class="text-[10px] text-zinc-500 font-mono truncate">{{ masterItem ? masterItem.path.split(/[\\/]/).pop() : '' }}</span>
@@ -25,7 +25,7 @@
                 </div>
                 <div class="p-3 flex items-center gap-3">
                     <img v-if="compareItem && compareItem.avatar" :src="compareItem.avatar" class="w-10 h-10 rounded object-cover border border-amber-500/50">
-                    <span v-else class="text-3xl opacity-50">{{ compareItem && compareItem.data && compareItem.data.entries ? '🌍' : '🎎' }}</span>
+                    <span v-else class="text-3xl opacity-50">{{ iconFor(compareItem) }}</span>
                     <div class="flex flex-col min-w-0">
                         <span class="text-amber-400 truncate">🔍 对比版: {{ (compareItem && compareItem.data && compareItem.data.name) || (compareItem ? compareItem.name : '未知') }}</span>
                         <span class="text-[10px] text-zinc-500 font-mono truncate">{{ compareItem ? compareItem.path.split(/[\\/]/).pop() : '' }}</span>
@@ -100,6 +100,15 @@ export default {
         compareItem: { type: Object, default: null },
         fieldResults: { type: Array, default: () => [] }
     },
-    emits: ['close']
+    emits: ['close'],
+    methods: {
+        // 依据数据形态返回类型图标：世界书 🌍 / 预设 ⚙️ / 角色卡 🎎
+        iconFor(item) {
+            if (!item || !item.data) return '🎎';
+            if (Array.isArray(item.data.entries)) return '🌍';
+            if ('temperature' in item.data || 'prompts' in item.data || 'prompt_order' in item.data) return '⚙️';
+            return '🎎';
+        }
+    }
 };
 </script>

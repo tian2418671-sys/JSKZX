@@ -107,6 +107,11 @@
                                 </label>
                             </div>
                             <p class="text-[10px] text-gray-500">阈值越高越精确（漏标多），越低越宽泛（误标多）。建议 0.55-0.70。规则层优先，其次向量，未命中才调用 LLM。</p>
+                            <!-- 📝 规则层入口（第一层优先于向量，放此处便于理解三层漏斗顺序） -->
+                            <div class="flex items-center justify-between pt-2 border-t border-gray-200">
+                                <span class="text-[10px] text-gray-500">① 第一层：规则匹配（系统预设已内置，可自定义）</span>
+                                <button @click="$emit('open-auto-tag-rules')" class="px-2 py-1 bg-purple-600/10 hover:bg-purple-600 hover:text-white border border-purple-300 text-purple-700 rounded text-[11px] transition" title="编辑自动打标规则表（导入自动分类 / AI 打标第一层共用）">📝 管理规则表</button>
+                            </div>
                         </div>
                     </div>
 
@@ -297,7 +302,9 @@ export default {
         'update:apiKey', 'update:apiModel', 'start-tagging', 'remove-system-common-tag',
         // 🧠 本地向量引擎
         'update:useLocalVector', 'update:vectorThreshold', 'update:vectorTopK',
-        'init-vector-engine', 'delete-vector-cache'
+        'init-vector-engine', 'delete-vector-cache',
+        // 📝 自动打标规则表管理
+        'open-auto-tag-rules'
     ]
 };
 </script>

@@ -567,7 +567,23 @@ async function atomicWriteJson(filePath, data) {
   const tmpPath = `${filePath}.${process.pid}.${++atomicTmpSeq}.tmp`;
   try {
     await fsp.writeFile(tmpPath, JSON.stringify(data, null, 2), 'utf-8');
-    await fsp.rename(tmpPath, filePath);
+    // 🔧 EPERM 重试（2026-08-29）：360 主动防御（ZhuDongFangYu 内核驱动）会瞬时拦截 rename
+    //    （EPERM），实测多为瞬时 → 短间隔重试 3 次基本可成功；仍失败再抛错走 tmp 清理。
+    let renamed = false;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        await fsp.rename(tmpPath, filePath);
+        renamed = true;
+        break;
+      } catch (e) {
+        if (attempt < 2 && (e.code === 'EPERM' || e.code === 'EACCES')) {
+          await new Promise(r => setTimeout(r, 200 * (attempt + 1))); // 200ms / 400ms 退避
+          continue;
+        }
+        throw e;
+      }
+    }
+    if (!renamed) throw new Error('rename 失败（多次重试后仍被拦截）');
   } catch (e) {
     // 本次写入失败：清理遗留 tmp，绝不误删他人 tmp（tmp 文件名含 pid 唯一化，安全）
     await fsp.unlink(tmpPath).catch(() => { });
@@ -1225,7 +1241,8 @@ app.whenReady().then(() => {
   // 部分丢失的主因之一。新增批量通道：单条 IPC 携带至多 READ_BATCH 张卡，把
   // 「万次往返」降到「百次」，且不再出现「数 GB 单条消息」。
   // 安全：每个 path 仍逐个过 isPathAllowed 白名单，越界项返回 ok:false 绝不读取。
-  const READ_BATCH = 64;
+  // 🚀 v2.2 提速：64 → 128，减少分批轮数与 yield 次数（万卡读取 IPC 往返更少）
+  const READ_BATCH = 128;
 
   ipcMain.handle('files:readTextBatch', async (event, paths) => {
     const results = [];
@@ -1248,17 +1265,31 @@ app.whenReady().then(() => {
   });
 
   ipcMain.handle('files:readEmbeddedBatch', async (event, paths) => {
-    // paths: [{ path, size }] —— size 供自适应窗口计算读头长度（兼容纯字符串数组）
+    // paths: [{ path, size, mtime }] —— size 供自适应窗口计算读头长度（兼容纯字符串数组）
     const results = [];
     const items = Array.isArray(paths) ? paths : [];
+    loadEmbedCache(); // 🚀 v2.3 惰性加载缓存（首次调用前）
     for (let i = 0; i < items.length; i += READ_BATCH) {
       const batch = items.slice(i, i + READ_BATCH);
       const part = await Promise.all(batch.map(async (item) => {
         const p = (typeof item === 'string' ? item : (item && item.path)) || '';
         const size = (item && typeof item === 'object') ? (item.size || 0) : 0;
+        const mtime = (item && typeof item === 'object') ? (item.mtime || 0) : 0;
         if (!isPathAllowed(p)) return { path: p, ok: false, reason: 'forbidden' };
         try {
+          // 🚀 v2.3 缓存命中：同一文件（mtime+size 未变）已提取过 → 直接复用，跳过 PNG 读取
+          const ck = `${p}|${mtime}|${size}`;
+          if (mtime && embedCache.has(ck)) {
+            return { path: p, data: embedCache.get(ck), ok: true, cached: true };
+          }
           const data = await readPngEmbeddedFromFile(p, size);
+          if (data && mtime) {
+            // 🚀 v2.3 LRU 缓存：单条 > 512KB 的巨卡跳过，防缓存文件膨胀
+            try {
+              if (JSON.stringify(data).length <= EMBED_CACHE_ITEM_MAX) cacheSetEmbed(ck, data);
+            } catch (e) { /* 序列化失败跳过缓存 */ }
+            scheduleEmbedCacheSave();
+          }
           return { path: p, data: data || null, ok: true };
         } catch (e) {
           return { path: p, ok: false, reason: e.message };
@@ -3514,7 +3545,100 @@ async function readPngEmbeddedFromFile(filePath, size) {
   }
 }
 
-async function walkLibraryDir(dirPath, relPath, files, categories, visitedDirs) {
+// 🚀 v2.2 性能优化：批量并发 stat（替代逐文件串行 await fsp.stat）。
+//    旧版 walkLibraryDir 对每个文件 await stat，1 万张 = 1 万次串行磁盘 IO，
+//    是万卡库扫描耗时的主要瓶颈；现入队后按 STAT_BATCH(128) 并发批量 stat。
+const STAT_BATCH = 128;
+// ================= [ 🚀 v2.3 PNG 内嵌提取缓存 ] =================
+// 万卡/真实大库（数万张 PNG）每次启动都重读全部 PNG 头部提取内嵌 card JSON，
+// 是首屏慢的主因之一。按 (path+mtime+size) 缓存已提取结果到 embed_cache_N.json：
+//   - 首次启动：逐 PNG 提取并写入缓存（内存 Map + 防抖分片落盘）
+//   - 后续启动：缓存命中直接复用，跳过 PNG 读取，首屏大幅提速
+// 安全：key 含 mtime+size，文件被修改/替换后 key 失效自动重新提取，绝不返回旧数据。
+// 防爆：LRU 上限 EMBED_CACHE_MAX 条 + 单条 > EMBED_CACHE_ITEM_MAX 不缓存 +
+//       分片保存（每片 EMBED_CACHE_CHUNK 条），杜绝 JSON.stringify 超限崩溃。
+const embedCache = new Map();
+let embedCacheLoaded = false;
+let embedCacheSaveTimer = null;
+const EMBED_CACHE_MAX = 2000;             // LRU 上限：最多缓存 2000 张 PNG 提取结果（防缓存文件过大/加载慢）
+const EMBED_CACHE_ITEM_MAX = 512 * 1024;  // 单条 > 512KB 的巨卡不缓存
+const EMBED_CACHE_CHUNK = 500;            // 分片保存：每片 500 条
+function getEmbedCacheBase() {
+  try { return path.join(app.getPath('userData'), 'embed_cache'); } catch (e) { return ''; }
+}
+function cacheSetEmbed(key, data) {
+  if (embedCache.has(key)) embedCache.delete(key);
+  embedCache.set(key, data);
+  while (embedCache.size > EMBED_CACHE_MAX) {
+    const oldest = embedCache.keys().next().value;
+    if (oldest === undefined) break;
+    embedCache.delete(oldest);
+  }
+}
+function loadEmbedCache() {
+  if (embedCacheLoaded) return;
+  embedCacheLoaded = true;
+  const base = getEmbedCacheBase();
+  if (!base) return;
+  try {
+    const dir = path.dirname(base);
+    let files = [];
+    try { files = fs.readdirSync(dir).filter(f => f.startsWith(path.basename(base) + '_') && f.endsWith('.json')); } catch (e) { /* 目录不存在 */ }
+    for (const f of files) {
+      try {
+        const raw = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf-8'));
+        if (raw && raw.v === 1 && raw.items && typeof raw.items === 'object') {
+          for (const [k, v] of Object.entries(raw.items)) {
+            if (v && typeof v === 'object' && embedCache.size < EMBED_CACHE_MAX) embedCache.set(k, v);
+          }
+        }
+      } catch (e) { /* 单片损坏跳过 */ }
+    }
+    if (embedCache.size > 0) console.log(`[embed-cache] 已加载 ${embedCache.size} 条 PNG 内嵌缓存`);
+  } catch (e) { /* 缓存损坏/过大时忽略，重新构建 */ }
+}
+function scheduleEmbedCacheSave() {
+  if (embedCacheSaveTimer) return;
+  embedCacheSaveTimer = setTimeout(() => {
+    embedCacheSaveTimer = null;
+    const base = getEmbedCacheBase();
+    if (!base || embedCache.size === 0) return;
+    const dir = path.dirname(base);
+    // 清理旧分片
+    try {
+      for (const f of fs.readdirSync(dir)) {
+        if (f.startsWith(path.basename(base) + '_') && f.endsWith('.json')) {
+          try { fs.unlinkSync(path.join(dir, f)); } catch (e) { /* 忽略 */ }
+        }
+      }
+    } catch (e) { /* 忽略 */ }
+    // 分片原子写：防单文件 JSON.stringify 超限（RangeError: Invalid string length）
+    const entries = [...embedCache.entries()];
+    for (let i = 0; i < entries.length; i += EMBED_CACHE_CHUNK) {
+      const items = {};
+      for (const [k, v] of entries.slice(i, i + EMBED_CACHE_CHUNK)) items[k] = v;
+      const file = `${base}_${i / EMBED_CACHE_CHUNK}.json`;
+      atomicWriteJson(file, { v: 1, items }).catch(() => { /* 保存失败不影响功能 */ });
+    }
+  }, 3000);
+}
+
+async function flushStatQueue(queue) {
+  if (!queue || queue.length === 0) return;
+  const batch = queue.splice(0, STAT_BATCH);
+  await Promise.all(batch.map(async (item) => {
+    try {
+      const st = await fsp.stat(item.absPath);
+      item.file.mtime = st.mtimeMs || 0;       // 文件修改时间
+      item.file.birthtime = st.birthtimeMs || 0; // 文件创建时间（Windows 支持；可 0，排序时自动回退）
+      item.file.size = st.size || 0;
+      // PNG 空文件（size===0）无内嵌数据，撤销 _needsEmbed 标记
+      if (item.file._needsEmbed && !(item.file.size > 0)) item.file._needsEmbed = false;
+    } catch (e) { /* 文件被占用/删除时忽略 */ }
+  }));
+}
+
+async function walkLibraryDir(dirPath, relPath, files, categories, visitedDirs, statQueue) {
   // 🛡️ v1.8.5：realpath + visited 集合防符号链接/junction 环路（同 wb:scan walk；
   //    指回祖先的链接会让异步递归无限循环、files 数组无限膨胀直至内存耗尽）
   let realDir;
@@ -3535,36 +3659,33 @@ async function walkLibraryDir(dirPath, relPath, files, categories, visitedDirs) 
       if (skipFolders.includes(lowerName)) continue; // node_modules 等海量垃圾目录黑名单
       if (!relPath) categories.add(f.name); // 一级文件夹名 = 物理分组
       const subRel = relPath ? path.join(relPath, f.name) : f.name;
-      await walkLibraryDir(absPath, subRel, files, categories, visitedDirs);
+      await walkLibraryDir(absPath, subRel, files, categories, visitedDirs, statQueue);
     } else if (f.isFile()) {
       const ext = path.extname(f.name).toLowerCase();
       if (ext !== '.png' && ext !== '.webp' && ext !== '.json') continue;
       const isImage = ext === '.png' || ext === '.webp';
-      let mtime = 0;
-      let birthtime = 0;
-      let size = 0;
-      try {
-        const st = await fsp.stat(absPath);
-        mtime = st.mtimeMs || 0;       // 文件修改时间
-        birthtime = st.birthtimeMs || 0; // 文件创建时间（Windows 支持；可 0，排序时自动回退）
-        size = st.size || 0;
-      } catch (e) { /* 文件被占用/删除时忽略 */ }
       // 🚀 v1.8.6 性能优化：PNG 内嵌 JSON 提取改为「延迟并发批量」——
       //    旧版在此逐张串行 open/read(1MB)/parse，1 万张卡 = 1 万次串行磁盘 IO，
       //    扫描耗时数分钟。现仅标记 _needsEmbed，由 scanAndSaveFolder 在遍历完成后
       //    用 64 路并发批量提取（extractPngEmbedded），万卡库提速一个数量级。
-      files.push({
+      // 🚀 v2.2 性能优化：文件元数据 stat 由「逐文件串行」改为「批量并发」——
+      //    旧版在此对每文件 await fsp.stat，1 万张 = 1 万次串行磁盘 IO（扫描耗时占比最大）；
+      //    现仅入队，由 flushStatQueue 按 128 路并发批量 stat。
+      const file = {
         name: f.name,
         path: absPath,
         url: isImage ? 'local-file://img/?path=' + encodeURIComponent(absPath) : null,
-        mtime,
-        birthtime,
-        size, // 供并发提取计算读头长度
+        mtime: 0,
+        birthtime: 0,
+        size: 0,
         subFolder: relPath || '', // 相对库根的文件夹路径（'' = 根目录）
         category: relPath ? relPath.split(path.sep)[0] : '未分类', // 一级文件夹名 = 物理分组
         embeddedData: null, // 由 scanAndSaveFolder 并发提取后回填
-        _needsEmbed: ext === '.png' && size > 0 // 标记待并发提取内嵌 JSON
-      });
+        _needsEmbed: ext === '.png' // 标记待并发提取内嵌 JSON（stat 后 size===0 时撤销）
+      };
+      files.push(file);
+      statQueue.push({ absPath, file });
+      if (statQueue.length >= STAT_BATCH) await flushStatQueue(statQueue);
       // 🫀 让出事件循环：保证扫描期间主进程仍能处理窗口绘制/IPC，杜绝「未响应」
       if (files.length % YIELD_EVERY === 0) await yieldToEventLoop();
     }
@@ -3588,7 +3709,9 @@ async function scanAndSaveFolder(folderPath) {
     const scanStart = Date.now();
     const files = [];
     const categories = new Set();
-    await walkLibraryDir(folderPath, '', files, categories, new Set());
+    const statQueue = []; // 🚀 v2.2：文件元数据批量并发 stat 队列
+    await walkLibraryDir(folderPath, '', files, categories, new Set(), statQueue);
+    while (statQueue.length > 0) await flushStatQueue(statQueue); // flush 剩余 stat
 
     // 🦾 v1.9.x 文件级稳定排序：扫描结果按「文件名 → 相对子路径」自然排序（中文拼音+数字），
     //    默认加载顺序 = 文件系统顺序（与资源管理器一致），彻底杜绝 readdir 顺序不稳定

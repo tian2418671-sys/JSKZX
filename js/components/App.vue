@@ -118,6 +118,19 @@
             @update:vectorTopK="vectorTopK = $event"
             @init-vector-engine="initVectorEngine"
             @delete-vector-cache="deleteVectorCache"
+            @open-auto-tag-rules="showAutoTagRulesModal = true"
+        />
+
+        <!-- ================= [ 📝 自动打标规则表编辑弹窗（v2.1 可配置） ] ================= -->
+        <auto-tag-rules-modal
+            :show="showAutoTagRulesModal"
+            :rules="autoTagRules"
+            :custom-keywords="customKeywords"
+            @close="showAutoTagRulesModal = false"
+            @save="saveAutoTagRules"
+            @reset="resetAutoTagRules"
+            @add-keyword="addCustomKeyword"
+            @remove-keyword="removeCustomKeyword"
         />
 
         <!-- ================= [ 弹窗：关系图谱（子组件 GraphModal） ] ================= -->
@@ -279,6 +292,24 @@
             @resolve-group="resolveWbDedupeGroup"
         />
 
+        <!-- ================= [ ⚙️ 预设智能查重弹窗（子组件 PresetDedupeModal） ] ================= -->
+        <preset-dedupe-modal
+            :show="showPresetDedupeModal"
+            :groups="presetDuplicateGroups"
+            @close="showPresetDedupeModal = false"
+            @open-diff="openDiffDetailModal"
+            @resolve-group="resolvePresetDedupeGroup"
+        />
+
+        <!-- ================= [ 🧬 内容级跨名称版本查重弹窗（子组件 ContentDedupeModal） ] ================= -->
+        <content-dedupe-modal
+            :show="showContentDedupeModal"
+            :groups="contentDuplicateGroups"
+            @close="showContentDedupeModal = false"
+            @open-diff="openDiffDetailModal"
+            @resolve-group="resolveContentDedupeGroup"
+        />
+
         <!-- ================= [ ⚖️ 数据版本差异深度比对 (Diff Inspector)（子组件 DiffModal） ] ================= -->
         <diff-modal
             :show="showDiffDetailModal"
@@ -435,6 +466,8 @@ import GraphModal from './GraphModal.vue'; // 角色宇宙关系图谱弹窗
 import WbGraphModal from './WbGraphModal.vue'; // 世界书词条逻辑关联图谱弹窗
 import DedupeModal from './DedupeModal.vue'; // 智能版本查重中心弹窗
 import WbDedupeModal from './WbDedupeModal.vue'; // 世界书智能版本对比查重弹窗
+import PresetDedupeModal from './PresetDedupeModal.vue'; // 预设智能查重弹窗
+import ContentDedupeModal from './ContentDedupeModal.vue'; // 🧬 内容级跨名称版本查重弹窗
 import DiffModal from './DiffModal.vue'; // 数据版本差异深度比对弹窗
 import WbMergeModal from './WbMergeModal.vue'; // 多本世界书智能合并弹窗
 import WbImportModal from './WbImportModal.vue'; // 条目级导入合并弹窗
@@ -443,12 +476,13 @@ import WbSnapshotModal from './WbSnapshotModal.vue'; // 🕒 世界书快照历�
 import ContextMenu from './ContextMenu.vue'; // 角色卡右键快捷菜单
 import WbContextMenu from './WbContextMenu.vue'; // 世界书右键快捷菜单
 import AiTagModal from './AITagModal.vue'; // AI 智能批量打标弹窗（⚠️ 注册名须用 AiTagModal，kebab 标签 ai-tag-modal 解析为 AiTagModal 而非 AITagModal）
+import AutoTagRulesModal from './AutoTagRulesModal.vue'; // 📝 自动打标规则表编辑弹窗（v2.1 可配置）
 import HeaderBar from './HeaderBar.vue'; // 顶部菜单栏 + 紧凑工具栏
 import SidebarPanel from './SidebarPanel.vue'; // 左侧资源管理器（角色卡/世界书库）+ 拖拽把手
 import EditorPanel from './EditorPanel.vue'; // 右侧编辑器面板（角色卡编辑 + 世界书 IDE + 日志控制台）
 import SnapshotModal from './SnapshotModal.vue'; // 📸 历史快照列表与一键恢复弹窗
 import PushModal from './PushModal.vue'; // 🚀 推送目标选择与执行对话框
-import { processFile, extractBookEntries } from '../utils/cardLoader.js';
+import { processFile, extractBookEntries, compileAutoTagRules, defaultAutoTagRules } from '../utils/cardLoader.js';
 // normalizeCardData / isCharacterCardData / autoTagRules（cardLoader）与 parsePNGChunk / deepScanForJSON（pngParser）
 // 已随导入入库域迁移至 useCardCrud 组合式函数，由其自行 import
 import { estimateTokens } from '../utils/tokenEstimate.js'; // Token 估算（与 TextModal 共享）
@@ -496,7 +530,7 @@ document.addEventListener('dragover', (e) => e.preventDefault());
 document.addEventListener('drop', (e) => e.preventDefault());
 
 export default {
-    components: { Section, DragOverlay, AppLoadingOverlay, ToastContainer, BatchTagModal, PromptModal, SingleTagModal, DiskScanModal, UpdateModal, TextModal, ImageModal, ApiSettingsModal, GlobalAssetModal, GraphModal, WbGraphModal, DedupeModal, WbDedupeModal, DiffModal, WbMergeModal, WbImportModal, GlobalEntrySearchModal, WbSnapshotModal, ContextMenu, WbContextMenu, AiTagModal, HeaderBar, SidebarPanel, EditorPanel, SnapshotModal, PushModal },
+    components: { Section, DragOverlay, AppLoadingOverlay, ToastContainer, BatchTagModal, PromptModal, SingleTagModal, DiskScanModal, UpdateModal, TextModal, ImageModal, ApiSettingsModal, GlobalAssetModal, GraphModal, WbGraphModal, DedupeModal, WbDedupeModal, PresetDedupeModal, ContentDedupeModal, DiffModal, WbMergeModal, WbImportModal, GlobalEntrySearchModal, WbSnapshotModal, ContextMenu, WbContextMenu, AiTagModal, AutoTagRulesModal, HeaderBar, SidebarPanel, EditorPanel, SnapshotModal, PushModal },
     setup() {
         // 主题状态（localStorage 在自定义协议下可能不可用，做防御性读取；默认暗夜极客）
         let savedTheme = 'dark';
@@ -1903,6 +1937,17 @@ export default {
                                 const cleanTags = cfg.globalTags.filter(t => typeof t === 'string' && t.trim() !== '');
                                 systemCommonTags.value = Array.from(new Set(cleanTags));
                             }
+                            // 🏷️ 自动打标规则表（v2.1 可配置；合法元素才恢复，空数组 = 默认规则）
+                            if (Array.isArray(cfg.autoTagRules)) {
+                                const cleanRules = cfg.autoTagRules
+                                    .filter(r => r && typeof r.name === 'string' && r.name.trim() && typeof r.regex === 'string' && r.regex.trim())
+                                    .map(r => ({ name: r.name.trim(), regex: r.regex.trim() }));
+                                autoTagRules.value = cleanRules;
+                            }
+                            // ✏️ 自定义关键词库（用户添加的候选词，v2.1）
+                            if (Array.isArray(cfg.customKeywords)) {
+                                customKeywords.value = cfg.customKeywords.filter(w => typeof w === 'string' && w.trim() !== '');
+                            }
                             // 自定义分组（空数组也要覆盖，尊重「全部删除」结果）
                             if (Array.isArray(cfg.customCategories)) {
                                 const clean = cfg.customCategories.filter(c => typeof c === 'string' && c.trim() !== '');
@@ -2081,6 +2126,8 @@ export default {
                 const lastData = await window.electronAPI.loadConfig();
                 _stage('主进程扫描(loadConfig)');
                 if (lastData && lastData.folderPath) {
+                    // 🚀 v2.3 多线程并发解析（Worker 分核）：全量解析完成后一次入库，
+                    //    首屏等待由 Worker 并行大幅压缩（放弃流式，避免加载期 UI 反复重算）
                     await processElectronFiles(lastData);
                     _stage('渲染端解析卡片');
                 }
@@ -2467,6 +2514,46 @@ export default {
         // ⚠️ 已移除 loadGlobalTagsFromDisk()：旧文件 tavern_manager_config.json 的读取路径与
         //    app_config.json 权威加载形成竞态（两个不同文件互相覆盖），是「删除标签重启复发」的根源。
         //    旧文件 globalTags 的迁移已在 main.js sys:loadConfig 首次启动时一次性完成，无需再读取。
+
+        // ================= 🏷️ 自动打标规则表（v2.1 可扩展 + 用户可配置） =================
+        // 存 [{name, regex}] 数组到 app_config.json（权威）；空数组 = 使用默认规则表。
+        // 编译结果 compiledAutoTagRules 注入 useCardCrud（导入自动分类）与 useAITools（打标第一层）。
+        const autoTagRules = ref([]); // 用户配置的规则表（[{name, regex}]，字符串可序列化）
+        const showAutoTagRulesModal = ref(false); // 规则编辑弹窗显隐
+        const compiledAutoTagRules = computed(() => compileAutoTagRules(autoTagRules.value));
+
+        // 保存规则表（UI 编辑弹窗确认时调用；空数组 = 恢复默认规则）
+        // ⚠️ syncConfigToDisk 定义于 useConfigPersistence（setup 尾部），此处仅声明函数体（用户交互时才执行，闭包安全）
+        const saveAutoTagRules = (list) => {
+            const clean = Array.isArray(list)
+                ? list
+                    .map(r => ({ name: String(r && r.name || '').trim(), regex: String(r && r.regex || '').trim() }))
+                    .filter(r => r.name && r.regex)
+                : [];
+            autoTagRules.value = clean;
+            syncConfigToDisk(); // 立即落盘（不用 debounce，规则即时生效）
+        };
+        // 恢复默认规则表
+        const resetAutoTagRules = () => {
+            autoTagRules.value = [];
+            syncConfigToDisk();
+        };
+
+        // ✏️ 自定义关键词库（用户添加到候选池的词，持久化；供「自定义规则」选词）
+        const customKeywords = ref([]);
+        // 添加自定义关键词（去重 + 立即落盘）
+        const addCustomKeyword = (word) => {
+            const clean = String(word || '').trim();
+            if (clean && !customKeywords.value.includes(clean)) {
+                customKeywords.value.push(clean);
+                syncConfigToDisk();
+            }
+        };
+        // 删除自定义关键词
+        const removeCustomKeyword = (word) => {
+            customKeywords.value = customKeywords.value.filter(w => w !== word);
+            syncConfigToDisk();
+        };
 
         // ================= 标签中英文切换系统 =================
         // 标签语言模式: 'cn' (纯中文), 'en' (纯英文), 'both' (中英双语)
@@ -3789,6 +3876,7 @@ export default {
         } = useConfigPersistence({
             appConfig,
             tagLangMode, customCategories, removedDefaultKeys, systemCommonTags,
+            autoTagRules, customKeywords,
             apiEndpoint, apiKey, apiModel, apiType,
             theme, appSettings, sanitizeImportedTags, snapshotConfig, localCategoryMap,
             sidebarWidth, viewMode, isCompactMode, sortBy,
@@ -3796,7 +3884,12 @@ export default {
             cardImportTimes
         });
 
-        // 🌍 角色卡内嵌世界书编辑：组合式函数注入（条目派生/uid/折叠展开/触发词工具）
+        // �️ 自动打标规则表自动持久化保险（v2.1）：任何修改（保存/恢复默认）都自动落盘，
+        //    不依赖按钮显式调用；syncConfigToDisk 内部已有 isRestoringConfig 闸门防启动期误写。
+        //    ⚠️ 必须放在 useConfigPersistence 之后（引用其返回的 syncConfigToDiskDebounced，闭包安全）。
+        watch(autoTagRules, () => { syncConfigToDiskDebounced(); }, { deep: true });
+
+        // �🌍 角色卡内嵌世界书编辑：组合式函数注入（条目派生/uid/折叠展开/触发词工具）
         // ⚠️ 调用时序：必须晚于 cardTokensCache 的定义（updateEntryKeys 运行时引用）；
         //    必须早于 useGraph（注入 worldbookExpanded）。引用方经解构同名 const，零改动。
         const {
@@ -3851,6 +3944,7 @@ export default {
             library, cardData, currentFolderPath, appConfig,
             customCategories, allCategories, isCategoryKnown,
             importedConfig, localCategoryMap, sanitizeImportedTags,
+            autoTagRules: compiledAutoTagRules,
             isDragging, dragCounter, importFileInput,
             // 横切服务
             nativeAlert, showToast, appPrompt, safeData,
@@ -3889,13 +3983,13 @@ export default {
             const taskId = ++buildTaskId;
             setTimeout(async () => {
                 try {
-                    // 异步分片构建索引
-                    const stats = await searchIndex.buildAsync(newLibrary, extractCardSearchableText, extractCardTags, 50);
+                    // 异步分片构建索引（🚀 v2.2 提速：分片 50 → 100，万卡索引构建更快完成）
+                    const stats = await searchIndex.buildAsync(newLibrary, extractCardSearchableText, extractCardTags, 100);
                     if (taskId !== buildTaskId) return; // 被新的 watch 触发取消
                     console.log('⚡ 搜索索引构建完成:', stats);
 
-                    // 异步分片预热 Token 缓存
-                    await tokenCache.warmupAsync(newLibrary, 50);
+                    // 异步分片预热 Token 缓存（🚀 v2.2 提速：分片 50 → 100）
+                    await tokenCache.warmupAsync(newLibrary, 100);
                     if (taskId !== buildTaskId) return;
                     console.log('⚡ Token 缓存预热完成:', tokenCache.getStats());
                 } catch (e) {
@@ -3964,8 +4058,11 @@ export default {
         const {
             showDedupeModal, duplicateGroups, startDedupeScan, resolveDedupeGroup,
             showWbDedupeModal, wbDuplicateGroups, startWorldbookDedupeScan, resolveWbDedupeGroup,
+            showPresetDedupeModal, presetDuplicateGroups, startPresetDedupeScan, resolvePresetDedupeGroup,
+            showContentDedupeModal, contentDuplicateGroups, startContentDedupeScan, resolveContentDedupeGroup,
+            startSmartDedupe,
             showDiffDetailModal, diffMasterItem, diffCompareItem, diffFieldResults, openDiffDetailModal
-        } = useDedupe({ library, worldbooks, activeWorldbook, cardData, estimateCardTokens, nativeAlert, confirmDialog, addLog, reset, cleanupEmptyCategories, deleteCardOverlays });
+        } = useDedupe({ library, worldbooks, activeWorldbook, cardData, presets, activePreset, appMode, estimateCardTokens, nativeAlert, confirmDialog, addLog, reset, cleanupEmptyCategories, deleteCardOverlays });
 
         // 🌍 世界书库与分组：组合式函数注入（共享状态 worldbooks/wbCategoryMap 等保留在 App.vue）
         const {
@@ -4027,7 +4124,7 @@ export default {
             useLocalVector, vectorThreshold, vectorTopK,
             vectorStatus, vectorDownloading, vectorDownloadProgress, vectorDownloadSource, vectorBatchProgress,
             initVectorEngine, deleteVectorCache
-        } = useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey, apiType, resolveApiModel, extractReplyContent, persistCardUpdate, refreshCardData, nativeAlert, confirmDialog, showToast, systemPromptPresets });
+        } = useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey, apiType, resolveApiModel, extractReplyContent, persistCardUpdate, refreshCardData, nativeAlert, confirmDialog, showToast, systemPromptPresets, autoTagRules: compiledAutoTagRules });
 
         // �️ 打标期间跳过搜索索引全量重建（必须在 useAITools 解构 isAITagging 之后注册）：
         //    打标每改一张卡都会 triggerRef(library)，若此时重建索引 + Token 预热
@@ -4153,6 +4250,10 @@ export default {
             systemPromptPresets, activeSystemPromptId, addSystemPromptPreset, deleteSystemPromptPreset, saveSystemPromptsToStorage, getCurrentSystemPromptContent, buildTaggingSystemPrompt,
             // 🚨 破限 (Jailbreak) 状态（对抗模型拒答/道德审查；localStorage 持久化）
             useJailbreak, jailbreakPrompt, jailbreakPresets,
+            // 🏷️ 自动打标规则表（v2.1 可配置）
+            showAutoTagRulesModal, autoTagRules, saveAutoTagRules, resetAutoTagRules,
+            // ✏️ 自定义关键词库（候选词池，可增删）
+            customKeywords, addCustomKeyword, removeCustomKeyword,
             globalAvailableTags, newGlobalTagInput, addTagToGlobalPool, removeTagFromGlobalPool, clearAllTagsFromPool, batchRemoveTags, appendTagToSearch,
             isEditingSystemTags, addGlobalTag,
             chatHistory, chatInput, isChatting, apiEndpoint, apiKey, apiModel, apiType, saveApiConfig, handleApiTypeChange, chatContainer,
@@ -4226,6 +4327,10 @@ export default {
             // 🌍 世界书库筛选与对比查重
             wbSearchQuery, wbFilterType, filteredWorldbooks,
             showWbDedupeModal, wbDuplicateGroups, startWorldbookDedupeScan, resolveWbDedupeGroup,
+            // ⚙️ 预设查重 + 🧬 内容级版本查重 + 🎯 智能查重统一入口（按当前视图自动分发）
+            showPresetDedupeModal, presetDuplicateGroups, startPresetDedupeScan, resolvePresetDedupeGroup,
+            showContentDedupeModal, contentDuplicateGroups, startContentDedupeScan, resolveContentDedupeGroup,
+            startSmartDedupe,
             // ⚖️ 双屏差异比对器 (Diff Inspector)
             showDiffDetailModal, diffMasterItem, diffCompareItem, diffFieldResults, openDiffDetailModal,
             // 🌐 世界书关系图谱 v2（过滤/搜索/布局/统计/导出）+ 🔗 多书合并 + 🔀 条目导入

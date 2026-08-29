@@ -119,7 +119,7 @@ class SearchIndex {
         const tokens = [];
         let word = '';
         for (const char of String(text)) {
-            if (/\u4e00-\u9fff/.test(char)) {
+            if (/[\u4e00-\u9fff]/.test(char)) {
                 if (word) tokens.push(word);
                 word = '';
                 tokens.push(char);

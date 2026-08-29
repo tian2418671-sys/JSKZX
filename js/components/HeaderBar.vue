@@ -49,8 +49,11 @@
                         <button @click="batchChangeCategoryModal" class="px-3 py-1.5 text-left hover:bg-indigo-600 hover:text-white">📂 批量修改分类分组</button>
                         <button @click="cleanGlobalTagsPrompt" class="px-3 py-1.5 text-left hover:bg-indigo-600 hover:text-white">🧹 清理无效全局标签</button>
                         <div class="h-px bg-zinc-700 my-1"></div>
-                        <button @click="startDedupeScan" class="px-3 py-1.5 text-left hover:bg-amber-600 hover:text-white flex items-center justify-between text-amber-400">
-                            <span>🔍 智能查重与版本清理...</span>
+                        <button @click="startSmartDedupe" class="px-3 py-1.5 text-left hover:bg-amber-600 hover:text-white flex items-center justify-between text-amber-400">
+                            <span>🔍 同名查重与版本清理（{{ dedupeTargetLabel }}）...</span>
+                        </button>
+                        <button @click="startContentDedupeScan" class="px-3 py-1.5 text-left hover:bg-purple-600 hover:text-white flex items-center justify-between text-purple-400">
+                            <span>🧬 版本查重：跨名称识别相似内容（{{ dedupeTargetLabel }}）...</span>
                         </button>
                     </div>
                 </div>
@@ -238,12 +241,18 @@
 </template>
 
 <script>
-import { inject } from 'vue';
+import { inject, computed } from 'vue';
 
 export default {
     name: 'HeaderBar',
     setup() {
         const ctx = inject('appCtx');
+        // 🎯 智能查重目标标签：随当前视图（角色卡/世界书/预设）动态变化
+        const dedupeTargetLabel = computed(() => {
+            if (ctx.appMode.value === 'worldbooks') return '世界书';
+            if (ctx.appMode.value === 'presets') return '预设';
+            return '角色卡';
+        });
         return {
             importFileInput: ctx.importFileInput,
             handleImportFiles: ctx.handleImportFiles,
@@ -263,7 +272,9 @@ export default {
             openAITagModal: ctx.openAITagModal,
             batchChangeCategoryModal: ctx.batchChangeCategoryModal,
             cleanGlobalTagsPrompt: ctx.cleanGlobalTagsPrompt,
-            startDedupeScan: ctx.startDedupeScan,
+            startSmartDedupe: ctx.startSmartDedupe,
+            startContentDedupeScan: ctx.startContentDedupeScan,
+            dedupeTargetLabel,
             viewOptions: ctx.viewOptions,
             sanitizeImportedTags: ctx.sanitizeImportedTags,
             snapshotConfig: ctx.snapshotConfig,

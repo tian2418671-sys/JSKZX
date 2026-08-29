@@ -1,7 +1,42 @@
-# SillyTavern 角色卡管理器 · v1.6.2 → v2.0.0 更新汇总
+# SillyTavern 角色卡管理器 · v1.6.2 → v2.1.0 更新汇总
 
-> 更新周期：2026-08-15 ~ 2026-08-29
+> 更新周期：2026-08-15 ~ 2026-08-30
 > 技术栈：Electron + Vue3 + Tailwind + ECharts
+
+---
+
+## ✨ v2.1.0 —— 可配置规则 + 智能查重 + 万卡性能优化（覆盖发布）
+
+> 内部详细版（对外精简版见 RELEASE_NOTES.md v2.1.0）
+
+### 🎛️ 自动打标规则可配置化（全新）
+- `cardLoader.js`：`defaultAutoTagRules` 38 条系统预设（世界观/题材、种族/物种、人物类型、性格/关系 4 组）+ `compileAutoTagRules(custom)` 编译 = 系统预设全部 + 用户自定义（同名覆盖）+ `autoTagKeywordCandidates` 关键词候选库
+- `AutoTagRulesModal.vue`（新组件）：「系统预设 / 自定义」双 Tab —— 系统预设按组分开展示（默认全部生效）；自定义规则增删改（名称 + 正则实时生效）；自定义关键词库管理（添加/移除/去重）
+- 入口：`AITagModal.vue` 向量引擎区底部「📝 管理规则表」（系统预设已内置，可自定义）
+- 持久化：`autoTagRules` / `customKeywords` 落盘 `app_config.json`（useConfigPersistence payload 增加）
+- 消费：`useAITools`（AI 打标三层漏斗第一层）/ `useCardCrud`（导入自动分类）由 App.vue 注入编译结果
+
+### 🧬 智能查重全面升级（同名 + 内容级 + 预设）
+- `useDedupe.js` 重构扩展：同名查重按名称聚类 + 批量 `getFileStats`（空安全保护）+ 一键清理移回收站（失败回滚提示）
+- `ContentDedupeModal.vue`（新组件）：**内容级版本查重** —— 跨名称识别改名/复制的相似内容（内容指纹，与名称无关）
+- `PresetDedupeModal.vue`（新组件）：**预设查重** —— 按预设名聚类 + 采样参数指纹（`prompts` 数字键升序规范化，避免字典序 "10"<"2" 误判）+ 提示词正文比对 + 推荐保留排序（提示词更全/参数更丰富/更新）+ 一键移回收站
+- `DiffModal.vue`：差异对比类型图标支持（世界书 📖 / 预设 ⚙️ / 角色卡 🃏）
+- `HeaderBar.vue`：智能查重入口「🔍 同名查重与版本清理」/「🧬 版本查重：跨名称识别相似内容」，目标标签随当前视图（角色卡/世界书/预设）动态变化
+- `SidebarPanel.vue`：更多工具折叠整理
+
+### 🚀 万卡性能优化（v2.2/v2.3，真实 11.5GB / 11186 张实测）
+- 主进程扫描：`walkLibraryDir` 文件元数据 stat 由逐文件串行改为 **128 路批量并发**（STAT_BATCH + flushStatQueue，万卡扫描 1.5s）
+- **PNG 内嵌提取缓存**：按 path+mtime+size 缓存提取结果到 `embed_cache_N.json`（LRU 上限 + 单条>512KB 跳过 + 分片原子写防 JSON 超限），二次启动免重读 PNG 头部
+- 批量读取 IPC：READ_BATCH 64→128（主进程）/ 256（渲染层），解析并发 8→16
+- **拉取-解析流水线预取**：批量拉取（IO）与并发解析（CPU）重叠执行
+- **Web Worker 多线程解析**（`cardParseWorker.js` 新）：JSON.parse + 血统鉴定 + 规范化搬到 Worker 线程，与主线程组装双线程并行（Worker 不可用自动回退）
+- `normalizeCardData(noClone)`：批量加载路径原地规范化，省 1 万次 structuredClone 深拷贝
+- **自动打标写盘降噪**：仅「真正新增的标签」才落盘（已存在标签不重写 PNG，首启后二次启动零写盘）
+- 实测：渲染解析 46.7s → 31.4s，蒙版淡出 46.7s → 33.2s
+
+### 🐛 Bug 修复
+- **中文搜索完全失效**（searchIndex.js）：`_tokenize` 中文字符判断 `\/\u4e00-\u9fff\/` 缺少方括号 → 中文 token 全部丢弃 → 中文搜索返回全库（v2.0.0 引入）。修复为 `/[/\u4e00-\u9fff/]`，修复后「赛博」检索 10000→371 正确命中
+- `test/cardCrud.test.mjs`：补充 `autoTagRules` mock（`compileAutoTagRules(null)` 系统预设），46/46 全绿
 
 ---
 
