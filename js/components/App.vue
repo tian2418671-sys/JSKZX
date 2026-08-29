@@ -3903,30 +3903,9 @@ export default {
                 }
             }, 100);
         };
-        watch(library, (newLibrary) => {
-            // 🛡️ 打标进行中跳过全量重建：打标每改一张卡都会 triggerRef(library)，
-            //    若此时重建索引 + Token 预热（几千张卡全量正则/分词），渲染进程
-            //    CPU/内存持续峰值 → native 崩溃（render-process-gone exitCode -36861）。
-            //    改为标记 pending，打标结束后补建一次。
-            if (isAITagging.value) {
-                pendingRebuild = true;
-                buildTaskId++; // 取消在途重建任务
-                return;
-            }
-            pendingRebuild = false;
-            rebuildSearchIndex(newLibrary);
-        }, { deep: false }); // 只监听数组引用变化，不深监听卡片属性
-        // 🛡️ 打标结束（isAITagging false）补建一次索引；延迟 250ms 防与末尾 triggerRef 重复
-        watch(isAITagging, (tagging) => {
-            if (!tagging && pendingRebuild) {
-                setTimeout(() => {
-                    if (pendingRebuild) {
-                        pendingRebuild = false;
-                        rebuildSearchIndex(library.value);
-                    }
-                }, 250);
-            }
-        });
+        // 🛡️ 打标期间跳过搜索索引全量重建的 watch 已移动到 useAITools 解构之后
+        //    （原因：watch(isAITagging) 在 useAITools 解构前引用 isAITagging 会触发 TDZ：
+        //     Cannot access 'Ms' before initialization —— vite build 不报错，运行时崩溃）
         // �📁 角色卡分组/分类：组合式函数注入（状态仍在 App.vue，此处仅注入操作逻辑）
         const {
             addNewCategory, currentCategoryDeletable, currentCategoryRenamable,
@@ -4050,7 +4029,34 @@ export default {
             initVectorEngine, deleteVectorCache
         } = useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey, apiType, resolveApiModel, extractReplyContent, persistCardUpdate, refreshCardData, nativeAlert, confirmDialog, showToast, systemPromptPresets });
 
-        // 💬 聊天测卡：组合式函数注入（共享状态 apiEndpoint/apiKey/apiModel/apiType 与工具 resolveApiModel/extractReplyContent 保留在 App.vue）
+        // �️ 打标期间跳过搜索索引全量重建（必须在 useAITools 解构 isAITagging 之后注册）：
+        //    打标每改一张卡都会 triggerRef(library)，若此时重建索引 + Token 预热
+        //    （几千张卡全量正则/分词），渲染进程 CPU/内存持续峰值 → native 崩溃
+        //    （render-process-gone exitCode -36861）。改为标记 pending，打标结束后补建一次。
+        //    ⚠️ 若移到 useAITools 解构之前，watch(isAITagging) 会触发 TDZ：
+        //    Cannot access 'Ms' before initialization（vite build 不报错，运行时崩溃）
+        watch(library, (newLibrary) => {
+            if (isAITagging.value) {
+                pendingRebuild = true;
+                buildTaskId++; // 取消在途重建任务
+                return;
+            }
+            pendingRebuild = false;
+            rebuildSearchIndex(newLibrary);
+        }, { deep: false }); // 只监听数组引用变化，不深监听卡片属性
+        // 🛡️ 打标结束（isAITagging false）补建一次索引；延迟 250ms 防与末尾 triggerRef 重复
+        watch(isAITagging, (tagging) => {
+            if (!tagging && pendingRebuild) {
+                setTimeout(() => {
+                    if (pendingRebuild) {
+                        pendingRebuild = false;
+                        rebuildSearchIndex(library.value);
+                    }
+                }, 250);
+            }
+        });
+
+        // �💬 聊天测卡：组合式函数注入（共享状态 apiEndpoint/apiKey/apiModel/apiType 与工具 resolveApiModel/extractReplyContent 保留在 App.vue）
         const {
             chatHistory, chatInput, isChatting, chatContainer,
             saveApiConfig, handleApiTypeChange,

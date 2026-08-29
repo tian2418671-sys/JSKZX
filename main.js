@@ -559,12 +559,39 @@ const APP_CONFIG_PATH = path.join(app.getPath('userData'), 'app_config.json');
 //    cardOverlays 随库规模膨胀到几 MB 时，写盘期间窗口直接冻结。
 // 🚀 v1.8.5 并发修复：tmp 文件名加 pid+序号唯一化 —— 异步化后高频/并发调用
 //    （如连续切换快照开关）会共用同一 `.tmp` 路径互相覆盖/撞 ENOENT。
+// 🔧 2026-08-29 修复：writeFile 或 rename 中途失败/进程退出会遗留 `.tmp` 垃圾
+//    （实测 userData 积攒 95 个 app_config/snapshot_config 的 .tmp），
+//    catch 精确清理本次 tmp，并在启动时统一清扫历史残留（见 cleanupStaleConfigTmp）。
 let atomicTmpSeq = 0;
 async function atomicWriteJson(filePath, data) {
   const tmpPath = `${filePath}.${process.pid}.${++atomicTmpSeq}.tmp`;
-  await fsp.writeFile(tmpPath, JSON.stringify(data, null, 2), 'utf-8');
-  await fsp.rename(tmpPath, filePath);
+  try {
+    await fsp.writeFile(tmpPath, JSON.stringify(data, null, 2), 'utf-8');
+    await fsp.rename(tmpPath, filePath);
+  } catch (e) {
+    // 本次写入失败：清理遗留 tmp，绝不误删他人 tmp（tmp 文件名含 pid 唯一化，安全）
+    await fsp.unlink(tmpPath).catch(() => { });
+    throw e;
+  }
 }
+// 🔧 启动时清扫配置原子写的历史 .tmp 残留（写盘中途崩溃/被杀遗留的孤儿文件）
+function cleanupStaleConfigTmp() {
+  try {
+    const userData = app.getPath('userData');
+    const files = fs.readdirSync(userData);
+    for (const name of files) {
+      // 仅清理本应用配置的原子写 tmp：app_config.json.*.tmp / snapshot_config.json.*.tmp / tavern_manager_config.json.*.tmp
+      if (/^(app_config|snapshot_config|tavern_manager_config)\.json\.\d+\.\d+\.tmp$/.test(name)) {
+        const full = path.join(userData, name);
+        try {
+          // 只删未被占用的（应用启动早期无人写，基本都能删）
+          fs.unlinkSync(full);
+        } catch (e) { /* 被占用则跳过，下次启动再清 */ }
+      }
+    }
+  } catch (e) { /* 清理失败静默忽略，不影响启动 */ }
+}
+cleanupStaleConfigTmp();
 
 // 🔁 通用退避重试（代码审查修复 8）：仅对 5xx / 网络错误重试，业务错误（4xx）立即返回
 async function fetchWithRetry(url, options, retries = 2, backoffMs = 800) {
