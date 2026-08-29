@@ -1268,7 +1268,7 @@ app.whenReady().then(() => {
     // paths: [{ path, size, mtime }] —— size 供自适应窗口计算读头长度（兼容纯字符串数组）
     const results = [];
     const items = Array.isArray(paths) ? paths : [];
-    loadEmbedCache(); // 🚀 v2.3 惰性加载缓存（首次调用前）
+    await loadEmbedCache(); // 🚀 v2.3 惰性加载缓存（首次调用前，异步分片读防阻塞）
     for (let i = 0; i < items.length; i += READ_BATCH) {
       const batch = items.slice(i, i + READ_BATCH);
       const part = await Promise.all(batch.map(async (item) => {
@@ -3560,7 +3560,7 @@ const STAT_BATCH = 128;
 const embedCache = new Map();
 let embedCacheLoaded = false;
 let embedCacheSaveTimer = null;
-const EMBED_CACHE_MAX = 2000;             // LRU 上限：最多缓存 2000 张 PNG 提取结果（防缓存文件过大/加载慢）
+const EMBED_CACHE_MAX = 12000;            // LRU 上限：覆盖万卡级库（2000 上限下万卡库命中率仅 20%，二次启动大量重读 PNG）
 const EMBED_CACHE_ITEM_MAX = 512 * 1024;  // 单条 > 512KB 的巨卡不缓存
 const EMBED_CACHE_CHUNK = 500;            // 分片保存：每片 500 条
 function getEmbedCacheBase() {
@@ -3575,7 +3575,7 @@ function cacheSetEmbed(key, data) {
     embedCache.delete(oldest);
   }
 }
-function loadEmbedCache() {
+async function loadEmbedCache() {
   if (embedCacheLoaded) return;
   embedCacheLoaded = true;
   const base = getEmbedCacheBase();
@@ -3586,13 +3586,15 @@ function loadEmbedCache() {
     try { files = fs.readdirSync(dir).filter(f => f.startsWith(path.basename(base) + '_') && f.endsWith('.json')); } catch (e) { /* 目录不存在 */ }
     for (const f of files) {
       try {
-        const raw = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf-8'));
+        // 🚀 异步分片读：缓存文件随 EMBED_CACHE_MAX 提升而变大，同步 readFileSync 会阻塞主进程数秒
+        const raw = JSON.parse(await fs.promises.readFile(path.join(dir, f), 'utf-8'));
         if (raw && raw.v === 1 && raw.items && typeof raw.items === 'object') {
           for (const [k, v] of Object.entries(raw.items)) {
             if (v && typeof v === 'object' && embedCache.size < EMBED_CACHE_MAX) embedCache.set(k, v);
           }
         }
       } catch (e) { /* 单片损坏跳过 */ }
+      await yieldToEventLoop(); // 片间让出事件循环，防大缓存加载阻塞 UI
     }
     if (embedCache.size > 0) console.log(`[embed-cache] 已加载 ${embedCache.size} 条 PNG 内嵌缓存`);
   } catch (e) { /* 缓存损坏/过大时忽略，重新构建 */ }

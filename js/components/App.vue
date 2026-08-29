@@ -153,7 +153,9 @@
         />
 
         <!-- ================= [ 弹窗：全局资产中心（子组件 GlobalAssetModal） ] ================= -->
+        <!-- v-if 惰性挂载：避免加载/入库期间每次都触发 globalAllWorldbooks/globalAllRegexScripts 两处全库遍历 -->
         <global-asset-modal
+            v-if="showGlobalAssetModal"
             :show="showGlobalAssetModal"
             :asset-tab="globalAssetTab"
             :all-worldbooks="globalAllWorldbooks"
