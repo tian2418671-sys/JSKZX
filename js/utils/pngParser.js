@@ -48,33 +48,42 @@ export function deepScanForJSON(buffer) {
     }
 
     // 纯 JSON 文本扫描兜底（【修复】杜绝贪婪正则对超大二进制的灾难性回溯）
-    // 策略：① 只扫描前 1MB（防止整图暴力匹配）；② 用 indexOf/lastIndexOf 线性定位 + 花括号深度配平，完全避免回溯
-    const scanWindow = Math.min(binary.length, 1024 * 1024);
-    const searchable = binary.slice(0, scanWindow);
-    const nameIdx = searchable.indexOf('"name"');
-    if (nameIdx !== -1) {
+    // 策略：① 先扫描前 1MB（防止整图暴力匹配）；② 用 indexOf/lastIndexOf 线性定位 + 花括号
+    //    深度配平，完全避免回溯；③ 🚀 v2.0：1MB 窗口未命中且文件更大时，做整文件兜底扫描，
+    //    保证超大 WebP/损坏 PNG 卡（内嵌大世界书/正则）不再静默丢失。
+    const tryScanJsonText = (searchable, maxEndCap) => {
+        const nameIdx = searchable.indexOf('"name"');
+        if (nameIdx === -1) return null;
         const start = searchable.lastIndexOf('{', nameIdx);
-        if (start !== -1) {
-            // 从 start 的 '{' 起，向后做花括号深度配平，找到完整 JSON 结尾
-            let depth = 0;
-            let end = -1;
-            const maxEnd = Math.min(searchable.length, start + 500 * 1024);
-            for (let i = start; i < maxEnd; i++) {
-                const ch = searchable[i];
-                if (ch === '{') depth++;
-                else if (ch === '}') {
-                    depth--;
-                    if (depth === 0) { end = i; break; }
-                }
-            }
-            if (end > start) {
-                try {
-                    const parsed = JSON.parse(searchable.slice(start, end + 1));
-                    if (parsed.name || parsed.data) return parsed;
-                } catch (e) { /* 忽略解析失败 */ }
+        if (start === -1) return null;
+        // 从 start 的 '{' 起，向后做花括号深度配平，找到完整 JSON 结尾
+        let depth = 0;
+        let end = -1;
+        const maxEnd = Math.min(searchable.length, start + maxEndCap);
+        for (let i = start; i < maxEnd; i++) {
+            const ch = searchable[i];
+            if (ch === '{') depth++;
+            else if (ch === '}') {
+                depth--;
+                if (depth === 0) { end = i; break; }
             }
         }
+        if (end <= start) return null;
+        try {
+            const parsed = JSON.parse(searchable.slice(start, end + 1));
+            if (parsed.name || parsed.data) return parsed;
+        } catch (e) { /* 忽略解析失败 */ }
+        return null;
+    };
+
+    // 第一轮：前 1MB 窗口 + 500KB 配平上限（快速路径，覆盖绝大多数卡）
+    const headWindow = Math.min(binary.length, 1024 * 1024);
+    let found = tryScanJsonText(binary.slice(0, headWindow), 500 * 1024);
+    // 第二轮（大卡兜底）：整文件扫描 + 8MB 配平上限（受文件大小保护，超大卡不再丢）
+    if (!found && binary.length > 1024 * 1024) {
+        found = tryScanJsonText(binary, 8 * 1024 * 1024);
     }
+    if (found) return found;
 
     return null;
 }

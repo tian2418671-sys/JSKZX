@@ -3879,7 +3879,8 @@ export default {
         // 🚀 性能优化：搜索索引构建与 Token 缓存预热（异步分片，不阻塞 UI）
         // 监听 library 变化，分片异步构建索引（每 50 张卡 yield 一次主线程）
         let buildTaskId = 0;
-        watch(library, (newLibrary) => {
+        let pendingRebuild = false;
+        const rebuildSearchIndex = (newLibrary) => {
             if (!newLibrary || newLibrary.length === 0) {
                 searchIndex.clear();
                 tokenCache.clear();
@@ -3901,7 +3902,31 @@ export default {
                     console.error('⚠️ 搜索索引构建失败:', e);
                 }
             }, 100);
+        };
+        watch(library, (newLibrary) => {
+            // 🛡️ 打标进行中跳过全量重建：打标每改一张卡都会 triggerRef(library)，
+            //    若此时重建索引 + Token 预热（几千张卡全量正则/分词），渲染进程
+            //    CPU/内存持续峰值 → native 崩溃（render-process-gone exitCode -36861）。
+            //    改为标记 pending，打标结束后补建一次。
+            if (isAITagging.value) {
+                pendingRebuild = true;
+                buildTaskId++; // 取消在途重建任务
+                return;
+            }
+            pendingRebuild = false;
+            rebuildSearchIndex(newLibrary);
         }, { deep: false }); // 只监听数组引用变化，不深监听卡片属性
+        // 🛡️ 打标结束（isAITagging false）补建一次索引；延迟 250ms 防与末尾 triggerRef 重复
+        watch(isAITagging, (tagging) => {
+            if (!tagging && pendingRebuild) {
+                setTimeout(() => {
+                    if (pendingRebuild) {
+                        pendingRebuild = false;
+                        rebuildSearchIndex(library.value);
+                    }
+                }, 250);
+            }
+        });
         // �📁 角色卡分组/分类：组合式函数注入（状态仍在 App.vue，此处仅注入操作逻辑）
         const {
             addNewCategory, currentCategoryDeletable, currentCategoryRenamable,

@@ -30,3 +30,6 @@ Thumbs.db
 # 临时备份脚本与下载目录（勿提交）
 .gh_backup.ps1.gh_backup_tmp/
 
+# OpenSquilla 运行时工作目录（勿提交）
+.opensquilla/
+

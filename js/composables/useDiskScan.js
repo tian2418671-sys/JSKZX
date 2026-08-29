@@ -32,6 +32,7 @@ export function useDiskScan({
     const importScanPaths = async (paths) => {
         let added = 0;
         const CONCURRENCY = 8;
+        const seenPaths = new Set(); // 🚀 v2.0：收编路径 O(1) 去重（替代 staging 线性扫描 O(N²)）
         for (let i = 0; i < paths.length; i += CONCURRENCY) {
             const batch = paths.slice(i, i + CONCURRENCY);
             const results = await Promise.all(batch.map(async (entry) => {
@@ -44,7 +45,7 @@ export function useDiskScan({
                     path: absPath,
                     url: isImage ? 'local-file://img/?path=' + encodeURIComponent(absPath) : null
                 };
-                return await parseAndAddCard(file);
+                return await parseAndAddCard(file, { seenPaths });
             }));
             added += results.filter(Boolean).length;
         }

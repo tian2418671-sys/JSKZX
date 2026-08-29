@@ -34,6 +34,17 @@ app.commandLine.appendSwitch('high-dpi-support', '1');
 // 2. 开启 GPU 光栅化，确保高 DPI 缩放下的滚动与动画流畅度不掉帧
 app.commandLine.appendSwitch('enable-gpu-rasterization');
 
+// ================= 本地崩溃转储（crashReporter） =================
+// renderer/GPU 进程 native 崩溃时在 userData/Crashpad 生成 .dmp，
+// 供定位 exitCode 崩溃的真实堆栈（uploadToServer=false 不联网、不上传）。
+try {
+  app.crashReporter.start({
+    uploadToServer: false,
+    productName: 'sillytavern-card-manager',
+    compress: false
+  });
+} catch (e) { /* crashReporter 启动失败不影响主流程 */ }
+
 // ================= 全局异常兜底（崩溃不闪退，错误堆栈落盘） =================
 function crashLogPath() {
   return path.join(app.getPath('userData'), 'crash.log');
@@ -800,6 +811,15 @@ function createWindow() {
   });
   win.webContents.on('render-process-gone', (event, details) => {
     console.error('[renderer] 渲染进程崩溃:', JSON.stringify(details));
+    // 🛡️ 崩溃兜底：记录详情到 crash.log + 自动 reload 恢复，避免白屏/整个应用退出
+    try {
+      fs.appendFileSync(crashLogPath(), `[${new Date().toISOString()}] render-process-gone: ${JSON.stringify(details)}\n`);
+    } catch (e) { /* 日志写入失败忽略 */ }
+    if (details && (details.reason === 'crashed' || details.reason === 'oom' || details.reason === 'killed')) {
+      setTimeout(() => {
+        try { if (!win.isDestroyed()) win.reload(); } catch (e) { /* 恢复失败忽略 */ }
+      }, 1500);
+    }
   });
 
   return win;

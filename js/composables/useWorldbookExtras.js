@@ -3,7 +3,7 @@
  * 收敛：从角色卡提取世界书 / JSONL(Rentry) 导入 / 批量导出 / 快照历史与回滚 / 世界书库统计。
  * 共享状态（worldbooks / activeWorldbook / lastWorldbookDirPath）与工具（nativeAlert / addLog / confirmDialog）保留在 App.vue 并注入。
  */
-import { ref, computed } from 'vue';
+import { ref, computed, triggerRef } from 'vue';
 import { estimateTokens } from '../utils/tokenEstimate.js';
 import { extractBookEntries } from '../utils/cardLoader.js';
 
@@ -86,6 +86,7 @@ export function useWorldbookExtras({ worldbooks, activeWorldbook, lastWorldbookD
         const res = await window.electronAPI.createWorldbook({ filePath, data: wbData });
         if (res?.success) {
             worldbooks.value.push({ path: filePath, name: safeFileName, data: wbData });
+            triggerRef(worldbooks); // shallowRef：手动触发响应式
             addLog(`📤 已从角色卡提取世界书: ${wbName}`, 'success');
             nativeAlert(`已提取世界书《${wbName}》（${cleanEntries.length} 个词条）到世界书库。`, 'info');
         } else {
@@ -114,6 +115,7 @@ export function useWorldbookExtras({ worldbooks, activeWorldbook, lastWorldbookD
                 const res = await window.electronAPI.createWorldbook({ filePath, data: wbData });
                 if (res?.success) {
                     worldbooks.value.push({ path: filePath, name: safeFileName, data: wbData });
+                    triggerRef(worldbooks); // shallowRef：手动触发响应式
                     addLog(`📜 导入 JSONL 世界书: ${bookName}（${parsed.entries.length} 词条）`, 'success');
                 }
             } catch (e) {

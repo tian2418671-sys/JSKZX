@@ -3,7 +3,7 @@
  * 从 App.vue 拆分而来，收敛：世界书的加载/扫描/网址导入/重命名/文件夹导入/删除/克隆/右键菜单，以及世界书分组。
  * 世界书「状态」（worldbooks/activeWorldbook/wbCategoryMap 等）被配置持久化、保存、词条编辑等多处共享，保留在 App.vue 并注入。
  */
-import { ref, computed } from 'vue';
+import { ref, computed, triggerRef } from 'vue';
 
 export function useWorldbooks({
     // 共享状态
@@ -144,6 +144,7 @@ export function useWorldbooks({
 
             // 加入世界书库并设为当前编辑对象
             worldbooks.value.push(newWb);
+            triggerRef(worldbooks); // shallowRef：手动触发响应式
             activeWorldbook.value = newWb;
             importUrl.value = '';
             addLog(`🎉 成功导入世界书: ${bookName}（共 ${entries.length} 个词条）`, 'success');
@@ -252,6 +253,7 @@ export function useWorldbooks({
                 }
 
                 worldbooks.value.push({ path: realPath, name: file.name, data: plainData });
+                triggerRef(worldbooks); // shallowRef：手动触发响应式
                 loadedCount++;
                 addedNames.push(bookName);
                 addLog(`📂 导入世界书: ${bookName}`, 'success');
@@ -284,6 +286,7 @@ export function useWorldbooks({
         const index = worldbooks.value.findIndex(item => item === wb);
         if (index === -1) return;
         worldbooks.value.splice(index, 1);
+        triggerRef(worldbooks); // shallowRef：手动触发响应式
 
         // 清理持久化分组记录（删除后不留孤儿键）
         const delKey = wb.path || wb.name || '';
@@ -352,6 +355,7 @@ export function useWorldbooks({
         }
 
         worldbooks.value.push(newWb);
+        triggerRef(worldbooks); // shallowRef：手动触发响应式
         // 继承源书分组并持久化（副本默认归入源书所在分组）
         const srcCat = getWbCategory(wb);
         if (srcCat && srcCat.trim() !== '') {

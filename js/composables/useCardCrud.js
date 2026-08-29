@@ -6,6 +6,7 @@
  * （useCardGroups 在本组合式函数之后调用，箭头函数体运行时才求值，无 TDZ）。
  * 迁移原则：函数体逐字保留（含 v1.8.5 性能修复与影分身修复注释），不做顺手优化。
  */
+import { triggerRef } from 'vue';
 import { normalizeCardData, isCharacterCardData, autoTagRules } from '../utils/cardLoader.js';
 import { parsePNGChunk, deepScanForJSON } from '../utils/pngParser.js';
 
@@ -39,6 +40,13 @@ export function useCardCrud({
     // 💾 持久化域（配置覆盖层 + 物理重写）
     // =========================================================
 
+    // 🚀 shallowRef 配套：防抖触发 library 响应式（批量操作时 N 次属性变更合并为 1 次 filteredLibrary 重算）
+    let _libTriggerTimer = null;
+    const flushLibraryReactivity = () => {
+        if (_libTriggerTimer) clearTimeout(_libTriggerTimer);
+        _libTriggerTimer = setTimeout(() => triggerRef(library), 100);
+    };
+
     // 单卡分类持久化辅助：写 localStorage 映射 + 统一配置覆盖层（双保险，防重扫冲刷）
     const persistCardCategory = (item) => {
         if (item && item.name) {
@@ -52,6 +60,8 @@ export function useCardCrud({
             }
             syncConfigToDisk();
         }
+        // 🚀 shallowRef 配套：分类/标签变更后防抖触发 library 响应式
+        flushLibraryReactivity();
     };
 
     const persistCardUpdate = async (cardItem, updatePayload = {}) => {
@@ -95,6 +105,8 @@ export function useCardCrud({
                 console.error('卡片文件物理覆盖失败，已用物理配置文件兜底:', err);
             }
         }
+        // 🚀 shallowRef 配套：属性变更后防抖触发 library 响应式（批量打标时 N 次合并为 1 次 filteredLibrary 重算）
+        flushLibraryReactivity();
     };
 
     // 🔧 删除卡片后清理覆盖层 key：防止 app_config.json 的 cardOverlays 随删除操作无限膨胀
@@ -241,7 +253,13 @@ export function useCardCrud({
             // 🚀 v1.8.5：批量加载（staging）时需同时查 staging 与 library ——
             //    加载窗口期手工导入与正在扫描的同路径卡若只查一边会双双入库（影分身）
             const dupIn = (arr) => arr.some(c => c.path === file.path);
-            if (dupIn(opts.target || library.value) || (opts.target && dupIn(library.value))) {
+            // 🚀 v2.0 修复：批量加载时用 seenPaths Set 对 staging 维度 O(1) 判重 ——
+            //    旧版 arr.some 对 staging 全量线性扫描，万张 ≈ 5000 万次路径比较。
+            //    library 维度判重保留（批量加载期 library 为空，代价可忽略）。
+            const inStaging = (opts.seenPaths instanceof Set)
+                ? opts.seenPaths.has(file.path)
+                : dupIn(opts.target || library.value);
+            if (inStaging || (opts.target && dupIn(library.value))) {
                 file._skippedExisting = true;
                 return false;
             }
@@ -337,6 +355,9 @@ export function useCardCrud({
                 //    赋给 library），避免每 push 一张就触发全库 computed（filteredLibrary/
                 //    globalAllWorldbooks 等）失效风暴 —— 千卡库加载期 O(N²) 重算主因之一。
                 (opts.target || library.value).push(cardInfo);
+                if (!opts.target) triggerRef(library); // shallowRef：单卡直接入库时手动触发响应式
+                // 🚀 v2.0 修复：批量加载时登记 seenPaths，供下一张卡 O(1) 判重
+                if (opts.seenPaths instanceof Set) opts.seenPaths.add(file.path);
 
                 // ✅ [补丁] 如果自动分类/打标签使数据发生了变更，必须覆盖物理文件！
                 // （否则新卡导入的自动标签/分类只活在内存，重启后全部丢失）
@@ -411,15 +432,72 @@ export function useCardCrud({
         let addedCount = 0;
 
         const staging = []; // 🚀 暂存数组：加载完成前不触发任何全库 computed
+        const seenPaths = new Set(); // 🚀 v2.0：批量加载 O(1) 去重
         const CONCURRENCY = 8;
+        const READ_BATCH = 64; // 🚀 v2.0：单条批量 IPC 载荷上限（与主进程一致）
         const files = folderData.files;
-        for (let i = 0; i < files.length; i += CONCURRENCY) {
-            const batch = files.slice(i, i + CONCURRENCY);
-            const results = await Promise.all(batch.map(file => parseAndAddCard(file, {
-                target: staging,             // 推入暂存数组而非 library
-                deferAutoTagSave: true       // 写盘延迟到加载完成后批量执行
-            })));
-            addedCount += results.filter(Boolean).length;
+
+        // 🚀 v2.0 修复：流式批量拉取 —— 扫描阶段已不回填 embeddedData，正文改为按
+        //    READ_BATCH 分块经批量 IPC 一次拉取，边拉边解析边释放，杜绝「万张卡完整
+        //    JSON 单条 IPC」与「原始 + clone + library 三份同驻」的内存/序列化爆炸。
+        const hasBatchApi = window.electronAPI
+            && typeof window.electronAPI.readTextBatch === 'function'
+            && typeof window.electronAPI.readEmbeddedBatch === 'function';
+
+        for (let i = 0; i < files.length; i += READ_BATCH) {
+            const chunk = files.slice(i, i + READ_BATCH);
+
+            // 1) 按类型分组，经批量 IPC 一次拉取整块正文（失败则保留空，交 parseAndAddCard 逐卡兜底）
+            if (hasBatchApi) {
+                const jsonFiles = chunk.filter(f => f.name.toLowerCase().endsWith('.json'));
+                const pngFiles = chunk.filter(f => f._needsEmbed); // 仅 PNG；WebP 走 readBuffer+deepScan 兜底
+                await Promise.all([
+                    (async () => {
+                        if (jsonFiles.length === 0) return;
+                        try {
+                            const res = await window.electronAPI.readTextBatch(jsonFiles.map(f => f.path));
+                            const map = new Map((res || []).map(r => [r.path, r]));
+                            for (const f of jsonFiles) {
+                                const r = map.get(f.path);
+                                if (r && r.ok && typeof r.text === 'string') f.rawText = r.text;
+                            }
+                        } catch (err) {
+                            console.warn('[批量读取] readTextBatch 失败，回退逐卡读取', err);
+                        }
+                    })(),
+                    (async () => {
+                        if (pngFiles.length === 0) return;
+                        try {
+                            const res = await window.electronAPI.readEmbeddedBatch(pngFiles.map(f => ({ path: f.path, size: f.size || 0 })));
+                            const map = new Map((res || []).map(r => [r.path, r]));
+                            for (const f of pngFiles) {
+                                const r = map.get(f.path);
+                                if (r && r.ok && r.data && typeof r.data === 'object') f.embeddedData = r.data;
+                                else f.embeddedData = null; // 无内嵌 → 走 readBuffer 兜底
+                            }
+                        } catch (err) {
+                            console.warn('[批量读取] readEmbeddedBatch 失败，回退逐卡读取', err);
+                        }
+                    })()
+                ]);
+            }
+
+            // 2) 并发解析本块（沿用原顺序与 CONCURRENCY 限制）
+            for (let j = 0; j < chunk.length; j += CONCURRENCY) {
+                const batch = chunk.slice(j, j + CONCURRENCY);
+                const results = await Promise.all(batch.map(file => parseAndAddCard(file, {
+                    target: staging,             // 推入暂存数组而非 library
+                    deferAutoTagSave: true,      // 写盘延迟到加载完成后批量执行
+                    seenPaths                   // O(1) 去重
+                })));
+                addedCount += results.filter(Boolean).length;
+            }
+
+            // 3) 释放本块原始正文引用，峰值内存从「三份」压到「一份半」
+            for (const f of chunk) {
+                if (f.rawText) f.rawText = undefined;
+                if (f.embeddedData) f.embeddedData = null;
+            }
         }
         // 🚀 一次性并入（分块 push，同一同步批内 computed 只重算一次）。
         //    ⚠️ 不能写 `library.value = staging` 整体换引用：加载窗口（大库数秒~数十秒）
@@ -430,6 +508,7 @@ export function useCardCrud({
         for (let i = 0; i < staging.length; i += 500) {
             library.value.push(...staging.slice(i, i + 500));
         }
+        triggerRef(library); // shallowRef：批量并入后手动触发一次响应式
         console.log(`成功从 ${folderData.folderPath} 加载了 ${addedCount} 张卡片`);
         // 🔧 v1.8.5 修复：切库后重绑/关闭当前编辑卡片（防"孤儿编辑面板"保存失败）
         if (prevCardPath && cardData.value) {
@@ -468,14 +547,20 @@ export function useCardCrud({
 
                 // 【性能修复】只解析并追加新拖入的文件（O(1) 增量），
                 // 避免原实现调 processElectronFiles 清空全库后逐张重读重解析（千卡库拖 1 张也全量重载）
-                for (const newFilePath of copiedFiles) {
-                    const fName = newFilePath.split(/[\\/]/).pop();
-                    const isImg = /\.(png|jpe?g|webp)$/i.test(fName);
-                    await parseAndAddCard({
-                        name: fName,
-                        path: newFilePath,
-                        url: isImg ? 'local-file://img/?path=' + encodeURIComponent(newFilePath) : null
-                    });
+                // 🚀 v2.0 修复：并发解析 + seenPaths O(1) 去重（替代旧版串行 for...await）
+                const CONCURRENCY = 8;
+                const seenPaths = new Set();
+                for (let i = 0; i < copiedFiles.length; i += CONCURRENCY) {
+                    const batch = copiedFiles.slice(i, i + CONCURRENCY);
+                    await Promise.all(batch.map(newFilePath => {
+                        const fName = newFilePath.split(/[\\/]/).pop();
+                        const isImg = /\.(png|jpe?g|webp)$/i.test(fName);
+                        return parseAndAddCard({
+                            name: fName,
+                            path: newFilePath,
+                            url: isImg ? 'local-file://img/?path=' + encodeURIComponent(newFilePath) : null
+                        }, { seenPaths });
+                    }));
                 }
             } else {
                 nativeAlert('导入失败：卡片格式不支持，或者库中已存在同名文件。', 'warning');

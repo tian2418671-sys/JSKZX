@@ -198,8 +198,12 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
 
         // ============ 第一层：规则匹配（autoTagRules 正则，零成本） ============
         const rulePassedIds = [];
-        for (const id of targetIds) {
-            const card = library.value.find(c => c.id === id);
+        // 🚀 建 O(1) 卡片索引：避免 targetIds 内每张卡都 O(n) find（千卡库 → 千万级比较）
+        const cardIndex = new Map();
+        for (const c of library.value) if (c && c.id) cardIndex.set(c.id, c);
+        for (let i = 0; i < targetIds.length; i++) {
+            const id = targetIds[i];
+            const card = cardIndex.get(id);
             if (!card) continue;
             const d = card.data?.data || card.data || {};
             const text = [d.description, d.personality, d.scenario, d.first_mes].filter(Boolean).join('\n');
@@ -213,9 +217,15 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
             } else {
                 rulePassedIds.push(id);
             }
+            // 🚀 实时进度：每张卡推进一次 current，进度条不再“卡 0”
+            aiTaggingProgress.value.current = i + 1;
+            aiTaggingProgress.value.total = targetIds.length;
+            aiTaggingProgress.value.status = `① 规则匹配中 (${i + 1}/${targetIds.length})...`;
+            // 每 64 张让出主线程一拍，避免长同步循环阻塞 UI / 诱发渲染层崩溃
+            if ((i & 63) === 63) await new Promise(r => setTimeout(r, 0));
         }
         aiTaggingProgress.value = {
-            current: targetIds.length - rulePassedIds.length,
+            current: targetIds.length,
             total: targetIds.length,
             status: `① 规则匹配完成: 命中 ${stats.rule}，剩余 ${rulePassedIds.length} 张待处理`
         };
@@ -223,21 +233,27 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
         // ============ 第二层：本地向量匹配（免费离线，不消耗 Token） ============
         let llmTargetIds = [...rulePassedIds];
         if (useLocalVector.value && rulePassedIds.length > 0 && vectorStatus.value.ready && aiCandidateTags.value.length > 0) {
-            aiTaggingProgress.value.status = `② 向量匹配中 (${rulePassedIds.length} 张)...`;
+            // 🚀 进度条联动：记录基准（规则命中数）并激活向量阶段进度合并
+            vectorMatchBase.value = targetIds.length - rulePassedIds.length;
+            vectorMatchActive.value = true;
+            aiTaggingProgress.value.current = vectorMatchBase.value;
+            aiTaggingProgress.value.status = `② 向量匹配中 (0/${rulePassedIds.length})...`;
             try {
                 const payloads = rulePassedIds.map(id => {
-                    const card = library.value.find(c => c.id === id);
+                    const card = cardIndex.get(id);
+                    if (!card) return null;
                     const d = card.data?.data || card.data || {};
                     const text = [d.description, d.personality, d.scenario, d.first_mes].filter(Boolean).join('\n').substring(0, 800);
                     return { id, name: card.name, text };
-                });
+                }).filter(Boolean);
                 const resp = await window.electronAPI.vectorEngine.batchMatch(
                     payloads, aiCandidateTags.value, vectorTopK.value, vectorThreshold.value
                 );
+                vectorMatchActive.value = false; // 匹配完成，停止合并
                 llmTargetIds = [];
                 if (resp && resp.success && Array.isArray(resp.results)) {
                     for (const vr of resp.results) {
-                        const card = library.value.find(c => c.id === vr.id);
+                        const card = cardIndex.get(vr.id);
                         if (!card) continue;
                         if (vr.tags && vr.tags.length > 0) {
                             await applyAutoTags(card, vr.tags);
@@ -250,6 +266,7 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
                     llmTargetIds = [...rulePassedIds]; // 引擎异常 → 全部降级 LLM
                 }
             } catch (e) {
+                vectorMatchActive.value = false; // 异常也停止合并
                 console.warn('向量匹配失败，全部降级到 LLM:', e);
                 llmTargetIds = [...rulePassedIds];
             }
@@ -265,8 +282,8 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
                 nativeAlert('错误：已关闭AI自由提取，但未提供候选标签池！\n请先在上方点击添加候选标签，或开启「允许 AI 自由提取标签」。', 'warning');
             } else {
         for (let i = 0; i < llmTargetIds.length; i++) {
-            const currentId = targetIds[i];
-            const card = library.value.find(c => c.id === currentId);
+            const currentId = llmTargetIds[i];
+            const card = cardIndex.get(currentId);
             if (!card) continue;
 
             aiTaggingProgress.value.current = targetIds.length - llmTargetIds.length + i + 1;
@@ -527,6 +544,10 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
     const vectorDownloadProgress = ref({ status: '', file: '', progress: 0 });
     const vectorDownloadSource = ref({ source: '', attempt: 0, total: 0, label: '' });
     const vectorBatchProgress = ref({ current: 0, total: 0 });
+    // 🚀 打标进度条联动：向量匹配阶段把 batchProgress 合并进 aiTaggingProgress，
+    //    避免“② 向量匹配中”时进度条卡住不动。
+    const vectorMatchBase = ref(0);   // 向量匹配开始前已完成的卡数（规则命中数）
+    const vectorMatchActive = ref(false); // 是否处于向量匹配阶段
 
     const sourceLabel = (url) => {
         if (!url) return '';
@@ -547,7 +568,15 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
         };
     };
     const _batchHandler = (p) => {
-        vectorBatchProgress.value = { current: p?.current || 0, total: p?.total || 0 };
+        const cur = p?.current || 0;
+        const tot = p?.total || 0;
+        vectorBatchProgress.value = { current: cur, total: tot };
+        // 向量匹配阶段：把已处理张数叠加到打标进度条（基准 = 规则命中数）
+        if (vectorMatchActive.value && tot > 0) {
+            aiTaggingProgress.value.current = vectorMatchBase.value + cur;
+            aiTaggingProgress.value.total = Math.max(aiTaggingProgress.value.total, vectorMatchBase.value + tot);
+            aiTaggingProgress.value.status = `② 向量匹配中 (${cur}/${tot})...`;
+        }
     };
 
     // 修正 3.6：防御性检查，preload 未更新时不崩

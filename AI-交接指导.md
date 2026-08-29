@@ -13,11 +13,11 @@
 | 项目 | SillyTavern（酒馆）角色卡本地管理桌面工具 |
 | 技术栈 | Electron 43.x + Vue 3.5 (Composition API + SFC) + Vite 8 + Tailwind 3 + ECharts 6 + electron-builder 26 + electron-updater + sharp |
 | 仓库 | `https://github.com/tian2418671-sys/JSKZX.git`（远端 `origin`） |
-| 当前版本 | **v1.8.9**（已发布 Latest）；本地有 2 个未推送 commit，下一版建议 **v1.8.10** |
+| 当前版本 | **v2.0.0**（已发布）；本地开发分支领先 origin 若干 commit（含向量下载+打标崩溃修复），**待用户指令推送** |
 | 当前分支 | 本地 `master`；远端还有 `trae/agent-Fxvvsf`（已合入 master，可删） |
 | 构建产物 | `dist/sillytavern-card-manager-<版本>.exe`（NSIS 安装版）+ `latest.yml` + `.blockmap` + zip 绿色版 |
 | 用户习惯 | 「一条龙服务」= 升版本号 → 更新文档 → 打包 → 推送 → 发 GitHub Release（含 latest.yml 保 OTA） |
-| 关键用户要求 | **没收到推送/打包指令禁止推送/打包**；用户会先自己看效果再决定 |
+| 关键用户要求 | **没收到推送/打包指令禁止推送/打包**；用户会先自己看效果再决定；08-29 明确「只构建开发版，不打包 exe/zip、不上传发布、保持本地」 |
 | 文档体系 | `README.md`（完整开发文档）+ `RELEASE_NOTES.md`（对外更新日志）+ `CHANGELOG.md`（内部详细）+ 本文件 |
 
 ---
@@ -150,6 +150,14 @@ test/              46 个单测（node:test，`npm test`）
 
 ### 📅 2026-08-23（本工作区之外的会话）
 - 会话 ded86a3f / 1443a95f / 29bf9088（cwd=h:\01\北派盗墓笔记，仓库 gui.git）：另一个项目（小说→世界书/UI 前端），与本 JSK管理 项目无关，**不要混淆**
+
+### 📅 2026-08-29（向量模型下载 + AI 打标崩溃修复 + v2.0 性能优化）
+- **向量模型下载链路修复**（commit 40b68f8）：本地向量引擎 `Xenova/paraphrase-multilingual-MiniLM-L12-v2` 三源下载（hf-mirror → huggingface → GitHub 仓库兜底）+ onnx 8 片断点续传 + 注入浏览器 UA 绕过 hf-mirror RST。详见 `memory/2026-08-29.md`
+- **AI 打标渲染进程崩溃修复**（exitCode -36861）：根因是打标每改一张卡 → `triggerRef(library)` → `watch(library)` 全量重建搜索索引 + Token 预热，几千张卡 × 正则/分词 → 渲染进程 native 崩溃。修复：打标期间跳过索引重建（`pendingRebuild` 标记），打标结束补建一次
+- **AI 打标进度条修复**：规则匹配层实时进度（原卡「0」不动）；向量匹配层把 `vector:batchProgress` 合并进 `aiTaggingProgress`；三层 O(n²) find → O(1) Map；修复 LLM 层 `targetIds[i]`→`llmTargetIds[i]` 索引 bug
+- **v2.0 性能优化**：useCardCrud `seenPaths` O(1) 去重 + 流式批量拉取（readTextBatch/readEmbeddedBatch 分块 IPC）；useWorldbooks/Extras `triggerRef`；pngParser 大卡兜底；tokenEstimate 超长文本防护
+- **崩溃兜底**：main.js 加 crashReporter（本地 .dmp）+ render-process-gone 落盘 crash.log + 自动 reload 恢复
+- ⚠️ **当前状态**：全部改动已提交但按用户要求**未打包未发 Release**；用户要求「不打包绿色版/exe、不上传发布、保持本地」
 
 ---
 
