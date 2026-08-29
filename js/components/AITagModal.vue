@@ -54,6 +54,62 @@
                         </div>
                     </div>
 
+                    <!-- 🧠 1.5 本地向量引擎（三层漏斗第二层：免费离线语义匹配） -->
+                    <div class="bg-gray-50 p-3 rounded-lg border border-gray-200">
+                        <label class="flex items-center gap-2 font-bold text-gray-700 mb-2 cursor-pointer">
+                            <input type="checkbox" :checked="useLocalVector"
+                                   @change="$emit('update:useLocalVector', $event.target.checked)" :disabled="isAITagging"
+                                   class="w-4 h-4 text-purple-600 bg-white border-gray-300 rounded focus:ring-purple-600">
+                            🧠 启用本地向量匹配 <span class="text-[10px] font-normal text-gray-500">(免费·离线·不消耗 Token)</span>
+                        </label>
+
+                        <div v-if="useLocalVector" class="space-y-2 ml-6">
+                            <!-- 状态行 -->
+                            <div class="flex items-center gap-3 text-[11px]">
+                                <span v-if="vectorStatus.ready" class="text-green-600">✅ 模型已就绪 ({{ vectorStatus.cacheSizeMB }}MB)</span>
+                                <span v-else-if="vectorDownloading" class="text-blue-600">⏳ 下载中... {{ Math.round(vectorDownloadProgress.progress || 0) }}%<span v-if="vectorDownloadSource.label" class="text-gray-400"> ({{ vectorDownloadSource.label }}{{ vectorDownloadSource.total > 1 ? ' · 源 ' + vectorDownloadSource.attempt + '/' + vectorDownloadSource.total : '' }})</span></span>
+                                <span v-else-if="vectorStatus.cacheExists" class="text-amber-600">📦 缓存已存在，点击加载</span>
+                                <span v-else class="text-gray-500">未下载 (约 120MB)</span>
+
+                                <button v-if="!vectorStatus.ready && !vectorDownloading"
+                                        @click="$emit('init-vector-engine')"
+                                        class="px-2 py-0.5 bg-purple-600 hover:bg-purple-700 text-white rounded text-[11px] transition">
+                                    📥 下载模型
+                                </button>
+                                <button v-if="vectorStatus.cacheExists"
+                                        @click="$emit('delete-vector-cache')" :disabled="isAITagging"
+                                        class="px-2 py-0.5 bg-gray-300 hover:bg-red-500 hover:text-white text-gray-600 rounded text-[11px] transition">
+                                    🗑️ 删除缓存
+                                </button>
+                            </div>
+
+                            <!-- 下载进度条 -->
+                            <div v-if="vectorDownloading" class="w-full bg-gray-200 rounded-full h-2 overflow-hidden">
+                                <div class="bg-purple-600 h-2 rounded-full transition-all duration-300"
+                                     :style="{ width: Math.min(100, Math.round(vectorDownloadProgress.progress || 0)) + '%' }"></div>
+                            </div>
+
+                            <!-- 阈值与 TopK -->
+                            <div class="flex gap-4 items-center">
+                                <label class="text-[11px] text-gray-600 flex items-center gap-1">
+                                    相似度阈值:
+                                    <input type="range" min="0.3" max="0.9" step="0.05"
+                                           :value="vectorThreshold" :disabled="isAITagging"
+                                           @input="$emit('update:vectorThreshold', parseFloat($event.target.value))"
+                                           class="w-20 accent-purple-600">
+                                    {{ Number(vectorThreshold).toFixed(2) }}
+                                </label>
+                                <label class="text-[11px] text-gray-600 flex items-center gap-1">
+                                    Top-K:
+                                    <input type="number" min="1" max="10" :value="vectorTopK" :disabled="isAITagging"
+                                           @input="$emit('update:vectorTopK', parseInt($event.target.value))"
+                                           class="w-12 border border-gray-300 rounded px-1 text-xs">
+                                </label>
+                            </div>
+                            <p class="text-[10px] text-gray-500">阈值越高越精确（漏标多），越低越宽泛（误标多）。建议 0.55-0.70。规则层优先，其次向量，未命中才调用 LLM。</p>
+                        </div>
+                    </div>
+
                     <!-- 🤖 2. AI 打标规则设置 -->
                     <div class="p-3 bg-gray-50 border border-gray-200 rounded-lg space-y-3">
                         <h4 class="text-sm font-bold text-gray-700">🤖 AI 打标规则设置</h4>
@@ -222,7 +278,15 @@ export default {
         isFetchingModels: { type: Boolean, default: false },
         fetchModelStatus: { type: String, default: '' },
         isAITagging: { type: Boolean, default: false },
-        aiTaggingProgress: { type: Object, default: () => ({ current: 0, total: 0, status: '' }) }
+        aiTaggingProgress: { type: Object, default: () => ({ current: 0, total: 0, status: '' }) },
+        // 🧠 本地向量引擎
+        useLocalVector: { type: Boolean, default: false },
+        vectorThreshold: { type: Number, default: 0.65 },
+        vectorTopK: { type: Number, default: 3 },
+        vectorStatus: { type: Object, default: () => ({ ready: false, cacheExists: false, cacheSizeMB: 0, cachePath: '' }) },
+        vectorDownloading: { type: Boolean, default: false },
+        vectorDownloadProgress: { type: Object, default: () => ({ status: '', file: '', progress: 0 }) },
+        vectorDownloadSource: { type: Object, default: () => ({ source: '', attempt: 0, total: 0, label: '' }) }
     },
     emits: [
         'close', 'remove-ai-candidate-tag', 'update:newAICandidateTag', 'add-ai-candidate-tag-manual',
@@ -230,7 +294,10 @@ export default {
         'update:useJailbreak', 'update:jailbreakPrompt',
         'add-system-prompt-preset', 'update:activeSystemPromptId', 'save-system-prompts',
         'delete-system-prompt-preset', 'fetch-available-models', 'update:apiEndpoint',
-        'update:apiKey', 'update:apiModel', 'start-tagging', 'remove-system-common-tag'
+        'update:apiKey', 'update:apiModel', 'start-tagging', 'remove-system-common-tag',
+        // 🧠 本地向量引擎
+        'update:useLocalVector', 'update:vectorThreshold', 'update:vectorTopK',
+        'init-vector-engine', 'delete-vector-cache'
     ]
 };
 </script>

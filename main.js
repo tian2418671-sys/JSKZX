@@ -1173,6 +1173,56 @@ app.whenReady().then(() => {
     }
   });
 
+  // ================= [ 🚀 v2.0 批量读取：万张卡导入提速 ] =================
+  // 逐卡 readText/readBuffer 在万张量级 = 万次 IPC 往返，是导入慢/超时/超时后
+  // 部分丢失的主因之一。新增批量通道：单条 IPC 携带至多 READ_BATCH 张卡，把
+  // 「万次往返」降到「百次」，且不再出现「数 GB 单条消息」。
+  // 安全：每个 path 仍逐个过 isPathAllowed 白名单，越界项返回 ok:false 绝不读取。
+  const READ_BATCH = 64;
+
+  ipcMain.handle('files:readTextBatch', async (event, paths) => {
+    const results = [];
+    const items = Array.isArray(paths) ? paths : [];
+    for (let i = 0; i < items.length; i += READ_BATCH) {
+      const batch = items.slice(i, i + READ_BATCH);
+      const part = await Promise.all(batch.map(async (p) => {
+        if (!isPathAllowed(p)) return { path: p, ok: false, reason: 'forbidden' };
+        try {
+          const text = await fs.promises.readFile(p, 'utf-8');
+          return { path: p, text, ok: true };
+        } catch (e) {
+          return { path: p, ok: false, reason: e.message };
+        }
+      }));
+      results.push(...part);
+      if (i + READ_BATCH < items.length) await yieldToEventLoop();
+    }
+    return results;
+  });
+
+  ipcMain.handle('files:readEmbeddedBatch', async (event, paths) => {
+    // paths: [{ path, size }] —— size 供自适应窗口计算读头长度（兼容纯字符串数组）
+    const results = [];
+    const items = Array.isArray(paths) ? paths : [];
+    for (let i = 0; i < items.length; i += READ_BATCH) {
+      const batch = items.slice(i, i + READ_BATCH);
+      const part = await Promise.all(batch.map(async (item) => {
+        const p = (typeof item === 'string' ? item : (item && item.path)) || '';
+        const size = (item && typeof item === 'object') ? (item.size || 0) : 0;
+        if (!isPathAllowed(p)) return { path: p, ok: false, reason: 'forbidden' };
+        try {
+          const data = await readPngEmbeddedFromFile(p, size);
+          return { path: p, data: data || null, ok: true };
+        } catch (e) {
+          return { path: p, ok: false, reason: e.message };
+        }
+      }));
+      results.push(...part);
+      if (i + READ_BATCH < items.length) await yieldToEventLoop();
+    }
+    return results;
+  });
+
   // IPC：获取所有存在的盘符 (Windows 专属 C:, D:, E: ...)
   ipcMain.handle('get-windows-drives', async () => {
     const drives = [];
@@ -1641,26 +1691,37 @@ app.whenReady().then(() => {
   });
 
   // IPC：系统级拖拽复制文件到库
-  ipcMain.handle('file:copyToLibrary', (event, sourcePaths, targetFolder) => {
+  // 🚀 v2.0 修复：异步化 + 并发复制 —— 旧版 fs.copyFileSync 循环万次阻塞主进程
+  //    事件循环（拖拽/文件菜单批量导入 1 万张时窗口「未响应」）。现按 COPY_CONCURRENCY
+  //    分批并发 fs.promises.copyFile，批间让出事件循环；同名跳过与返回值语义不变。
+  const COPY_CONCURRENCY = 32;
+  ipcMain.handle('file:copyToLibrary', async (event, sourcePaths, targetFolder) => {
     const copiedFiles = [];
     // 【安全加固】目标必须落在白名单内（卡片库）；源为拖拽授权，不做限制
     if (!isPathAllowed(targetFolder)) return copiedFiles;
-    for (const src of sourcePaths) {
-      try {
-        // 确保拖入的是支持的文件格式
-        if (!src.match(/\.(png|webp|json)$/i)) continue;
+    const items = Array.isArray(sourcePaths) ? sourcePaths : [];
+    for (let i = 0; i < items.length; i += COPY_CONCURRENCY) {
+      const batch = items.slice(i, i + COPY_CONCURRENCY);
+      const part = await Promise.all(batch.map(async (src) => {
+        try {
+          // 确保拖入的是支持的文件格式
+          if (!src.match(/\.(png|webp|json)$/i)) return null;
 
-        const fileName = path.basename(src);
-        const dest = path.join(targetFolder, fileName);
+          const fileName = path.basename(src);
+          const dest = path.join(targetFolder, fileName);
 
-        // 如果目标文件夹中没有同名文件，则进行复制
-        if (!fs.existsSync(dest)) {
-          fs.copyFileSync(src, dest);
-          copiedFiles.push(dest);
+          // 如果目标文件夹中没有同名文件，则进行复制
+          if (!fs.existsSync(dest)) {
+            await fs.promises.copyFile(src, dest);
+            return dest;
+          }
+        } catch (e) {
+          console.error('复制文件失败:', e);
         }
-      } catch (e) {
-        console.error('复制文件失败:', e);
-      }
+        return null;
+      }));
+      for (const dest of part) if (dest) copiedFiles.push(dest);
+      if (i + COPY_CONCURRENCY < items.length) await yieldToEventLoop();
     }
     return copiedFiles; // 返回成功复制的文件路径数组
   });
@@ -3279,6 +3340,50 @@ app.whenReady().then(() => {
     }
   });
 
+  // ================= 🧠 向量引擎 IPC（本地语义打标，Worker 线程承载 ONNX 推理） =================
+  const vectorManager = require('./main/vectorManager');
+
+  ipcMain.handle('vector:init', async (event, modelName) => {
+    try {
+      const result = await vectorManager.init(modelName || undefined, (progress) => {
+        event.sender.send('vector:downloadProgress', progress);
+      }, (source, attempt, total) => {
+        event.sender.send('vector:downloadSource', { source, attempt, total });
+      });
+      return { success: true, ...result };
+    } catch (e) {
+      return { success: false, error: e.message };
+    }
+  });
+
+  ipcMain.handle('vector:status', async () => {
+    try {
+      return { success: true, ...(await vectorManager.getStatus()) };
+    } catch (e) {
+      return { success: false, error: e.message };
+    }
+  });
+
+  ipcMain.handle('vector:deleteCache', async () => {
+    try {
+      await vectorManager.deleteCache();
+      return { success: true };
+    } catch (e) {
+      return { success: false, error: e.message };
+    }
+  });
+
+  ipcMain.handle('vector:batchMatch', async (event, { cards, labelPool, topK, threshold, modelName }) => {
+    try {
+      const result = await vectorManager.batchMatch(cards, labelPool, topK, threshold, modelName, (current, total) => {
+        event.sender.send('vector:batchProgress', { current, total });
+      });
+      return { success: true, results: result };
+    } catch (e) {
+      return { success: false, error: e.message };
+    }
+  });
+
   // macOS：点击 Dock 图标且无窗口时重新创建窗口
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -3330,6 +3435,35 @@ async function extractPngEmbedded(pngFiles) {
       }
     }));
     if (i + EMBED_BATCH < pngFiles.length) await yieldToEventLoop();
+  }
+}
+
+// 🚀 v2.0 修复：自适应窗口读取 PNG 内嵌 card JSON（供批量 IPC files:readEmbeddedBatch 使用）
+//    旧 extractPngEmbedded 仅读 1MB 文件头，内嵌大世界书/正则脚本的卡 chunk 超 1MB 时会被
+//    截断 → embeddedData=null 回退整图 readBuffer（慢）甚至静默丢卡。
+//    现按 1MB 头 → 8MB 头 → 整文件 三级窗口重试：大卡不丢、小卡不慢。
+//    返回 null 时由前端回退完整 readBuffer 兜底，绝不漏卡。
+async function readPngEmbeddedFromFile(filePath, size) {
+  if (!filePath || !size) return null;
+  const WINDOWS = [1024 * 1024, 8 * 1024 * 1024]; // 1MB → 8MB
+  let fh = null;
+  try {
+    fh = await fsp.open(filePath, 'r');
+    for (const win of WINDOWS) {
+      if (size <= win) break; // 文件不超过该窗口 → 直接走整文件兜底
+      const head = Buffer.alloc(win);
+      await fh.read(head, 0, win, 0);
+      const data = readTavernPNGChunk(head);
+      if (data) return data;
+    }
+    // 整文件兜底：大卡内嵌数据超 8MB 时全量读取，保证不丢
+    const full = Buffer.alloc(size);
+    await fh.read(full, 0, size, 0);
+    return readTavernPNGChunk(full) || null;
+  } catch (e) {
+    return null; // 读取失败 → 前端自动回退完整 readBuffer，绝不漏卡
+  } finally {
+    if (fh) { try { await fh.close(); } catch (e) { /* 关闭失败忽略 */ } }
   }
 }
 
@@ -3420,9 +3554,12 @@ async function scanAndSaveFolder(folderPath) {
             || fileCollator.compare(a.path, b.path));
     } catch (e) { /* 排序失败不影响功能 */ }
 
-    // 🚀 v1.8.6 并发批量提取 PNG 内嵌 JSON（大幅缩短万卡库启动扫描耗时）
+    // 🚀 v2.0 修复：扫描阶段不再回填 embeddedData（旧 extractPngEmbedded 会把万张卡完整
+    //    内嵌 JSON 塞进 files 数组，经 config:load/library:rescan/dialog:openFolder 一次性
+    //    跨 IPC 返回 → 数百 MB~GB 级单条消息 → 序列化卡顿 + 渲染进程 OOM/白屏。
+    //    现 files 只保留轻量元数据，正文改由前端经 files:readTextBatch/files:readEmbeddedBatch
+    //    分批拉取（保留 _needsEmbed 标记供前端识别 PNG 卡类型）。
     const pngFiles = files.filter(f => f._needsEmbed);
-    if (pngFiles.length > 0) await extractPngEmbedded(pngFiles);
     console.log(`[scan] 扫描完成: ${files.length} 个文件 (${pngFiles.length} 张 PNG), 耗时 ${Date.now() - scanStart}ms`);
 
     // 🧹 修复「卡片导入/扫描出现空分组」：空文件夹不再产生"幽灵分组"。

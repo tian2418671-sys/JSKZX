@@ -4,7 +4,8 @@
  * 一键汉化、提示词智能重构（格式升维）。共享状态与工具（selectedIds/library/cardData/API 配置等）
  * 保留在 App.vue 并注入；行为保持不变。
  */
-import { ref, watch } from 'vue';
+import { ref, watch, onMounted, onUnmounted } from 'vue';
+import { autoTagRules } from '../utils/cardLoader.js';
 
 export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey, apiType, resolveApiModel, extractReplyContent, persistCardUpdate, refreshCardData, nativeAlert, confirmDialog, showToast, systemPromptPresets }) {
     // ================= [ AI 智能批量打标系统 ] =================
@@ -175,25 +176,102 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
             return;
         }
 
-        // ⚠️ 前置校验：关闭「允许 AI 自由提取」时必须先提供候选标签池
-        if (!enableAIExtraction.value && aiCandidateTags.value.length === 0) {
-            nativeAlert('错误：已关闭AI自由提取，但未提供候选标签池！\n请先在上方点击添加候选标签，或开启「允许 AI 自由提取标签」。', 'warning');
-            return;
-        }
-
         isAITagging.value = true;
-        let successCount = 0;
-        let failCount = 0;
+        // 分层统计（修正 3.3：严格区分规则命中/向量命中/LLM/无匹配/失败）
+        const stats = { rule: 0, vector: 0, llm: 0, empty: 0, fail: 0 };
         const failReasons = []; // 收集失败明细（卡片名 + 原因）
 
-        for (let i = 0; i < targetIds.length; i++) {
+        // 统一落盘辅助：双层级写标签（内存显示层 customTags + 酒馆 PNG 元数据层 data.tags）+ 持久化
+        const applyAutoTags = async (card, tags) => {
+            if (!Array.isArray(card.customTags)) card.customTags = [];
+            const dataLayer = card.data?.data || card.data || {};
+            if (!Array.isArray(dataLayer.tags)) dataLayer.tags = [];
+            let addedAny = false;
+            for (const tag of tags) {
+                const cleanTag = String(tag).trim();
+                if (!cleanTag) continue;
+                if (!card.customTags.includes(cleanTag)) { card.customTags.push(cleanTag); addedAny = true; }
+                if (!dataLayer.tags.includes(cleanTag)) { dataLayer.tags.push(cleanTag); addedAny = true; }
+            }
+            if (addedAny) await persistCardUpdate(card, { tags: card.customTags, category: card.category });
+        };
+
+        // ============ 第一层：规则匹配（autoTagRules 正则，零成本） ============
+        const rulePassedIds = [];
+        for (const id of targetIds) {
+            const card = library.value.find(c => c.id === id);
+            if (!card) continue;
+            const d = card.data?.data || card.data || {};
+            const text = [d.description, d.personality, d.scenario, d.first_mes].filter(Boolean).join('\n');
+            const matched = [];
+            for (const [tag, regex] of Object.entries(autoTagRules)) {
+                if (regex.test(text)) matched.push(tag);
+            }
+            if (matched.length >= 1) { // 阈值 ≥1（原 ≥3 在 5 条规则下几乎无命中）
+                await applyAutoTags(card, matched);
+                stats.rule++;
+            } else {
+                rulePassedIds.push(id);
+            }
+        }
+        aiTaggingProgress.value = {
+            current: targetIds.length - rulePassedIds.length,
+            total: targetIds.length,
+            status: `① 规则匹配完成: 命中 ${stats.rule}，剩余 ${rulePassedIds.length} 张待处理`
+        };
+
+        // ============ 第二层：本地向量匹配（免费离线，不消耗 Token） ============
+        let llmTargetIds = [...rulePassedIds];
+        if (useLocalVector.value && rulePassedIds.length > 0 && vectorStatus.value.ready && aiCandidateTags.value.length > 0) {
+            aiTaggingProgress.value.status = `② 向量匹配中 (${rulePassedIds.length} 张)...`;
+            try {
+                const payloads = rulePassedIds.map(id => {
+                    const card = library.value.find(c => c.id === id);
+                    const d = card.data?.data || card.data || {};
+                    const text = [d.description, d.personality, d.scenario, d.first_mes].filter(Boolean).join('\n').substring(0, 800);
+                    return { id, name: card.name, text };
+                });
+                const resp = await window.electronAPI.vectorEngine.batchMatch(
+                    payloads, aiCandidateTags.value, vectorTopK.value, vectorThreshold.value
+                );
+                llmTargetIds = [];
+                if (resp && resp.success && Array.isArray(resp.results)) {
+                    for (const vr of resp.results) {
+                        const card = library.value.find(c => c.id === vr.id);
+                        if (!card) continue;
+                        if (vr.tags && vr.tags.length > 0) {
+                            await applyAutoTags(card, vr.tags);
+                            stats.vector++;
+                        } else {
+                            llmTargetIds.push(vr.id); // ← 关键修正：未命中收集到第三层，绝不静默丢弃
+                        }
+                    }
+                } else {
+                    llmTargetIds = [...rulePassedIds]; // 引擎异常 → 全部降级 LLM
+                }
+            } catch (e) {
+                console.warn('向量匹配失败，全部降级到 LLM:', e);
+                llmTargetIds = [...rulePassedIds];
+            }
+            aiTaggingProgress.value.status = `② 向量匹配完成: 命中 ${stats.vector}，剩余 ${llmTargetIds.length} 张交 LLM`;
+        }
+
+        // ============ 第三层：LLM 兜底（保留原有完整逻辑：重试/退避/Prompt/解析/落盘） ============
+        if (llmTargetIds.length > 0) {
+            // ⚠️ 前置校验（仅 LLM 层需要 API 配置）
+            if (!apiEndpoint.value || !apiEndpoint.value.trim()) {
+                nativeAlert(`规则命中 ${stats.rule} 张，向量命中 ${stats.vector} 张，剩余 ${llmTargetIds.length} 张需要调用 AI 但未配置 API！`, 'warning');
+            } else if (!enableAIExtraction.value && aiCandidateTags.value.length === 0) {
+                nativeAlert('错误：已关闭AI自由提取，但未提供候选标签池！\n请先在上方点击添加候选标签，或开启「允许 AI 自由提取标签」。', 'warning');
+            } else {
+        for (let i = 0; i < llmTargetIds.length; i++) {
             const currentId = targetIds[i];
             const card = library.value.find(c => c.id === currentId);
             if (!card) continue;
 
-            aiTaggingProgress.value.current = i + 1;
+            aiTaggingProgress.value.current = targetIds.length - llmTargetIds.length + i + 1;
             aiTaggingProgress.value.total = targetIds.length;
-            aiTaggingProgress.value.status = `正在分析 (${i + 1}/${targetIds.length}): ${card.name || '未知角色'}`;
+            aiTaggingProgress.value.status = `③ LLM 兜底 (${i + 1}/${llmTargetIds.length}): ${card.name || '未知角色'}`;
 
             try {
                 // 3. 深度提取卡片设定（防爆 Token 截断）
@@ -259,54 +337,42 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
                 }
 
                 if (Array.isArray(newTags) && newTags.length > 0) {
-                    // 防错初始化层级（兼容 V2/V3 结构，不强制嵌套 data.data）
-                    if (!Array.isArray(card.customTags)) card.customTags = [];
-                    const dataLayer = card.data?.data || card.data || {};
-                    if (!Array.isArray(dataLayer.tags)) dataLayer.tags = [];
-
-                    let addedAny = false;
-                    newTags.forEach(tag => {
-                        const cleanTag = String(tag).trim();
-                        if (!cleanTag) return;
-                        // 内存显示层（library 深度响应式，push 即触发界面刷新）
-                        if (!card.customTags.includes(cleanTag)) { card.customTags.push(cleanTag); addedAny = true; }
-                        // 酒馆 PNG 元数据层 data.tags
-                        if (!dataLayer.tags.includes(cleanTag)) { dataLayer.tags.push(cleanTag); addedAny = true; }
-                    });
-
-                    // 7. 统一持久化中枢：写覆盖层 + 物理覆写本地 PNG 文件（剥离 Proxy 转纯对象）
-                    if (addedAny) {
-                        await persistCardUpdate(card, { tags: card.customTags, category: card.category });
-                    }
-                    successCount++;
+                    await applyAutoTags(card, newTags);
+                    stats.llm++;
+                } else {
+                    stats.empty++; // 修正 3.3：模型返回空 → 归入"无匹配"，不是成功
                 }
             } catch (err) {
                 console.error(`❌ 卡片 [${card.name}] 打标失败:`, err);
-                failCount++;
+                stats.fail++;
                 failReasons.push(`${card.name || '未知角色'}: ${(err && err.message) ? err.message : String(err)}`);
             }
 
             // 请求节流：卡片之间留出间隔，配合重试退避，防止触发上游 429 限流（最后一张无需再等）
-            if (i < targetIds.length - 1) await sleep(AI_TAG_DELAY_MS);
+            if (i < llmTargetIds.length - 1) await sleep(AI_TAG_DELAY_MS);
+            }
+            }
         }
 
         // 8. 扫尾工作
         isAITagging.value = false;
         aiTaggingProgress.value.status = '✅ 全部处理完成！';
 
-        // 组装结果提示：失败时逐条展示具体原因（最多 6 条，超长截断防刷屏）
-        let resultMsg = `🎉 批量处理完成！成功更新: ${successCount} 张，失败: ${failCount} 张`;
-        if (failReasons.length > 0) {
+        // 组装结果提示：分层展示 + 失败明细（最多 6 条，超长截断防刷屏）
+        let resultMsg = `🎉 三层漏斗完成！\n① 规则命中: ${stats.rule} | ② 向量命中: ${stats.vector} | ③ LLM: ${stats.llm}`;
+        if (stats.empty > 0) resultMsg += `\n⚠️ 无匹配标签: ${stats.empty} 张`;
+        if (stats.fail > 0) {
+            resultMsg += `\n❌ 失败: ${stats.fail} 张`;
             const shown = failReasons.slice(0, 6);
-            resultMsg += '\n\n❌ 失败原因：\n' + shown.map(r => '· ' + r).join('\n');
+            resultMsg += '\n\n失败原因：\n' + shown.map(r => '· ' + r).join('\n');
             if (failReasons.length > 6) resultMsg += `\n... 等共 ${failReasons.length} 条`;
         }
-        nativeAlert(resultMsg, successCount > 0 ? 'info' : 'warning');
+        nativeAlert(resultMsg, stats.fail > 0 ? 'warning' : 'info');
 
         // 延迟一点关闭弹窗，让用户看到最后的状态
         setTimeout(() => {
             showAITagModal.value = false;
-        }, 1500);
+        }, 2000);
     };
 
     // ================= [ 🌐 AI 一键汉化功能 ] =================
@@ -452,6 +518,89 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
         }
     };
 
+    // ============= 🧠 本地向量引擎（三层漏斗第二层：免费离线语义匹配） =============
+    const useLocalVector = ref(false);          // UI 开关
+    const vectorThreshold = ref(0.65);          // 相似度阈值（建议 0.55-0.70）
+    const vectorTopK = ref(3);                  // 每卡最多匹配标签数
+    const vectorStatus = ref({ ready: false, cacheExists: false, cacheSizeMB: 0, cachePath: '' });
+    const vectorDownloading = ref(false);       // 下载中
+    const vectorDownloadProgress = ref({ status: '', file: '', progress: 0 });
+    const vectorDownloadSource = ref({ source: '', attempt: 0, total: 0, label: '' });
+    const vectorBatchProgress = ref({ current: 0, total: 0 });
+
+    const sourceLabel = (url) => {
+        if (!url) return '';
+        if (url.includes('hf-mirror.com')) return '国内镜像 hf-mirror.com';
+        if (url.includes('huggingface.co') || url.includes('hf.co')) return 'HuggingFace 官方';
+        return url;
+    };
+
+    const _dlHandler = (p) => {
+        vectorDownloadProgress.value = { status: p?.status || '', file: p?.file || '', progress: p?.progress || 0 };
+    };
+    const _srcHandler = (p) => {
+        vectorDownloadSource.value = {
+            source: p?.source || '',
+            attempt: p?.attempt || 0,
+            total: p?.total || 0,
+            label: sourceLabel(p?.source)
+        };
+    };
+    const _batchHandler = (p) => {
+        vectorBatchProgress.value = { current: p?.current || 0, total: p?.total || 0 };
+    };
+
+    // 修正 3.6：防御性检查，preload 未更新时不崩
+    onMounted(async () => {
+        if (!window.electronAPI?.vectorEngine) return;
+        window.electronAPI.vectorEngine.onDownloadProgress(_dlHandler);
+        window.electronAPI.vectorEngine.onDownloadSource?.(_srcHandler);
+        window.electronAPI.vectorEngine.onBatchProgress(_batchHandler);
+        try {
+            const resp = await window.electronAPI.vectorEngine.getStatus();
+            if (resp && resp.success) vectorStatus.value = resp;
+        } catch (e) {
+            console.warn('向量状态获取失败:', e);
+        }
+    });
+    onUnmounted(() => {
+        // preload 内部用 removeAllListeners 重新绑定，组件卸载时无需再清理（IPC 通道仅有一个消费者）
+        // 若未来多实例，需在此调用 removeAllListeners；当前架构安全
+    });
+
+    const initVectorEngine = async () => {
+        if (!window.electronAPI?.vectorEngine) {
+            showToast('当前环境不支持本地向量引擎（需要 Electron 桌面版）', 'warning');
+            return;
+        }
+        vectorDownloading.value = true;
+        try {
+            const resp = await window.electronAPI.vectorEngine.init();
+            if (resp && !resp.success) throw new Error(resp.error || '初始化失败');
+            const statusResp = await window.electronAPI.vectorEngine.getStatus();
+            if (statusResp && statusResp.success) vectorStatus.value = statusResp;
+            showToast('🎉 向量模型已就绪', 'info');
+        } catch (e) {
+            showToast('模型下载失败: ' + e.message, 'error');
+        } finally {
+            vectorDownloading.value = false;
+        }
+    };
+
+    const deleteVectorCache = async () => {
+        const ok = await confirmDialog('确认删除本地向量模型缓存（约 120MB）？\n下次使用需重新下载。');
+        if (!ok) return;
+        try {
+            const resp = await window.electronAPI.vectorEngine.deleteCache();
+            if (resp && !resp.success) throw new Error(resp.error || '删除失败');
+            const statusResp = await window.electronAPI.vectorEngine.getStatus();
+            if (statusResp && statusResp.success) vectorStatus.value = statusResp;
+            showToast('缓存已清理', 'info');
+        } catch (e) {
+            showToast('删除失败: ' + e.message, 'error');
+        }
+    };
+
     return {
         // AI 智能批量打标
         showAITagModal, aiCandidateTags, aiCustomPrompt, aiTaggingProgress, isAITagging, openAITagModal, startAITagging,
@@ -463,6 +612,10 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
         // 破限
         useJailbreak, jailbreakPrompt, jailbreakPresets,
         // 翻译 / 格式升维
-        isTranslating, translateCardContent, isRefactoring, refactorCardFormat
+        isTranslating, translateCardContent, isRefactoring, refactorCardFormat,
+        // 🧠 向量引擎
+        useLocalVector, vectorThreshold, vectorTopK,
+        vectorStatus, vectorDownloading, vectorDownloadProgress, vectorDownloadSource, vectorBatchProgress,
+        initVectorEngine, deleteVectorCache
     };
 }

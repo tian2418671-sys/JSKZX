@@ -44,6 +44,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     readBuffer: (filePath) => ipcRenderer.invoke('file:readBuffer', filePath),
     // 读取文本（用于 JSON 卡片）
     readText: (filePath) => ipcRenderer.invoke('file:readText', filePath),
+    // 🚀 v2.0 批量读取：单条 IPC 携带至多 64 张卡，万张导入从「万次往返」降到「百次」
+    // readTextBatch(paths[]) → [{path,text,ok}]；readEmbeddedBatch([{path,size}]) → [{path,data,ok}]
+    readTextBatch: (paths) => ipcRenderer.invoke('files:readTextBatch', paths),
+    readEmbeddedBatch: (paths) => ipcRenderer.invoke('files:readEmbeddedBatch', paths),
     // 保存卡片 JSON 到本地文件
     saveCard: (filePath, updatedJson) => ipcRenderer.invoke('file:saveCard', filePath, updatedJson),
     // 📸 换角色卡图：选择新图并替换，返回新路径与校验校准报告
@@ -168,5 +172,28 @@ contextBridge.exposeInMainWorld('electronAPI', {
     onUpdateError: (cb) => {
         ipcRenderer.removeAllListeners('update-error');
         ipcRenderer.on('update-error', (event, err) => cb(err));
+    },
+    // 🧠 向量引擎（本地语义匹配，Worker 线程推理）
+    vectorEngine: {
+        init: (modelName) => ipcRenderer.invoke('vector:init', modelName),
+        getStatus: () => ipcRenderer.invoke('vector:status'),
+        deleteCache: () => ipcRenderer.invoke('vector:deleteCache'),
+        batchMatch: (cards, labelPool, topK, threshold, modelName) =>
+            ipcRenderer.invoke('vector:batchMatch', { cards, labelPool, topK, threshold, modelName }),
+        // 监听模型下载进度（用 removeAllListeners 防重复绑定，与现有 onUpdate* 模式一致）
+        onDownloadProgress: (cb) => {
+            ipcRenderer.removeAllListeners('vector:downloadProgress');
+            ipcRenderer.on('vector:downloadProgress', (event, p) => cb(p));
+        },
+        // 监听模型下载源切换（多下载源：官方 HF → 国内镜像）
+        onDownloadSource: (cb) => {
+            ipcRenderer.removeAllListeners('vector:downloadSource');
+            ipcRenderer.on('vector:downloadSource', (event, p) => cb(p));
+        },
+        // 监听批量匹配进度
+        onBatchProgress: (cb) => {
+            ipcRenderer.removeAllListeners('vector:batchProgress');
+            ipcRenderer.on('vector:batchProgress', (event, p) => cb(p));
+        }
     }
 });

@@ -87,6 +87,13 @@
             :fetch-model-status="fetchModelStatus"
             :is-a-i-tagging="isAITagging"
             :ai-tagging-progress="aiTaggingProgress"
+            :use-local-vector="useLocalVector"
+            :vector-threshold="vectorThreshold"
+            :vector-top-k="vectorTopK"
+            :vector-status="vectorStatus"
+            :vector-downloading="vectorDownloading"
+            :vector-download-progress="vectorDownloadProgress"
+            :vector-download-source="vectorDownloadSource"
             @close="showAITagModal = false"
             @remove-ai-candidate-tag="removeAICandidateTag"
             @update:newAICandidateTag="newAICandidateTag = $event"
@@ -106,6 +113,11 @@
             @update:apiModel="apiModel = $event"
             @start-tagging="startAITagging"
             @remove-system-common-tag="removeTagFromGlobalPool"
+            @update:useLocalVector="useLocalVector = $event"
+            @update:vectorThreshold="vectorThreshold = $event"
+            @update:vectorTopK="vectorTopK = $event"
+            @init-vector-engine="initVectorEngine"
+            @delete-vector-cache="deleteVectorCache"
         />
 
         <!-- ================= [ 弹窗：关系图谱（子组件 GraphModal） ] ================= -->
@@ -960,18 +972,35 @@ export default {
             let skippedExisting = 0;
             // 🚀 性能优化：批量导入推入 staging 暂存数组（每张卡不再触发全库 computed 失效 + 搜索索引全量重建），
             //    全部解析完成后一次性分批并入 library（每批 500），自动打标落盘转后台低并发执行。
-            //    与 processElectronFiles 的 v1.8.5 优化模式一致 —— 千卡/万卡批量导入从 O(N²) 降至 O(N)。
             const staging = [];
-            for (const f of files) {
+            const seenPaths = new Set(); // 🚀 v2.0：批量导入 O(1) 去重
+
+            // 🚀 v2.0 修复：第一阶段一次性收集全部真实路径并单次 copyToLibrary ——
+            //    替代旧版循环内每文件一次 copyToLibrary（万张 = 万次 IPC + 万次同步拷贝阻塞主进程）。
+            const realPaths = files.map(f => (window.electronAPI ? window.electronAPI.getPathForFile(f) : null));
+            let copiedPaths = [];
+            if (window.electronAPI && currentFolderPath.value && realPaths.some(p => p)) {
+                const srcs = realPaths.filter(p => p);
+                try {
+                    copiedPaths = await window.electronAPI.copyToLibrary(srcs, currentFolderPath.value);
+                } catch (copyErr) {
+                    console.warn('批量复制到库目录失败', copyErr);
+                    copiedPaths = [];
+                }
+            }
+            // basename → dest 映射（按文件名回填最终库内路径）
+            const copiedByBase = new Map();
+            for (const p of copiedPaths) copiedByBase.set(String(p).split(/[\\/]/).pop(), p);
+
+            for (let idx = 0; idx < files.length; idx++) {
+                const f = files[idx];
                 try {
                     // Electron 33 起 File.path 已移除，经 preload 获取真实绝对路径
-                    const realPath = window.electronAPI ? window.electronAPI.getPathForFile(f) : null;
+                    const realPath = realPaths[idx];
                     const isImage = /\.(png|webp|jpe?g)$/i.test(f.name);
                     const isJson = /\.json$/i.test(f.name);
 
-                    // 🛡️ 破碎图标修复：文件菜单导入的卡片若用 blob URL 做图片地址，
-                    // 应用重启/刷新后 blob URL 立即失效 → 缩略图全变破碎图标。
-                    // 正确做法：先把文件物理复制到当前库目录（与拖拽导入一致），
+                    // 🛡️ 破碎图标修复：先把文件物理复制到当前库目录（与拖拽导入一致），
                     // 再用 local-file:// 永久路径做图片地址 → 重启后图片依然正常显示。
                     let finalPath = realPath || f.name;
                     let finalUrl = null;
@@ -979,21 +1008,14 @@ export default {
                     let rawText = null;
 
                     if (window.electronAPI && realPath && currentFolderPath.value) {
-                        // Electron 环境 + 已设置库目录：复制文件到库，用永久路径
-                        try {
-                            const copied = await window.electronAPI.copyToLibrary([realPath], currentFolderPath.value);
-                            if (copied && copied.length > 0) {
-                                finalPath = copied[0];
-                                finalUrl = isImage ? 'local-file://img/?path=' + encodeURIComponent(copied[0]) : null;
-                            } else {
-                                // 🔧 库内已有同名：跳过本文件并计数，继续处理后续文件
-                                // （切勿 return——那会中止整个批量导入并吞掉汇总提示）
-                                skippedExisting++;
-                                continue;
-                            }
-                        } catch (copyErr) {
-                            console.warn(`复制到库目录失败，跳过该文件: ${f.name}`, copyErr);
-                            continue; // IPC 异常同样只跳过本文件
+                        const dest = copiedByBase.get(f.name);
+                        if (dest) {
+                            finalPath = dest;
+                            finalUrl = isImage ? 'local-file://img/?path=' + encodeURIComponent(dest) : null;
+                        } else {
+                            // 🔧 库内已有同名（或格式不支持被跳过）：计数并继续处理后续文件
+                            skippedExisting++;
+                            continue;
                         }
                     }
 
@@ -1037,7 +1059,7 @@ export default {
                         file.url = URL.createObjectURL(f);
                     }
 
-                    if (await parseAndAddCard(file, { target: staging, deferAutoTagSave: true })) added++;
+                    if (await parseAndAddCard(file, { target: staging, deferAutoTagSave: true, seenPaths })) added++;
                     else if (file._skippedExisting) skippedExisting++;
                     else {
                         // 🔧 解析失败时回收兜底 blob URL（此时无人接管该 URL，
@@ -1049,10 +1071,11 @@ export default {
                     console.warn(`导入失败 ${f.name}`, err);
                 }
             }
-            // 🚀 一次性分批并入 library（每批 500，computed 失效次数从 N 次降至 N/500 次）
+            // 🚀 一次性分批并入 library（shallowRef 下 push 不触发响应式，最后统一 triggerRef）
             for (let i = 0; i < staging.length; i += 500) {
                 library.value.push(...staging.slice(i, i + 500));
             }
+            triggerRef(library); // shallowRef：手动通知 Vue 列表已变更
             // 🚀 自动打标物理落盘转后台低并发执行（避免逐卡写盘 I/O 风暴卡死 UI）
             if (staging.length > 0 && typeof flushDeferredAutoTagSaves === 'function') {
                 flushDeferredAutoTagSaves();
@@ -1159,7 +1182,7 @@ export default {
         const cardData = shallowRef(null); // 【优化】使用浅层响应式，完美解决大卡片切换卡顿
         const imgUrl = ref(null);
         const currentTab = ref('basic');
-        const library = ref([]); // 存放扫描到的角色卡集合
+        const library = shallowRef([]); // 🚀 shallowRef：万卡库避免 Vue 深层 Proxy 化（数十万 Proxy → 内存爆炸/卡顿）
         // ================= 动态分类/分组与多语言系统 =================
         // 全量系统预设分组（中英文对照）
         const allDefaultCategories = [
@@ -2065,26 +2088,32 @@ export default {
                 console.warn('自动加载上次文件夹失败', err);
             }
 
-            // 🌍 自动记忆恢复上次的世界书目录（静默扫描，无需手动选择）
+            // 🌍⚡ 并行恢复世界书库 + 预设目录（互不依赖，原串行 await 改并行省一倍等待）
+            const _secondaryLoads = [];
             if (lastWorldbookDirPath.value) {
-                try {
-                    await scanWorldbookDir(lastWorldbookDirPath.value);
-                    _stage('世界书扫描');
-                    addLog(`📂 自动记忆载入世界书库: ${lastWorldbookDirPath.value}`);
-                } catch (err) {
-                    console.warn('自动加载世界书目录失败', err);
-                }
+                _secondaryLoads.push((async () => {
+                    try {
+                        await scanWorldbookDir(lastWorldbookDirPath.value);
+                        _stage('世界书扫描');
+                        addLog(`📂 自动记忆载入世界书库: ${lastWorldbookDirPath.value}`);
+                    } catch (err) {
+                        console.warn('自动加载世界书目录失败', err);
+                    }
+                })());
             }
-
-            // ⚙️ 自动恢复上次预设目录：导入/复制后的文件会在重启后重新扫描
             if (lastPresetDirPath.value) {
-                try {
-                    await scanPresetDir(lastPresetDirPath.value);
-                    _stage('预设扫描');
-                    addLog(`📂 自动记忆载入预设目录: ${lastPresetDirPath.value}`);
-                } catch (err) {
-                    console.warn('自动加载预设目录失败', err);
-                }
+                _secondaryLoads.push((async () => {
+                    try {
+                        await scanPresetDir(lastPresetDirPath.value);
+                        _stage('预设扫描');
+                        addLog(`📂 自动记忆载入预设目录: ${lastPresetDirPath.value}`);
+                    } catch (err) {
+                        console.warn('自动加载预设目录失败', err);
+                    }
+                })());
+            }
+            if (_secondaryLoads.length > 0) {
+                await Promise.all(_secondaryLoads);
             }
 
             // 数据加载完毕，淡出启动加载蒙版
@@ -2714,7 +2743,7 @@ export default {
         // 视图切换模式：'characters' (角色卡) | 'worldbooks' (世界书) | 'presets' (预设)
         const appMode = ref('characters');
 
-        const worldbooks = ref([]);          // 世界书列表
+        const worldbooks = shallowRef([]);   // 🚀 shallowRef：世界书 entries 深层 Proxy 化导致崩溃
         const activeWorldbook = ref(null);   // 当前正在深度编辑的世界书
 
         // 记忆上次打开的世界书目录（localStorage 持久化，重启自动静默恢复）
@@ -3989,7 +4018,11 @@ export default {
             activeSystemPromptId, addSystemPromptPreset, deleteSystemPromptPreset,
             saveSystemPromptsToStorage, getCurrentSystemPromptContent, buildTaggingSystemPrompt,
             useJailbreak, jailbreakPrompt, jailbreakPresets,
-            isTranslating, translateCardContent, isRefactoring, refactorCardFormat
+            isTranslating, translateCardContent, isRefactoring, refactorCardFormat,
+            // 🧠 本地向量引擎（三层漏斗第二层）
+            useLocalVector, vectorThreshold, vectorTopK,
+            vectorStatus, vectorDownloading, vectorDownloadProgress, vectorDownloadSource, vectorBatchProgress,
+            initVectorEngine, deleteVectorCache
         } = useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey, apiType, resolveApiModel, extractReplyContent, persistCardUpdate, refreshCardData, nativeAlert, confirmDialog, showToast, systemPromptPresets });
 
         // 💬 聊天测卡：组合式函数注入（共享状态 apiEndpoint/apiKey/apiModel/apiType 与工具 resolveApiModel/extractReplyContent 保留在 App.vue）
@@ -4081,6 +4114,10 @@ export default {
             addAICandidateTag, addAICandidateTagManual, removeAICandidateTag,
             isTranslating, translateCardContent,
             isRefactoring, refactorCardFormat,
+            // 🧠 本地向量引擎（三层漏斗第二层）
+            useLocalVector, vectorThreshold, vectorTopK,
+            vectorStatus, vectorDownloading, vectorDownloadProgress, vectorDownloadSource, vectorBatchProgress,
+            initVectorEngine, deleteVectorCache,
             toasts, showToast, notifySortDataStatus,
             systemPromptPresets, activeSystemPromptId, addSystemPromptPreset, deleteSystemPromptPreset, saveSystemPromptsToStorage, getCurrentSystemPromptContent, buildTaggingSystemPrompt,
             // 🚨 破限 (Jailbreak) 状态（对抗模型拒答/道德审查；localStorage 持久化）
