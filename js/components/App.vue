@@ -48,6 +48,18 @@
             @cancel="cancelPrompt"
         />
 
+        <!-- ================= [ 弹窗：通用选项选择（子组件 OptionSelectModal，替代手输名称） ] ================= -->
+        <option-select-modal
+            :show="selectModalVisible"
+            :title="selectModalTitle"
+            :options="selectModalOptions"
+            :default-value="selectModalDefault"
+            :allow-create="selectModalAllowCreate"
+            @select="confirmSelect"
+            @create="confirmSelectCreate"
+            @cancel="cancelSelect"
+        />
+
         <!-- ================= [ 弹窗：批量标签（子组件 BatchTagModal） ] ================= -->
         <batch-tag-modal
             :show="showBatchTagModal"
@@ -457,6 +469,7 @@ import AppLoadingOverlay from './AppLoadingOverlay.vue'; // 启动过渡蒙版
 import ToastContainer from './ToastContainer.vue'; // 全局 Toast 消息容器
 import BatchTagModal from './BatchTagModal.vue'; // 批量设置标签弹窗
 import PromptModal from './PromptModal.vue'; // 通用输入弹窗（替代 prompt）
+import OptionSelectModal from './OptionSelectModal.vue'; // 通用选项选择弹窗（替代手输名称，右键换组等）
 import SingleTagModal from './SingleTagModal.vue'; // 单卡添加标签弹窗
 import DiskScanModal from './DiskScanModal.vue'; // 磁盘扫描进度弹窗
 import UpdateModal from './UpdateModal.vue'; // 版本更新检测弹窗
@@ -532,7 +545,7 @@ document.addEventListener('dragover', (e) => e.preventDefault());
 document.addEventListener('drop', (e) => e.preventDefault());
 
 export default {
-    components: { Section, DragOverlay, AppLoadingOverlay, ToastContainer, BatchTagModal, PromptModal, SingleTagModal, DiskScanModal, UpdateModal, TextModal, ImageModal, ApiSettingsModal, GlobalAssetModal, GraphModal, WbGraphModal, DedupeModal, WbDedupeModal, PresetDedupeModal, ContentDedupeModal, DiffModal, WbMergeModal, WbImportModal, GlobalEntrySearchModal, WbSnapshotModal, ContextMenu, WbContextMenu, AiTagModal, AutoTagRulesModal, HeaderBar, SidebarPanel, EditorPanel, SnapshotModal, PushModal },
+    components: { Section, DragOverlay, AppLoadingOverlay, ToastContainer, BatchTagModal, PromptModal, OptionSelectModal, SingleTagModal, DiskScanModal, UpdateModal, TextModal, ImageModal, ApiSettingsModal, GlobalAssetModal, GraphModal, WbGraphModal, DedupeModal, WbDedupeModal, PresetDedupeModal, ContentDedupeModal, DiffModal, WbMergeModal, WbImportModal, GlobalEntrySearchModal, WbSnapshotModal, ContextMenu, WbContextMenu, AiTagModal, AutoTagRulesModal, HeaderBar, SidebarPanel, EditorPanel, SnapshotModal, PushModal },
     setup() {
         // 主题状态（localStorage 在自定义协议下可能不可用，做防御性读取；默认暗夜极客）
         let savedTheme = 'dark';
@@ -2744,6 +2757,51 @@ export default {
             promptModalResolve = null;
         };
 
+        // ================= 通用选项选择弹窗（替代手输名称，如右键换组/批量移动分组） =================
+        const selectModalVisible = ref(false);
+        const selectModalTitle = ref('');
+        const selectModalOptions = ref([]);   // [{ label, value }]
+        const selectModalDefault = ref('');   // 标记"当前"选项
+        const selectModalAllowCreate = ref(false); // 是否允许新建
+        let selectModalResolve = null; // 保存 promise 回调
+
+        // 打开通用选项选择弹窗，返回 Promise<string|null>（选择返回所选 value；取消返回 null）
+        const appSelect = (title, options, { allowCreate = false, defaultValue = '' } = {}) => {
+            // 🔧 重入保护：上一个弹窗未关闭时先结清其 Promise（按取消处理）
+            if (selectModalResolve) {
+                selectModalResolve(null);
+                selectModalResolve = null;
+            }
+            selectModalTitle.value = title;
+            // 兼容纯字符串数组与 { label, value } 对象数组
+            selectModalOptions.value = (options || []).map(o => (typeof o === 'string' ? { label: o, value: o } : o));
+            selectModalDefault.value = defaultValue || '';
+            selectModalAllowCreate.value = !!allowCreate;
+            selectModalVisible.value = true;
+            return new Promise((resolve) => {
+                selectModalResolve = resolve;
+            });
+        };
+
+        const confirmSelect = (value) => {
+            if (selectModalResolve) selectModalResolve(value);
+            selectModalVisible.value = false;
+            selectModalResolve = null;
+        };
+
+        // 新建分组：同样按所选名称返回（调用方负责移动 + 加入自定义分组）
+        const confirmSelectCreate = (name) => {
+            if (selectModalResolve) selectModalResolve(name);
+            selectModalVisible.value = false;
+            selectModalResolve = null;
+        };
+
+        const cancelSelect = () => {
+            if (selectModalResolve) selectModalResolve(null);
+            selectModalVisible.value = false;
+            selectModalResolve = null;
+        };
+
         // 删除单卡某个标签（内存 customTags + 原生 data.tags 双清，并物理落盘）
         const removeSingleTag = async (tag) => {
             const libItem = library.value.find(item => item.data === cardData.value);
@@ -4008,7 +4066,7 @@ export default {
             deleteCustomCategory, renameCurrentCategory,
             currentCardCategory, handleCardCategoryChange, migrateOverlayKey, moveCardToGroup,
             quickMoveGroup, batchChangeCategory, batchChangeCategoryModal, cleanupEmptyCategories
-        } = useCardGroups({ library, cardData, currentFolderPath, appConfig, selectedIds, customCategories, defaultCategories, removedDefaultKeys, currentCategoryKey, allCategories, isCategoryKnown, nativeAlert, confirmDialog, appPrompt, addLog, persistCardCategory, refreshLibrary, clearSelection, syncConfigToDisk });
+        } = useCardGroups({ library, cardData, currentFolderPath, appConfig, selectedIds, customCategories, defaultCategories, removedDefaultKeys, currentCategoryKey, allCategories, isCategoryKnown, nativeAlert, confirmDialog, appPrompt, appSelect, getCategoryDisplayName, addLog, persistCardCategory, refreshLibrary, clearSelection, syncConfigToDisk });
 
         // ✅ 批量操作：组合式函数注入（共享状态 selectedIds/lastSelectedIndex 与工具 clearSelection/cleanupEmptyCategories/paginatedLibrary 等保留或来自其他组合式函数）
         const {
@@ -4277,6 +4335,8 @@ export default {
             confirmSingleTag, closeSingleTagModal,
             promptModalVisible, promptModalTitle, promptInput,
             confirmPrompt, cancelPrompt,
+            selectModalVisible, selectModalTitle, selectModalOptions, selectModalDefault, selectModalAllowCreate,
+            appSelect, confirmSelect, confirmSelectCreate, cancelSelect,
             // 🌍 世界书双引擎模式
             appMode, worldbooks, activeWorldbook, lastWorldbookDirPath, editorLogs, showEditorLogs, addLog,
             loadWorldbooks, scanWorldbookDir, saveActiveWorldbook, exportActiveWorldbook, exportFilteredWorldbook, saveCurrentAsset,

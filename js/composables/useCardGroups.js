@@ -10,7 +10,7 @@ export function useCardGroups({
     library, cardData, currentFolderPath, appConfig, selectedIds,
     customCategories, defaultCategories, removedDefaultKeys, currentCategoryKey, allCategories, isCategoryKnown,
     // 工具方法
-    nativeAlert, confirmDialog, appPrompt, addLog,
+    nativeAlert, confirmDialog, appPrompt, appSelect, getCategoryDisplayName, addLog,
     persistCardCategory, refreshLibrary, clearSelection, syncConfigToDisk
 }) {
     // 新增自定义分组（用自建弹窗替代 Electron 不支持的 prompt；Electron 环境创建物理子文件夹）
@@ -258,11 +258,23 @@ export function useCardGroups({
         return false;
     };
 
-    // 右键菜单：快速移动单个卡片分组（用自建弹窗替代 prompt）
+    // 📁 组装分组选项列表（供换组/批量移动选择）：预设分组以中文名作为移动目标，自定义分组直接用名称；排除「全部」视图
+    const buildGroupOptions = () => {
+        return allCategories.value
+            .filter(c => c.key !== 'all')
+            .map(c => {
+                const preset = defaultCategories.value.find(d => d.key === c.key);
+                const label = getCategoryDisplayName ? getCategoryDisplayName(c) : (c.cn || c.key);
+                const value = preset ? preset.cn : (c.cn || c.key);
+                return { label, value };
+            });
+    };
+
+    // 右键菜单：快速移动单个卡片分组（选项选择弹窗：从已有分组选择，避免手输名称与物理文件夹不一致导致换组失败；底部可新建）
     const quickMoveGroup = async (item) => {
-        const newCat = await appPrompt(`将卡片 [${item.name}] 移动到分组:`, item.category || '未分类');
-        if (newCat && newCat.trim() !== '') {
-            const cleanCat = newCat.trim();
+        const chosen = await appSelect(`将卡片 [${item.name}] 移动到分组:`, buildGroupOptions(), { allowCreate: true, defaultValue: item.category || '' });
+        if (chosen && chosen.trim() !== '') {
+            const cleanCat = chosen.trim();
             // 📁 物理移动（目标分组文件夹不存在时主进程自动创建）
             const ok = await moveCardToGroup(item, cleanCat);
             if (ok) {
@@ -301,14 +313,13 @@ export function useCardGroups({
         }
     };
 
-    // 批量移动到指定分组（展示现有分组列表，用自建弹窗替代 prompt）
+    // 批量移动到指定分组（选项选择弹窗：从已有分组选择 / 新建，与右键换组交互一致）
     const batchChangeCategoryModal = async () => {
         if (selectedIds.value.length === 0) return;
-        const catNames = allCategories.value.filter(c => c.key !== 'all').map(c => c.cn).join(', ');
-        const newCat = await appPrompt(`将选中的 ${selectedIds.value.length} 张卡片移动到分组:\n(现有分组: ${catNames})`, '未分类');
+        const chosen = await appSelect(`将选中的 ${selectedIds.value.length} 张卡片移动到分组:`, buildGroupOptions(), { allowCreate: true });
         
-        if (newCat && newCat.trim() !== '') {
-            const cleanCat = newCat.trim();
+        if (chosen && chosen.trim() !== '') {
+            const cleanCat = chosen.trim();
             // 📁 批量物理移动（逐张移动并统计成功数）
             let successCount = 0;
             for (const item of library.value) {
