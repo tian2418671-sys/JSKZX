@@ -208,9 +208,12 @@
                         <span v-if="hasLorebook(item)" class="text-emerald-500/80 shrink-0" title="包含世界书">🌍</span>
                         <template v-if="showListTags">
                             <div class="flex items-center gap-1 overflow-hidden truncate">
-                                <span v-for="tag in listTags(item).slice(0, 2)" :key="tag" class="px-1.5 bg-zinc-800/80 text-zinc-400 rounded text-[9px] truncate max-w-[60px]">#{{ tag }}</span>
+                                <span v-for="tag in listTags(item).slice(0, 2)" :key="tag"
+                                      class="px-1.5 rounded text-[9px] truncate max-w-[60px]"
+                                      :class="(cardData && cardData === item.data) ? 'bg-blue-900/70 text-white' : 'bg-zinc-800/80 text-zinc-400'">#{{ tag }}</span>
                                 <button v-if="listTags(item).length > 2" @click.stop="toggleTagExpand(item.id)"
-                                        class="text-[9px] text-zinc-600 hover:text-blue-400 shrink-0 whitespace-nowrap"
+                                        class="text-[9px] shrink-0 whitespace-nowrap"
+                                        :class="(cardData && cardData === item.data) ? 'text-blue-100/90 hover:text-white' : 'text-zinc-600 hover:text-blue-400'"
                                         :title="expandedTagIds.includes(item.id) ? '收起全部标签' : '展开全部标签'">
                                     {{ expandedTagIds.includes(item.id) ? '▲收起' : '+' + (listTags(item).length - 2) }}
                                 </button>
@@ -220,7 +223,9 @@
                     <!-- 行4：展开的全部标签（点展开按钮显示/收起） -->
                     <div v-if="showListTags && expandedTagIds.includes(item.id) && listTags(item).length" class="flex items-center gap-1 flex-wrap text-[9px] leading-none">
                         <span v-for="tag in listTags(item)" :key="'full-'+tag"
-                              class="px-1.5 bg-indigo-500/10 text-indigo-400 rounded border border-indigo-500/20 truncate max-w-[90px]" :title="tag">#{{ tag }}</span>
+                              class="px-1.5 rounded truncate max-w-[90px]"
+                              :class="(cardData && cardData === item.data) ? 'bg-blue-900/60 text-white border border-blue-300/30' : 'bg-indigo-500/10 text-indigo-400 border border-indigo-500/20'"
+                              :title="tag">#{{ tag }}</span>
                     </div>
                 </div>
 
