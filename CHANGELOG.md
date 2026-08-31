@@ -1,7 +1,32 @@
-# SillyTavern 角色卡管理器 · v1.6.2 → v2.1.0 更新汇总
+# SillyTavern 角色卡管理器 · v1.6.2 → v2.1.1 更新汇总
 
-> 更新周期：2026-08-15 ~ 2026-08-30
+> 更新周期：2026-08-15 ~ 2026-08-31
 > 技术栈：Electron + Vue3 + Tailwind + ECharts
+
+---
+
+## 🔧 v2.1.1 —— 换组/标签/列表刷新修复（Bug 修复版）
+
+### 🐛 换组修复
+- **右键换组改为已有分组选项选择弹窗**（`OptionSelectModal.vue` 新组件）：从预设 + 自定义分组下拉选择，避免手输名称与物理文件夹不一致导致换组失败；底部保留新建分组；批量移动分组同步升级（`useCardGroups.js` `buildGroupOptions` 组装分组选项，预设用中文名、自定义用原名）
+- **编辑器分组下拉回滚修复**（`EditorPanel.vue` + `useCardGroups.js`）：library 为 shallowRef，setter 修改内部 category 不触发 computed 重算，`handleCardCategoryChange` 读 getter 缓存旧值 → 移回旧分组（下拉回滚）。改为 `@change` 直接传目标值，不依赖 getter 缓存；失败回滚保留真实原分类
+
+### 🧬 同类 shallowRef 未 flush bug（3 处，`App.vue`）
+- `updateName`（重命名）：修改 `libItem.name` 后未 flush → 列表卡片名不刷新 → 加 `triggerRef(cardData)` + `triggerRef(library)`
+- `replaceCardImage`（换卡图）：修改 `path/avatar` 后未 flush → 列表头像/文件名不刷新 → 加 `triggerRef(library)`
+- `saveToLocalDisk`（保存）：回写 `_mtime/_size` 后未 flush → 「修改时间/大小」排序不刷新 → 加 `triggerRef(library)`
+
+### 🏷️ 标签一致性修复
+- **编辑器标签区合并原生 data.tags**（`App.vue` `activeCardTags`）：此前只读 `customTags`，而部分卡（命中 localStorage 手动分类等分支）加载时 `customTags` 为空但 `data.tags` 有标签 → 编辑器标签区空白而列表正常（实测 34/73 卡受影响）。改为合并 `customTags + data.tags`（与列表 `listTags` 口径一致）
+- 排查确认：AI 打标 `applyAutoTags` / 手动 / 批量 / 全局标签全部双写（customTags+data.tags）；`persistCardUpdate` 以 customTags 为权威列表同步删除且不误删原生 data.tags；搜索索引 `extractCardTags` 三源合并；加载覆盖层命中时 `data.tags ∪ overlay.tags` 合并不丢
+
+### 🎨 侧边栏标签展示（增强，`SidebarPanel.vue`）
+- 列表头部新增「🏷️ 标签」显示开关（localStorage 持久化，可关掉节省空间）
+- 列表项「+N」展开显示全部标签（indigo chips），「▲收起」收起
+- 选中态标签高对比配色：选中（`bg-blue-600`）时标签 chips 改深蓝底白字（`bg-blue-900/70 text-white`），解决蓝色选中背景看不清字体
+
+### 🚀 性能
+- `updateName` 列表刷新改 150ms 防抖（`flushLibraryAfterNameChange`）：避免万卡下每击键同步重算 `filteredLibrary` 全量排序造成输入卡顿；`rebuildSearchIndex` 本身有 100ms 防抖 + `buildTaskId` 取消合并
 
 ---
 

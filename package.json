@@ -1,6 +1,6 @@
 {
   "name": "sillytavern-card-manager",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "description": "SillyTavern 角色卡高级解析中心 - 本地桌面版（Vue 3 + Tailwind CSS + Electron）",
   "main": "main.js",
   "author": {
