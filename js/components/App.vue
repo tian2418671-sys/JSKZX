@@ -2655,6 +2655,9 @@ export default {
             else cardData.value.name = val;
             const libItem = library.value.find(item => item.data === cardData.value);
             if (libItem) libItem.name = val;
+            // 🛡️ shallowRef 修复：修改 library/cardData 内部对象不触发响应式，手动刷新（列表卡片名 + 编辑器 + Token 缓存）
+            if (cardData.value) { triggerRef(cardData); cardTokensCache.delete(cardData.value); }
+            triggerRef(library);
         };
 
         // ================= 单卡标签管理 =================
@@ -2859,6 +2862,9 @@ export default {
                         appConfig.value.cardOverlays[key].tags = [...libItem.customTags];
                     }
                     syncConfigToDisk();
+                    // 🛡️ shallowRef 修复：修改 library 内部对象（mtime/size/内容）后手动刷新，
+                    //    让「修改时间/大小」排序与列表描述即时生效（仅回写不 flush 则排序不重算）
+                    triggerRef(library);
                     showToast('角色卡保存成功！', 'success');
                 }
                 else nativeAlert(`保存失败: ${res.error}`, 'error');
@@ -4108,6 +4114,8 @@ export default {
                 if (cardData.value && item.data === cardData.value) {
                     imgUrl.value = item.avatar;
                 }
+                // 🛡️ shallowRef 修复：修改 library 内部对象不触发响应式，手动刷新（列表头像/文件名）
+                triggerRef(library);
                 nativeAlert(res.message || '换卡图成功', 'info');
             } else {
                 nativeAlert(`换卡图失败: ${(res && res.error) || '未知错误'}`, 'error');
