@@ -195,11 +195,14 @@ export function useCardGroups({
     });
 
     // 当在右侧面板更改卡片分组时触发（同步左侧列表里的卡片归属 + 物理移动文件）
-    const handleCardCategoryChange = async () => {
+    // 🔧 修复：library 为 shallowRef，setter 修改内部 item.category 不触发 computed 重算，
+    //    handleCardCategoryChange 若再读 currentCardCategory 会拿到缓存旧值 → 移回/移到错误分组（下拉回滚）。
+    //    改为由 @change 直接传入用户选中的目标值 targetKey，不依赖 getter 缓存。
+    const handleCardCategoryChange = async (targetKey) => {
         if (!cardData.value) return;
         const libItem = library.value.find(item => item.data === cardData.value);
         if (!libItem) return;
-        const targetKey = currentCardCategory.value;
+        if (!targetKey) targetKey = currentCardCategory.value; // 兼容无参调用（防御）
         const preset = defaultCategories.value.find(c => c.key === targetKey);
         const targetName = preset ? preset.cn : targetKey;
         const oldCat = libItem.category;

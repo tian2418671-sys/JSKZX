@@ -156,6 +156,12 @@
                         class="px-2.5 py-1 rounded-lg transition font-medium" :title="isCompactMode ? '当前：紧凑模式 (点击切换常规)' : '当前：常规模式 (点击切换紧凑)'">
                     {{ isCompactMode ? '📱 常规' : '🗜️ 紧凑' }}
                 </button>
+                <!-- 🏷️ [新增] 列表标签展示开关（仅常规模式生效，可关掉节省空间） -->
+                <button @click="toggleListTags"
+                        :class="showListTags ? 'bg-indigo-600 text-white shadow-sm' : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-400'"
+                        class="px-2.5 py-1 rounded-lg transition font-medium" :title="showListTags ? '当前：列表显示标签 (点击隐藏，仅常规模式)' : '当前：列表隐藏标签 (点击显示)'">
+                    {{ showListTags ? '🏷️ 标签' : '🏷️ 标签' }}
+                </button>
             </div>
         </div>
 
@@ -196,14 +202,25 @@
                     <div class="truncate text-[11px] leading-snug" :class="(cardData && cardData === item.data) ? 'text-blue-100/80' : 'text-zinc-500'">
                         {{ cardDesc(item) || '无描述' }}
                     </div>
-                    <!-- 行3：Token + 世界书 + 标签×2 +N -->
+                    <!-- 行3：Token + 世界书 + 标签×2 +展开（开关控制是否显示标签） -->
                     <div class="flex items-center gap-1.5 text-[10px] text-zinc-500 leading-none">
                         <span v-if="itemTokenCount(item) > 0" class="font-mono text-amber-500/80 shrink-0" title="Token 估算">{{ itemTokenCount(item) }}T</span>
                         <span v-if="hasLorebook(item)" class="text-emerald-500/80 shrink-0" title="包含世界书">🌍</span>
-                        <div class="flex items-center gap-1 overflow-hidden truncate">
-                            <span v-for="tag in listTags(item).slice(0, 2)" :key="tag" class="px-1.5 bg-zinc-800/80 text-zinc-400 rounded text-[9px] truncate max-w-[60px]">#{{ tag }}</span>
-                            <span v-if="listTags(item).length > 2" class="text-[9px] text-zinc-600 shrink-0">+{{ listTags(item).length - 2 }}</span>
-                        </div>
+                        <template v-if="showListTags">
+                            <div class="flex items-center gap-1 overflow-hidden truncate">
+                                <span v-for="tag in listTags(item).slice(0, 2)" :key="tag" class="px-1.5 bg-zinc-800/80 text-zinc-400 rounded text-[9px] truncate max-w-[60px]">#{{ tag }}</span>
+                                <button v-if="listTags(item).length > 2" @click.stop="toggleTagExpand(item.id)"
+                                        class="text-[9px] text-zinc-600 hover:text-blue-400 shrink-0 whitespace-nowrap"
+                                        :title="expandedTagIds.includes(item.id) ? '收起全部标签' : '展开全部标签'">
+                                    {{ expandedTagIds.includes(item.id) ? '▲收起' : '+' + (listTags(item).length - 2) }}
+                                </button>
+                            </div>
+                        </template>
+                    </div>
+                    <!-- 行4：展开的全部标签（点展开按钮显示/收起） -->
+                    <div v-if="showListTags && expandedTagIds.includes(item.id) && listTags(item).length" class="flex items-center gap-1 flex-wrap text-[9px] leading-none">
+                        <span v-for="tag in listTags(item)" :key="'full-'+tag"
+                              class="px-1.5 bg-indigo-500/10 text-indigo-400 rounded border border-indigo-500/20 truncate max-w-[90px]" :title="tag">#{{ tag }}</span>
                     </div>
                 </div>
 
@@ -539,6 +556,23 @@ export default {
         // ✅ [世界书模式] 顶部高级功能区折叠面板（URL导入/目录/分组/筛选收进面板，与角色卡模式一致）
         const showWbAdvanced = ref(false);
 
+        // 🏷️ [新增] 列表标签展示开关（控制列表项是否显示标签，可关掉节省空间；localStorage 持久化）
+        const showListTags = ref((() => {
+            try { return localStorage.getItem('jsTavern_showListTags') !== '0'; } catch (e) { /* 忽略 */ }
+            return true;
+        })());
+        const toggleListTags = () => {
+            showListTags.value = !showListTags.value;
+            try { localStorage.setItem('jsTavern_showListTags', showListTags.value ? '1' : '0'); } catch (e) { /* 忽略 */ }
+        };
+        // 🏷️ [新增] 列表项标签展开状态（记录已展开显示全部标签的卡片 id）
+        const expandedTagIds = ref([]);
+        const toggleTagExpand = (id) => {
+            const idx = expandedTagIds.value.indexOf(id);
+            if (idx === -1) expandedTagIds.value.push(id);
+            else expandedTagIds.value.splice(idx, 1);
+        };
+
         // 🦾 排序切换后检查数据有效性：日期类排序键在当前库无法区分时提示原因（防误以为没反应）
         const handleSortChange = () => {
             setTimeout(() => {
@@ -551,6 +585,10 @@ export default {
             hasActiveFilters,
             showWbAdvanced,
             handleSortChange,
+            showListTags,
+            toggleListTags,
+            expandedTagIds,
+            toggleTagExpand,
             viewOptions: ctx.viewOptions,
             sidebarEl: ctx.sidebarEl,
             sidebarStyle: ctx.sidebarStyle,

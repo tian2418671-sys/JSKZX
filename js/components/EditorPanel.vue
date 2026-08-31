@@ -43,7 +43,7 @@
             <div class="px-3 py-1.5 border-b border-zinc-800 bg-zinc-900 flex flex-wrap gap-x-3 gap-y-1 items-center shrink-0">
                 <div class="flex items-center gap-1.5 shrink-0">
                     <span class="text-[11px] text-zinc-400 font-medium whitespace-nowrap">分组:</span>
-                    <select v-model="currentCardCategory" @change="handleCardCategoryChange" class="bg-zinc-800 border border-zinc-700 text-[11px] rounded px-1.5 py-0.5 outline-none focus:border-blue-500 font-medium text-zinc-300">
+                    <select :value="currentCardCategory" @change="handleCardCategoryChange($event.target.value)" class="bg-zinc-800 border border-zinc-700 text-[11px] rounded px-1.5 py-0.5 outline-none focus:border-blue-500 font-medium text-zinc-300">
                         <option v-for="cat in allCategories.filter(c => c.key !== 'all')" :key="cat.key" :value="cat.key">
                             📁 {{ getCategoryDisplayName(cat) }}
                         </option>
