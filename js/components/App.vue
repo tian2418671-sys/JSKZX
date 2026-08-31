@@ -2679,9 +2679,15 @@ export default {
         const tagModalTitle = ref('为当前角色添加新标签');
 
         // 获取当前正在编辑的卡片的标签
+        // 🔧 修复：合并 customTags + 原生 data.tags（与侧边栏列表 listTags 口径一致）。
+        //    部分卡（命中 localStorage 手动分类等分支）加载时 customTags 为空但 data.tags
+        //    有标签，此前编辑器只读 customTags → 标签区空白而列表正常显示。
         const activeCardTags = computed(() => {
             const libItem = library.value.find(item => item.data === cardData.value);
-            return libItem ? libItem.customTags : [];
+            if (!libItem) return [];
+            const d = (libItem.data && libItem.data.data) || libItem.data || {};
+            const arr = [...(libItem.customTags || []), ...(Array.isArray(d.tags) ? d.tags : [])];
+            return Array.from(new Set(arr.filter(t => t && String(t).trim() !== '')));
         });
 
         const addSingleTag = () => {
