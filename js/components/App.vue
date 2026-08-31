@@ -2649,15 +2649,27 @@ export default {
         // 🗑️ deleteCard（删除当前打开卡片入回收站）已迁至 useCardCrud 组合式函数（见下文 setup 中部调用）
 
         // 更新名称绑定 (处理 V1 / V2 差异)
+        // 🛡️ 防抖刷新列表（万卡下同步 triggerRef(library) 会随每次击键重算 filteredLibrary
+        //    全量排序/过滤，输入卡顿；停止输入后 150ms 一次刷新，与 flushLibraryReactivity 同思路）
+        let _nameFlushTimer = null;
+        const flushLibraryAfterNameChange = () => {
+            if (_nameFlushTimer) clearTimeout(_nameFlushTimer);
+            _nameFlushTimer = setTimeout(() => {
+                _nameFlushTimer = null;
+                triggerRef(library);
+            }, 150);
+        };
+
         const updateName = (val) => {
             if (!cardData.value) return;
             if (cardData.value.data) cardData.value.data.name = val;
             else cardData.value.name = val;
             const libItem = library.value.find(item => item.data === cardData.value);
             if (libItem) libItem.name = val;
-            // 🛡️ shallowRef 修复：修改 library/cardData 内部对象不触发响应式，手动刷新（列表卡片名 + 编辑器 + Token 缓存）
+            // 🛡️ shallowRef 修复：修改 cardData 内部对象不触发响应式（编辑器即时响应，与其他字段 refreshCardData 一致）
             if (cardData.value) { triggerRef(cardData); cardTokensCache.delete(cardData.value); }
-            triggerRef(library);
+            // 🛡️ 列表名刷新用防抖（避免每击键触发万卡 filteredLibrary 全量重算）
+            flushLibraryAfterNameChange();
         };
 
         // ================= 单卡标签管理 =================
