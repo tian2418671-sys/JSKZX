@@ -1004,7 +1004,9 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
 
     // ============= 🧠 本地向量引擎（三层漏斗第二层：免费离线语义匹配） =============
     const useLocalVector = ref(false);          // UI 开关
-    const vectorThreshold = ref(0.65);          // 相似度阈值（建议 0.55-0.70）
+    // 🔧 修正：默认阈值 0.65 → 0.35（与 main/vectorManager.js DEFAULT_THRESHOLD 对齐）。
+    //    实测「长文 vs 短标签」0.65 命中率≈0%，标签展开后 0.35 命中率 80% 且误报可控。
+    const vectorThreshold = ref(0.35);          // 相似度阈值（标签展开后建议 0.30-0.45）
     const vectorTopK = ref(3);                  // 每卡最多匹配标签数
     const vectorStatus = ref({ ready: false, cacheExists: false, cacheSizeMB: 0, cachePath: '' });
     const vectorDownloading = ref(false);       // 下载中
@@ -1408,7 +1410,7 @@ export default {
         aiTaggingProgress: { type: Object, default: () => ({ current: 0, total: 0, status: '' }) },
         // 🧠 本地向量引擎
         useLocalVector: { type: Boolean, default: false },
-        vectorThreshold: { type: Number, default: 0.65 },
+        vectorThreshold: { type: Number, default: 0.35 }, // 与 useAITools / vectorManager 默认值对齐（0.65 命中率≈0）
         vectorTopK: { type: Number, default: 3 },
         vectorStatus: { type: Object, default: () => ({ ready: false, cacheExists: false, cacheSizeMB: 0, cachePath: '' }) },
         vectorDownloading: { type: Boolean, default: false },

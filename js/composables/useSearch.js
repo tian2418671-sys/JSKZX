@@ -80,8 +80,12 @@ export function extractCardSearchableText(item) {
 
 /**
  * 提取卡片的所有标签数组（兼容数组/逗号分隔字符串/customTags/原生 tags）
+ * @param {object} item 卡片对象
+ * @param {{ ignoreNative?: boolean }} [opts] 选项：ignoreNative=true 时忽略卡片自带的原生 data.tags
+ *   （配合「导入时忽略卡片自带标签」开关，防止被忽略的杂乱标签仍参与标签搜索）
  */
-export function extractCardTags(item) {
+export function extractCardTags(item, opts = {}) {
+    const { ignoreNative = false } = opts;
     const data = (item && item.data && item.data.data) || (item && item.data) || {};
     const tags = new Set();
     const collect = (t) => {
@@ -95,7 +99,7 @@ export function extractCardTags(item) {
         collect(item.tags);
         collect(item.customTags);
     }
-    collect(data.tags);
+    if (!ignoreNative) collect(data.tags);
     return Array.from(tags);
 }
 
@@ -107,7 +111,8 @@ export function useSearch({
     currentPage,
     itemsPerPage,
     lastSelectedIndex,
-    estimateCardTokens
+    estimateCardTokens,
+    sanitizeImportedTags   // 导入时忽略卡片自带标签开关（开启时标签搜索不再匹配原生 data.tags）
 }) {
     // ================= [ 性能优化：搜索防抖 ] =================
     const searchQueryInput = ref(''); // 绑定给搜索框的输入值（实时更新）
@@ -359,8 +364,9 @@ export function useSearch({
                 }
 
                 // 3. 标签特定筛选（tag:/t: 语法）—— 索引已处理
+                // 🧹 兼容「导入时忽略卡片自带标签」开关：开启时原生 data.tags 不参与标签搜索
                 if (rules.tagOnly.length > 0 && searchIndex.cardCount === 0) {
-                    const cardTags = extractCardTags(card);
+                    const cardTags = extractCardTags(card, { ignoreNative: sanitizeImportedTags?.value });
                     if (!rules.tagOnly.every(target => cardTags.some(t => t.includes(target)))) return false;
                 }
 

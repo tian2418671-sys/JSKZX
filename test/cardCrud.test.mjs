@@ -79,14 +79,21 @@ function makeCard(overrides = {}) {
 
 // ---------- 优先级链 ①：物理文件夹 ----------
 
-test('优先级链①：物理文件夹分组优先于一切（含 overlay）', () => {
+test('优先级链①：物理文件夹分组优先（分类取文件夹，标签仍恢复 overlay）', () => {
     const m = makeMock();
-    // 即使存在 overlay，物理文件夹位置仍是事实依据
+    // 分类的事实依据 = 物理文件夹位置；但标签必须按覆盖层恢复
+    // （2026-09-01 修复：旧实现 subFolder 分支裸 return 跳过覆盖层恢复，
+    //   导致子文件夹卡 AI 打标/手动标签重启后丢失）
     m.appConfig.value.cardOverlays['C:/lib/恋活/test.png'] = { category: '奇幻', tags: ['魔法'] };
-    const card = makeCard({ path: 'C:/lib/恋活/test.png', subFolder: '恋活/子目录' });
+    const card = makeCard({
+        path: 'C:/lib/恋活/test.png',
+        subFolder: '恋活/子目录',
+        data: { data: { name: '测试卡', description: '魔法 精灵 异世界', tags: [] } }
+    });
     m.crud.processAutoTagsAndCategory(card);
-    assert.equal(card.category, '恋活', '应取一级文件夹名');
-    assert.deepEqual(card.customTags, [], '物理文件夹命中后不应用 overlay/自动规则');
+    assert.equal(card.category, '恋活', '分类应取一级文件夹名，不用 overlay 分类');
+    assert.deepEqual(card.customTags, ['魔法'], '标签仍恢复 overlay（修复：防重启丢失），且不追加自动规则标签');
+    assert.ok(card.data.data.tags.includes('魔法'), '标签应同步回原生 data.tags');
 });
 
 // ---------- 优先级链 ②：overlay（app_config 覆盖层） ----------

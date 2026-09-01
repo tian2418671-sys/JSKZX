@@ -2686,7 +2686,10 @@ export default {
             const libItem = library.value.find(item => item.data === cardData.value);
             if (!libItem) return [];
             const d = (libItem.data && libItem.data.data) || libItem.data || {};
-            const arr = [...(libItem.customTags || []), ...(Array.isArray(d.tags) ? d.tags : [])];
+            // 🧹 兼容「导入时忽略卡片自带标签」开关：开启时不再合并原生 data.tags
+            //   （否则卡片自带杂乱标签仍显示在编辑器标签区，用户看到开关形同虚设）
+            const native = sanitizeImportedTags.value ? [] : (Array.isArray(d.tags) ? d.tags : []);
+            const arr = [...(libItem.customTags || []), ...native];
             return Array.from(new Set(arr.filter(t => t && String(t).trim() !== '')));
         });
 
@@ -4052,7 +4055,7 @@ export default {
             searchQueryInput, searchQuery,
             filteredLibrary, totalPages, paginatedLibrary,
             changePage
-        } = useSearch({ library, currentCategoryKey, allCategories, sortBy, currentPage, itemsPerPage, lastSelectedIndex, estimateCardTokens });
+        } = useSearch({ library, currentCategoryKey, allCategories, sortBy, currentPage, itemsPerPage, lastSelectedIndex, estimateCardTokens, sanitizeImportedTags });
 
         // 🚀 性能优化：搜索索引构建与 Token 缓存预热（异步分片，不阻塞 UI）
         // 监听 library 变化，分片异步构建索引（每 50 张卡 yield 一次主线程）
@@ -4068,7 +4071,9 @@ export default {
             setTimeout(async () => {
                 try {
                     // 异步分片构建索引（🚀 v2.2 提速：分片 50 → 100，万卡索引构建更快完成）
-                    const stats = await searchIndex.buildAsync(newLibrary, extractCardSearchableText, extractCardTags, 100);
+                    // 🧹 标签索引同样尊重「导入时忽略卡片自带标签」开关：开启时原生 data.tags 不入索引
+                    const indexTagsFn = (item) => extractCardTags(item, { ignoreNative: sanitizeImportedTags.value });
+                    const stats = await searchIndex.buildAsync(newLibrary, extractCardSearchableText, indexTagsFn, 100);
                     if (taskId !== buildTaskId) return; // 被新的 watch 触发取消
                     console.log('⚡ 搜索索引构建完成:', stats);
 
@@ -4210,7 +4215,7 @@ export default {
             useLocalVector, vectorThreshold, vectorTopK,
             vectorStatus, vectorDownloading, vectorDownloadProgress, vectorDownloadSource, vectorBatchProgress,
             initVectorEngine, deleteVectorCache
-        } = useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey, apiType, resolveApiModel, extractReplyContent, persistCardUpdate, refreshCardData, nativeAlert, confirmDialog, showToast, systemPromptPresets, autoTagRules: compiledAutoTagRules });
+        } = useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey, apiType, resolveApiModel, extractReplyContent, persistCardUpdate, refreshCardData, nativeAlert, confirmDialog, showToast, systemPromptPresets, autoTagRules: compiledAutoTagRules, syncConfigToDisk });
 
         // �️ 打标期间跳过搜索索引全量重建（必须在 useAITools 解构 isAITagging 之后注册）：
         //    打标每改一张卡都会 triggerRef(library)，若此时重建索引 + Token 预热

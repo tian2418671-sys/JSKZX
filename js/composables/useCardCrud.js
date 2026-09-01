@@ -140,9 +140,18 @@ export function useCardCrud({
         if (window.electronAPI && typeof window.electronAPI.saveCard === 'function' && cardItem.path && cardItem.data) {
             try {
                 const saveRes = await window.electronAPI.saveCard(cardItem.path, JSON.parse(JSON.stringify(cardItem.data)));
-                if (saveRes && saveRes.success && saveRes.mtime) cardItem._mtime = saveRes.mtime;
+                if (saveRes && saveRes.success && saveRes.mtime) {
+                    cardItem._mtime = saveRes.mtime;
+                } else {
+                    // 🔧 修复：物理写盘失败（快照备份失败/PNG 结构异常/文件缺失）时，
+                    //    立即强制落盘覆盖层（不走 500ms 防抖），确保重启后标签仍可恢复
+                    console.error('卡片物理写盘失败，强制落盘覆盖层兜底:', saveRes && saveRes.error);
+                    try { syncConfigToDisk(); } catch (e) { /* 忽略 */ }
+                }
             } catch (err) {
                 console.error('卡片文件物理覆盖失败，已用物理配置文件兜底:', err);
+                // 🔧 修复：同上——物理写盘抛异常时立即强制落盘覆盖层，防重启丢失
+                try { syncConfigToDisk(); } catch (e) { /* 忽略 */ }
             }
         }
         // 🚀 shallowRef 配套：属性变更后防抖触发 library 响应式（批量打标时 N 次合并为 1 次 filteredLibrary 重算）
@@ -173,6 +182,18 @@ export function useCardCrud({
         // （文件系统位置是事实依据，重扫/重命名/移动后保持一致）
         if (cardInfo.subFolder) {
             cardInfo.category = cardInfo.subFolder.split(/[\\/]/)[0] || '未分类';
+            // 🔧 修复 BUG：物理文件夹只决定【分类】，【标签】仍必须按覆盖层恢复——
+            //    旧实现这里直接 return 跳过了覆盖层恢复，导致子文件夹卡片（剧情卡/科幻/
+            //    恋爱/修仙 等分组）的 customTags（AI 打标/手动打标结果）重启后全部丢失。
+            const overlayKey = (cardInfo.path || cardInfo.name || '').toString();
+            const overlay = appConfig.value.cardOverlays && appConfig.value.cardOverlays[overlayKey];
+            if (overlay && Array.isArray(overlay.tags)) {
+                cardInfo.customTags = [...overlay.tags];
+                const dataLayer = cardInfo.data?.data || cardInfo.data || {};
+                if (dataLayer && Array.isArray(dataLayer.tags)) {
+                    dataLayer.tags = Array.from(new Set([...dataLayer.tags, ...overlay.tags]));
+                }
+            }
             return;
         }
         // ---- 【🛡️ 最高优先级】物理配置库覆盖层恢复（用户手动改过的分类/标签，防重扫冲刷） ----

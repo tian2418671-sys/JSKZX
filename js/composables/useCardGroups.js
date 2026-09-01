@@ -169,6 +169,23 @@ export function useCardGroups({
 
         // 📁 物理重命名成功：刷新整个库，让所有卡片的物理路径/子文件夹自动同步（文件位置是事实依据）
         if (physicalRenamed) {
+            // 🔧 修复 BUG：物理重命名分组文件夹后，子卡片的 path 前缀变化
+            // （...\旧组名\xxx.png → ...\新组名\xxx.png），但覆盖层 key 仍是旧路径，
+            //   刷新库后按新 path 找不到覆盖层 → 子文件夹卡的 customTags（AI 打标/手动标签）
+            //   全部丢失。与 moveCardToGroup 的 migrateOverlayKey 同理，此处批量迁移该分组下
+            //   所有卡的覆盖层 key（旧目录前缀 → 新目录前缀），确保重启/刷新后标签完整恢复。
+            const overlays = appConfig.value.cardOverlays || {};
+            const oldPrefix = `${currentFolderPath.value}\\${oldName}`;
+            const newPrefix = `${currentFolderPath.value}\\${cleanNewName}`;
+            let migrated = false;
+            for (const key of Object.keys(overlays)) {
+                if (key === oldPrefix || key.startsWith(oldPrefix + '\\')) {
+                    overlays[newPrefix + key.slice(oldPrefix.length)] = overlays[key];
+                    delete overlays[key];
+                    migrated = true;
+                }
+            }
+            if (migrated) syncConfigToDisk();
             await refreshLibrary();
         } else {
             nativeAlert(`分组已成功重命名为：「${cleanNewName}」`, 'info');

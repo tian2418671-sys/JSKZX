@@ -665,7 +665,11 @@ export default {
             },
             listTags: (item) => {
                 const d = (item && (item.data?.data || item.data)) || {};
-                const arr = [...(item?.customTags || []), ...(Array.isArray(d.tags) ? d.tags : [])];
+                // 🧹 兼容「导入时忽略卡片自带标签」开关：开启时列表不再合并显示卡片原生 data.tags
+                //   （否则开关开启后卡片自带杂乱标签仍显示在列表标签区，用户看到开关形同虚设）
+                const native = (ctx.sanitizeImportedTags && ctx.sanitizeImportedTags.value)
+                    ? [] : (Array.isArray(d.tags) ? d.tags : []);
+                const arr = [...(item?.customTags || []), ...native];
                 return Array.from(new Set(arr.filter(t => t && String(t).trim() !== '')));
             },
             // ✅ 常规模式描述片段（截断 40 字）

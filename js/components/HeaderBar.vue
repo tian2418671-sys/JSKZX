@@ -175,16 +175,16 @@
                         <div class="px-3 py-2 border-b border-zinc-700/50">
                             <div class="flex items-center justify-between text-zinc-300 mb-1">
                                 <span>🖼️ 界面 UI 字号</span>
-                                <span class="text-indigo-400 font-mono font-bold">{{ appSettings.uiFontSize }}px</span>
+                                <span class="text-indigo-400 font-mono font-bold">{{ uiFontSizeDraft }}px</span>
                             </div>
-                            <input type="range" v-model.number="appSettings.uiFontSize" min="10" max="28" step="1" class="w-full h-1.5 bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-indigo-500">
+                            <input type="range" v-model.number="uiFontSizeDraft" min="10" max="28" step="1" @change="commitUiFontSize" class="w-full h-1.5 bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-indigo-500">
                         </div>
                         <div class="px-3 py-2 border-b border-zinc-700/50">
                             <div class="flex items-center justify-between text-zinc-300 mb-1">
                                 <span>📝 工作区编辑字号</span>
-                                <span class="text-amber-400 font-mono font-bold">{{ appSettings.fontSize }}px</span>
+                                <span class="text-amber-400 font-mono font-bold">{{ fontSizeDraft }}px</span>
                             </div>
-                            <input type="range" v-model.number="appSettings.fontSize" min="10" max="36" step="1" class="w-full h-1.5 bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-amber-500">
+                            <input type="range" v-model.number="fontSizeDraft" min="10" max="36" step="1" @change="commitFontSize" class="w-full h-1.5 bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-amber-500">
                         </div>
                         <button @click="resetPersonalizationSettings" class="px-3 py-1.5 text-left hover:bg-zinc-700 text-zinc-300 mt-1">🎨 重置界面外观与字号</button>
                         <button @click="resetApiSettings" class="px-3 py-1.5 text-left hover:bg-rose-600 hover:text-white text-rose-400">🔄 重置 API 接口参数</button>
@@ -241,7 +241,7 @@
 </template>
 
 <script>
-import { inject, computed } from 'vue';
+import { inject, computed, ref, watch } from 'vue';
 
 export default {
     name: 'HeaderBar',
@@ -253,6 +253,20 @@ export default {
             if (ctx.appMode.value === 'presets') return '预设';
             return '角色卡';
         });
+
+        // 🔧 字号滑块性能修复：滑块绑定本地草稿值（拖动只更新旁边数字，零全局副作用），
+        //    松手(@change)才提交到全局 appSettings——避免拖动期间每帧触发全局 CSS 变量
+        //    变更 + localStorage 写入 + 全页面 reflow/repaint 导致的卡顿。
+        const uiFontSizeDraft = ref(ctx.appSettings.value.uiFontSize ?? 13);
+        const fontSizeDraft = ref(ctx.appSettings.value.fontSize ?? 14);
+        // 外部变更（如「重置外观与字号」按钮）时同步草稿值
+        watch(() => [ctx.appSettings.value.uiFontSize, ctx.appSettings.value.fontSize], ([u, f]) => {
+            uiFontSizeDraft.value = u;
+            fontSizeDraft.value = f;
+        });
+        // 松手一次性提交 → 全局字号生效 + 持久化各只触发一次
+        const commitUiFontSize = () => { ctx.appSettings.value.uiFontSize = uiFontSizeDraft.value; };
+        const commitFontSize = () => { ctx.appSettings.value.fontSize = fontSizeDraft.value; };
         return {
             importFileInput: ctx.importFileInput,
             handleImportFiles: ctx.handleImportFiles,
@@ -284,6 +298,10 @@ export default {
             setTheme: ctx.setTheme,
             theme: ctx.theme,
             appSettings: ctx.appSettings,
+            uiFontSizeDraft,
+            fontSizeDraft,
+            commitUiFontSize,
+            commitFontSize,
             resetPersonalizationSettings: ctx.resetPersonalizationSettings,
             resetApiSettings: ctx.resetApiSettings,
             checkForUpdatesManual: ctx.checkForUpdatesManual,

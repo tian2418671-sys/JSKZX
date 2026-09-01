@@ -6,7 +6,7 @@
  */
 import { ref, watch, onMounted, onUnmounted } from 'vue';
 
-export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey, apiType, resolveApiModel, extractReplyContent, persistCardUpdate, refreshCardData, nativeAlert, confirmDialog, showToast, systemPromptPresets, autoTagRules }) {
+export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey, apiType, resolveApiModel, extractReplyContent, persistCardUpdate, refreshCardData, nativeAlert, confirmDialog, showToast, systemPromptPresets, autoTagRules, syncConfigToDisk }) {
     // ================= [ AI 智能批量打标系统 ] =================
     const showAITagModal = ref(false);
     const aiCandidateTags = ref([]); // AI 候选标签池（点击常用标签快速添加 / ✕ 移除）
@@ -196,7 +196,11 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
         };
 
         // ============ 第一层：规则匹配（autoTagRules 正则，零成本） ============
-        const rulePassedIds = [];
+        // 🔧 修正 3.7：规则命中后卡片【不】跳过向量层——规则负责精确命中，向量从候选池
+        //    语义补充其它主题标签，两者配合使用（用户设计意图：规则+向量协同）。
+        //    规则+向量都未命中才交 LLM。
+        const ruleHitIds = [];    // 规则已命中的卡（仍参与向量补充）
+        const rulePassedIds = []; // 规则未命中的卡
         // 🚀 建 O(1) 卡片索引：避免 targetIds 内每张卡都 O(n) find（千卡库 → 千万级比较）
         const cardIndex = new Map();
         for (const c of library.value) if (c && c.id) cardIndex.set(c.id, c);
@@ -213,6 +217,7 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
             if (matched.length >= 1) { // 阈值 ≥1（原 ≥3 在 5 条规则下几乎无命中）
                 await applyAutoTags(card, matched);
                 stats.rule++;
+                ruleHitIds.push(id); // 规则命中 → 仍进向量层做语义补充
             } else {
                 rulePassedIds.push(id);
             }
@@ -230,15 +235,19 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
         };
 
         // ============ 第二层：本地向量匹配（免费离线，不消耗 Token） ============
-        let llmTargetIds = [...rulePassedIds];
-        if (useLocalVector.value && rulePassedIds.length > 0 && vectorStatus.value.ready && aiCandidateTags.value.length > 0) {
-            // 🚀 进度条联动：记录基准（规则命中数）并激活向量阶段进度合并
-            vectorMatchBase.value = targetIds.length - rulePassedIds.length;
+        // 🔧 修正 3.7：向量层处理「规则命中 + 规则未命中」全部卡片（ruleHitIds + rulePassedIds），
+        //    作为规则层的语义补充——规则只覆盖用户自定义正则的主题，向量从候选标签池补充
+        //    其它语义相关标签。规则与向量配合后仍无标签的卡才进入第三层 LLM。
+        const vectorTargetIds = [...rulePassedIds, ...ruleHitIds];
+        let llmTargetIds = [...rulePassedIds]; // 向量未启用时：规则未命中的卡直接交 LLM
+        if (useLocalVector.value && vectorTargetIds.length > 0 && vectorStatus.value.ready && aiCandidateTags.value.length > 0) {
+            // 🚀 进度条联动：规则阶段已完成 N 张，向量阶段从 N 起单调递增（N + cur）
+            vectorMatchBase.value = targetIds.length;
             vectorMatchActive.value = true;
             aiTaggingProgress.value.current = vectorMatchBase.value;
-            aiTaggingProgress.value.status = `② 向量匹配中 (0/${rulePassedIds.length})...`;
+            aiTaggingProgress.value.status = `② 向量匹配中 (0/${vectorTargetIds.length})...`;
             try {
-                const payloads = rulePassedIds.map(id => {
+                const payloads = vectorTargetIds.map(id => {
                     const card = cardIndex.get(id);
                     if (!card) return null;
                     const d = card.data?.data || card.data || {};
@@ -250,19 +259,20 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
                 );
                 vectorMatchActive.value = false; // 匹配完成，停止合并
                 llmTargetIds = [];
+                const rulePassedSet = new Set(rulePassedIds); // 精确判定「规则未命中」
                 if (resp && resp.success && Array.isArray(resp.results)) {
                     for (const vr of resp.results) {
                         const card = cardIndex.get(vr.id);
                         if (!card) continue;
                         if (vr.tags && vr.tags.length > 0) {
                             await applyAutoTags(card, vr.tags);
-                            stats.vector++;
-                        } else {
-                            llmTargetIds.push(vr.id); // ← 关键修正：未命中收集到第三层，绝不静默丢弃
+                            stats.vector++; // 向量命中（含对规则已命中卡的语义补充）
+                        } else if (rulePassedSet.has(vr.id)) {
+                            llmTargetIds.push(vr.id); // 规则未命中 且 向量未命中 → 交 LLM
                         }
                     }
                 } else {
-                    llmTargetIds = [...rulePassedIds]; // 引擎异常 → 全部降级 LLM
+                    llmTargetIds = [...rulePassedIds]; // 引擎异常 → 规则未命中的全部降级 LLM
                 }
             } catch (e) {
                 vectorMatchActive.value = false; // 异常也停止合并
@@ -373,6 +383,12 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
         // 8. 扫尾工作
         isAITagging.value = false;
         aiTaggingProgress.value.status = '✅ 全部处理完成！';
+        // 🔧 修复：打标全程 persistCardUpdate 走 500ms 防抖落盘覆盖层，若打标后用户
+        //    立即关闭窗口，防抖未触发 + beforeunload 冲刷“尽力而为”可能来不及 →
+        //    覆盖层未落盘，重启后标签丢失。此处强制立即落盘一次，确保重启后完整恢复。
+        if (typeof syncConfigToDisk === 'function') {
+            try { syncConfigToDisk(); } catch (e) { /* 忽略 */ }
+        }
 
         // 组装结果提示：分层展示 + 失败明细（最多 6 条，超长截断防刷屏）
         let resultMsg = `🎉 三层漏斗完成！\n① 规则命中: ${stats.rule} | ② 向量命中: ${stats.vector} | ③ LLM: ${stats.llm}`;
@@ -536,7 +552,9 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
 
     // ============= 🧠 本地向量引擎（三层漏斗第二层：免费离线语义匹配） =============
     const useLocalVector = ref(false);          // UI 开关
-    const vectorThreshold = ref(0.65);          // 相似度阈值（建议 0.55-0.70）
+    // 🔧 修正：默认阈值 0.65 → 0.35（与 main/vectorManager.js DEFAULT_THRESHOLD 对齐）。
+    //    实测「长文 vs 短标签」0.65 命中率≈0%，标签展开后 0.35 能命中强相关且误报可控。
+    const vectorThreshold = ref(0.35);          // 相似度阈值（标签展开后建议 0.30-0.45）
     const vectorTopK = ref(3);                  // 每卡最多匹配标签数
     const vectorStatus = ref({ ready: false, cacheExists: false, cacheSizeMB: 0, cachePath: '' });
     const vectorDownloading = ref(false);       // 下载中

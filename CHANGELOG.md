@@ -1,7 +1,35 @@
-# SillyTavern 角色卡管理器 · v1.6.2 → v2.1.1 更新汇总
+# SillyTavern 角色卡管理器 · v1.6.2 → v2.1.3 更新汇总
 
-> 更新周期：2026-08-15 ~ 2026-08-31
+> 更新周期：2026-08-15 ~ 2026-09-01
 > 技术栈：Electron + Vue3 + Tailwind + ECharts
+
+---
+
+## 🔧 v2.1.3 —— 标签持久化 / 向量模型 / 漏斗协同 / UI 性能修复（Bug 修复版）
+
+### 🐛 标签持久化彻底修复（重启不丢失）
+- **子文件夹卡标签重启丢失**（`useCardCrud.js` `processAutoTagsAndCategory`）：`subFolder` 分支直接 `return` 跳过覆盖层恢复 → 位于分组文件夹的卡 customTags 重启后丢失。修复：物理文件夹只管分类，标签仍按覆盖层恢复（与根目录分支同口径）；实测 `app_config.json` 覆盖层有 66 条标签数据，此前只是加载时不恢复
+- **分组重命名标签丢失**（`useCardGroups.js` `renameCurrentCategory`）：物理重命名文件夹后子卡 path 前缀变化，覆盖层 key 未随路径迁移（`migrateOverlayKey` 只在单卡移动时调用）。修复：重命名后、`refreshLibrary` 前批量迁移该分组下所有卡的覆盖层 key（旧目录前缀 → 新目录前缀）+ 立即落盘
+- **落盘加固**：① `persistCardUpdate` 物理写盘失败时立即强制 `syncConfigToDisk()`（不走 500ms 防抖）；② `useAITools` AI 打标全部完成后强制立即落盘一次（不依赖防抖 + beforeunload）
+
+### 🏷️ sanitizeImportedTags 开关全链路修复（4 处绕过）
+- 开关此前只在导入路径生效；显示/搜索/索引层无条件合并原生 `data.tags` → 开关"失效"
+- 修复：`SidebarPanel.vue listTags` / `App.vue activeCardTags` / `useSearch.js extractCardTags(ignoreNative)` / `App.vue rebuildSearchIndex` 全部接入开关
+
+### 🧠 向量模型有效化（`main/vectorManager.js` + `useAITools.js` + `AITagModal.vue`）
+- 阈值 0.65 → 0.35（三处对齐）；标签展开为描述句「这是一个关于X的故事」再嵌入（展开文本作缓存 hash 输入，模板变自动重建缓存）
+- 实测：长文 vs 短标签命中率 0% → 80%，误报基线最高 0.307（0.35 安全）
+
+### 🔄 三层漏斗协同（`useAITools.js` `startAITagging`）
+- 规则命中卡 `ruleHitIds` 不再跳过向量层：`vectorTargetIds = [...rulePassedIds, ...ruleHitIds]` 全部进向量语义补充；规则+向量都未命中才交 LLM
+- 关键契约：`batchMatch` 对每张传入卡都返回 result（未命中 `tags: []`），前端按 results 重建 `llmTargetIds` 不丢卡
+
+### ⚡ UI 性能（`HeaderBar.vue`）
+- 字号滑块改「草稿值 + 松手提交」：拖动只更新滑块+数字，松手才写全局 `appSettings` → 不再每帧触发 `--ui-fs/--workspace-fs` 全页面 reflow + localStorage 写入
+
+### 🧪 测试基建
+- `package.json` test 脚本限定 `test/**/*.test.mjs`（`node --test` 默认会把 `scripts/live-vector-test.cjs` Electron 脚本误收集）
+- `cardCrud.test.mjs` 优先级链①断言更新：subFolder 卡分类取文件夹名，但标签恢复 overlay（匹配修复后新行为）
 
 ---
 
