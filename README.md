@@ -9,11 +9,11 @@
 
 **🖥️ 推荐 · 安装版**（双击安装，自动生成桌面/开始菜单快捷方式，免管理员权限，支持 OTA 自动更新）：
 
-[⬇️ 下载安装包 `sillytavern-card-manager-2.1.3.exe`](https://github.com/tian2418671-sys/JSKZX/releases/latest)
+[⬇️ 下载安装包 `sillytavern-card-manager-2.2.0.exe`](https://github.com/tian2418671-sys/JSKZX/releases/latest)
 
 **📦 绿色免安装版**（解压即用，无需安装）：
 
-[⬇️ 下载绿色版 `sillytavern-card-manager-2.1.3.zip`](https://github.com/tian2418671-sys/JSKZX/releases/latest)
+[⬇️ 下载绿色版 `sillytavern-card-manager-2.2.0.zip`](https://github.com/tian2418671-sys/JSKZX/releases/latest)
 
 > 💡 两个版本功能完全相同，任选其一即可。支持 Windows 10/11（64 位）。
 > 安装版内置 OTA 自动更新（检测 → 下载 → 静默安装 → 自动重启）；绿色版需手动下载新版覆盖。
@@ -186,7 +186,7 @@ npm run build
 
 产物输出到 `dist/`：
 - `dist/win-unpacked/` —— 免安装绿色版（可压缩为 zip 分发）
-- `dist/sillytavern-card-manager-2.1.3.exe` —— NSIS 安装包
+- `dist/sillytavern-card-manager-2.2.0.exe` —— NSIS 安装包
 - `dist/latest.yml` —— **OTA 更新必需**（与 exe 一起上传 GitHub Release）
 
 ---
