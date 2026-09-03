@@ -611,14 +611,19 @@ cleanupStaleConfigTmp();
 
 // 🔁 通用退避重试（代码审查修复 8）：仅对 5xx / 网络错误重试，业务错误（4xx）立即返回
 async function fetchWithRetry(url, options, retries = 2, backoffMs = 800) {
+  const REQUEST_TIMEOUT_MS = 120000; // ⏱️ 上游黑洞保护：120s 无响应即中止
+  //    （AI 分类/翻译/打标共用本通道：中转挂起不返回时若无超时 → 渲染端 await 永久 pending，
+  //    表现为"点了没反应"只转圈。加超时后明确报错，不再无限挂起）
   let lastError;
   for (let i = 0; i <= retries; i++) {
     try {
-      const res = await fetch(url, options);
+      const res = await fetch(url, { ...options, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
       if (res.ok || res.status < 500) return res; // 仅对 5xx / 网络错误重试
       lastError = new Error(`HTTP ${res.status}`);
     } catch (e) {
-      lastError = e;
+      lastError = (e && (e.name === 'TimeoutError' || e.name === 'AbortError'))
+        ? new Error('请求超时（120 秒无响应），请检查网络或中转服务是否可用')
+        : e;
     }
     if (i < retries) {
       await new Promise(r => setTimeout(r, backoffMs * (i + 1)));

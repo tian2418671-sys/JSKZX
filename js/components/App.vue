@@ -517,6 +517,7 @@ import { useAITools } from '../composables/useAITools.js'; // ✨ AI 打标/翻�
 import { useTags } from '../composables/useTags.js'; // 🏷️ 标签系统（批量标签/预设标签/系统标签池/中英切换/全局标签库）组合式函数
 import { useChat } from '../composables/useChat.js'; // 💬 聊天测卡（聊天历史/发送/API 设置/模型拉取）组合式函数
 import { useSearch, extractCardSearchableText, extractCardTags } from '../composables/useSearch.js'; // 🔎 超级搜索引擎（搜索防抖/全字段过滤/分页）组合式函数
+import { classifyTagsByVector, setCustomTagState } from '../utils/tagCategories.js'; // 🏷️ 标签大分类：向量模型辅助归类 + 自定义大分类装载
 import { useGraph } from '../composables/useGraph.js'; // 🕸️ 关系图谱（角色宇宙关系图谱生成/渲染）组合式函数
 import { useDiskScan } from '../composables/useDiskScan.js'; // 💽 磁盘卡片扫描（全盘扫描/收编/刷新目录）组合式函数
 import { useBatch } from '../composables/useBatch.js'; // ✅ 批量操作（多选/批量导出/批量删除/批量打标）组合式函数
@@ -2026,6 +2027,19 @@ export default {
                                 if (cfg.ui.wbCategoryMap && typeof cfg.ui.wbCategoryMap === 'object') {
                                     wbCategoryMap.value = { ...wbCategoryMap.value, ...cfg.ui.wbCategoryMap };
                                 }
+                                // 🛠️ 自定义大分类（分类列表 + 手动标签归属）
+                                if (Array.isArray(cfg.ui.customTagCategories)) {
+                                    customTagCategories.value = cfg.ui.customTagCategories
+                                        .filter(c => c && c.key && c.name)
+                                        .map(c => ({ key: String(c.key), name: String(c.name), icon: String(c.icon || '🏷️') }));
+                                }
+                                if (cfg.ui.customTagAssignments && typeof cfg.ui.customTagAssignments === 'object') {
+                                    const clean = {};
+                                    for (const [k, v] of Object.entries(cfg.ui.customTagAssignments)) {
+                                        if (k && v) clean[String(k).toLowerCase().trim()] = String(v);
+                                    }
+                                    customTagAssignments.value = clean;
+                                }
                             }
                         } finally {
                             isRestoringConfig.value = false;
@@ -2529,6 +2543,17 @@ export default {
         // ⚠️ 已移除 loadGlobalTagsFromDisk()：旧文件 tavern_manager_config.json 的读取路径与
         //    app_config.json 权威加载形成竞态（两个不同文件互相覆盖），是「删除标签重启复发」的根源。
         //    旧文件 globalTags 的迁移已在 main.js sys:loadConfig 首次启动时一次性完成，无需再读取。
+
+        // ================= 🛠️ 自定义大分类（用户自定义标签分组 + 手动标签归属） =================
+        // 持久化于 app_config.json → ui.customTagCategories / ui.customTagAssignments（唯一权威）。
+        // 装载到 tagCategories.js 模块级 ref（groupTagsByCategory / getTagCategory 消费），
+        // 手动归属优先级高于所有自动分类（用户说了算）。
+        const customTagCategories = ref([]);   // [{key, name, icon}]
+        const customTagAssignments = ref({});  // { 小写标签: 分类key }（普通对象，便于 JSON 序列化）
+        watch([customTagCategories, customTagAssignments], () => {
+            setCustomTagState(customTagCategories.value, customTagAssignments.value);
+        }, { deep: true });
+
 
         // ================= 🏷️ 自动打标规则表（v2.1 可扩展 + 用户可配置） =================
         // 存 [{name, regex}] 数组到 app_config.json（权威）；空数组 = 使用默认规则表。
@@ -3963,6 +3988,7 @@ export default {
         } = useConfigPersistence({
             appConfig,
             tagLangMode, customCategories, removedDefaultKeys, systemCommonTags,
+            customTagCategories, customTagAssignments,
             autoTagRules, customKeywords,
             apiEndpoint, apiKey, apiModel, apiType,
             theme, appSettings, sanitizeImportedTags, snapshotConfig, localCategoryMap,
@@ -4068,7 +4094,7 @@ export default {
                 return;
             }
             const taskId = ++buildTaskId;
-            setTimeout(async () => {
+            const runTask = async () => {
                 try {
                     // 异步分片构建索引（🚀 v2.2 提速：分片 50 → 100，万卡索引构建更快完成）
                     // 🧹 标签索引同样尊重「导入时忽略卡片自带标签」开关：开启时原生 data.tags 不入索引
@@ -4084,7 +4110,16 @@ export default {
                 } catch (e) {
                     console.error('⚠️ 搜索索引构建失败:', e);
                 }
-            }, 100);
+            };
+            // 🛡️ 启动卡顿优化：索引/预热不抢「蒙版淡出 + 首屏卡片渲染」的主线程。
+            //    首次加载触发时，等 isAppLoading 置 false（蒙版已淡出、首帧绘出）再开跑；
+            //    轮询本身用 setTimeout(120ms) 让出主线程，不阻塞 UI。
+            //    ⏱️ 超时保险：最多等 5s（防加载蒙版异常永不消失导致索引永远不建）。
+            const waitAppReady = (waitedMs) => {
+                if (!isAppLoading.value || waitedMs >= 5000) { runTask(); return; }
+                setTimeout(() => waitAppReady(waitedMs + 120), 120);
+            };
+            setTimeout(() => waitAppReady(0), 40);
         };
         // 🛡️ 打标期间跳过搜索索引全量重建的 watch 已移动到 useAITools 解构之后
         //    （原因：watch(isAITagging) 在 useAITools 解构前引用 isAITagging 会触发 TDZ：
@@ -4277,8 +4312,21 @@ export default {
             togglePresetTag, executeBatchTagSave,
             globalAvailableTags, newGlobalTagInput, addTagToGlobalPool,
             removeTagFromGlobalPool, clearAllTagsFromPool, batchRemoveTags,
-            appendTagToSearch, isEditingSystemTags, addGlobalTag
-        } = useTags({ systemCommonTags, tagLangMode, library, sanitizeImportedTags, confirmDialog, nativeAlert, persistCardUpdate, cardData, searchQueryInput, selectedIds, clearSelection, syncConfigToDisk, createProgressToast });
+            appendTagToSearch, isEditingSystemTags, addGlobalTag,
+            // 🛠️ 自定义大分类管理
+            addCustomTagCategory, renameCustomTagCategory,
+            removeCustomTagCategory, assignTagToCategory, assignTagsToCategory
+        } = useTags({ systemCommonTags, tagLangMode, library, sanitizeImportedTags, confirmDialog, nativeAlert, persistCardUpdate, cardData, searchQueryInput, selectedIds, clearSelection, syncConfigToDisk, createProgressToast, customTagCategories, customTagAssignments });
+
+        // 🧠 标签大分类：向量模型辅助归类（三级策略②层——规则未命中的标签与分类描述语义匹配）
+        //    vectorStatus.ready 后全量跑一次；标签池变化时增量跑。静默后台执行，
+        //    失败/模型未就绪自动回退关键词规则兑底，不影响 UI 交互。
+        watch(() => vectorStatus.value.ready, (ready) => {
+            if (ready) classifyTagsByVector(globalAvailableTags.value, window.electronAPI);
+        });
+        watch(globalAvailableTags, (tags) => {
+            if (vectorStatus.value.ready) classifyTagsByVector(tags, window.electronAPI);
+        });
 
         // ===== SFC 化：构建全局上下文对象（provide 给 HeaderBar/SidebarPanel/EditorPanel 子组件共享） =====
         const ctx = {
@@ -4338,6 +4386,9 @@ export default {
             vectorStatus, vectorDownloading, vectorDownloadProgress, vectorDownloadSource, vectorBatchProgress,
             initVectorEngine, deleteVectorCache,
             toasts, showToast, notifySortDataStatus,
+            nativeAlert, confirmDialog,
+            // 🤖 AI 分类弹窗复用：模型解析 + 响应文本提取
+            resolveApiModel, extractReplyContent,
             systemPromptPresets, activeSystemPromptId, addSystemPromptPreset, deleteSystemPromptPreset, saveSystemPromptsToStorage, getCurrentSystemPromptContent, buildTaggingSystemPrompt,
             // 🚨 破限 (Jailbreak) 状态（对抗模型拒答/道德审查；localStorage 持久化）
             useJailbreak, jailbreakPrompt, jailbreakPresets,
@@ -4347,6 +4398,9 @@ export default {
             customKeywords, addCustomKeyword, removeCustomKeyword,
             globalAvailableTags, newGlobalTagInput, addTagToGlobalPool, removeTagFromGlobalPool, clearAllTagsFromPool, batchRemoveTags, appendTagToSearch,
             isEditingSystemTags, addGlobalTag,
+            // 🛠️ 自定义大分类（标签云自定义分组 + 手动标签归属）
+            customTagCategories, customTagAssignments,
+            addCustomTagCategory, renameCustomTagCategory, removeCustomTagCategory, assignTagToCategory, assignTagsToCategory,
             chatHistory, chatInput, isChatting, apiEndpoint, apiKey, apiModel, apiType, saveApiConfig, handleApiTypeChange, chatContainer,
             rebindTavernPath,
             availableModels, isFetchingModels, fetchModelStatus, fetchAvailableModels,

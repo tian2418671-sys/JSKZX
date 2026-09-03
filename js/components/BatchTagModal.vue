@@ -45,18 +45,27 @@
                             <span class="text-[10px] text-gray-400">已选: {{ batchTagChips.length }} 个</span>
                         </div>
 
-                        <div class="flex flex-wrap gap-1.5 max-h-48 overflow-y-auto p-2 bg-gray-50 border border-gray-200 rounded custom-scrollbar">
-                            <div v-for="tag in systemCommonTags" :key="tag" class="flex items-center group shadow-sm rounded">
-                                <button @click="$emit('toggle-common-tag', tag)"
-                                        class="px-2 py-1 text-[11px] border transition-colors rounded-l"
-                                        :class="batchTagChips.includes(tag) ? 'bg-blue-600 text-white border-blue-600' : 'bg-white border-gray-300 hover:border-blue-500 hover:text-blue-600'">
-                                    {{ batchTagChips.includes(tag) ? '✓ 已选' : '+ ' + tag }}
-                                </button>
-                                <button @click.stop="$emit('remove-system-common-tag', tag)"
-                                        class="px-1.5 py-1 text-[11px] border border-l-0 border-gray-300 bg-gray-200 text-gray-500 hover:bg-red-500 hover:text-white hover:border-red-500 rounded-r transition-colors" title="从全局系统库中彻底删除此标签">
-                                    ✕
-                                </button>
-                            </div>
+                        <div class="max-h-60 overflow-y-auto p-2 bg-gray-50 border border-gray-200 rounded custom-scrollbar">
+                            <template v-for="group in groupedSystemTags" :key="group.key">
+                                <div class="flex items-baseline gap-1 mb-1 mt-1.5 first:mt-0 cursor-pointer select-none" @click="toggleTagGroup(group.key)" :title="collapsedTagGroups[group.key] ? '点击展开' : '点击折叠'">
+                                    <span class="text-[10px] text-gray-400">{{ collapsedTagGroups[group.key] ? '▸' : '▾' }}</span>
+                                    <span class="text-[11px] font-bold text-gray-700">{{ group.icon }} {{ group.name }}</span>
+                                    <span class="text-[9px] text-gray-400">({{ group.tags.length }})</span>
+                                </div>
+                                <div v-show="!collapsedTagGroups[group.key]" class="flex flex-wrap gap-1.5">
+                                    <div v-for="tag in group.tags" :key="tag" class="flex items-center group shadow-sm rounded">
+                                        <button @click="$emit('toggle-common-tag', tag)"
+                                                class="px-2 py-1 text-[11px] border transition-colors rounded-l"
+                                                :class="batchTagChips.includes(tag) ? 'bg-blue-600 text-white border-blue-600' : 'bg-white border-gray-300 hover:border-blue-500 hover:text-blue-600'">
+                                            {{ batchTagChips.includes(tag) ? '✓ 已选' : '+ ' + tag }}
+                                        </button>
+                                        <button @click.stop="$emit('remove-system-common-tag', tag)"
+                                                class="px-1.5 py-1 text-[11px] border border-l-0 border-gray-300 bg-gray-200 text-gray-500 hover:bg-red-500 hover:text-white hover:border-red-500 rounded-r transition-colors" title="从全局系统库中彻底删除此标签">
+                                            ✕
+                                        </button>
+                                    </div>
+                                </div>
+                            </template>
                         </div>
                     </div>
                 </div>
@@ -71,6 +80,8 @@
 </template>
 
 <script>
+import { groupTagsByCategory } from '../utils/tagCategories.js';
+
 export default {
     name: 'BatchTagModal',
     props: {
@@ -81,6 +92,21 @@ export default {
         batchTagChips: { type: Array, default: () => [] },
         systemCommonTags: { type: Array, default: () => [] }
     },
-    emits: ['close', 'confirm', 'update:batchMode', 'update:batchInputTags', 'remove-batch-tag', 'toggle-common-tag', 'remove-system-common-tag']
+    emits: ['close', 'confirm', 'update:batchMode', 'update:batchInputTags', 'remove-batch-tag', 'toggle-common-tag', 'remove-system-common-tag'],
+    // 🏷️ [标签大分类] 系统标签池按大分类分组（人物关系/角色设定/外貌身材...），标签云更好找
+    computed: {
+        groupedSystemTags() {
+            return groupTagsByCategory(this.systemCommonTags || []);
+        }
+    },
+    // 🏷️ [大分类折叠] 记录被折叠的分类 key（点击分组标题折叠/展开）
+    data() {
+        return { collapsedTagGroups: {} };
+    },
+    methods: {
+        toggleTagGroup(key) {
+            this.collapsedTagGroups[key] = !this.collapsedTagGroups[key];
+        }
+    }
 };
 </script>

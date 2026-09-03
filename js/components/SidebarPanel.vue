@@ -102,14 +102,22 @@
                 <button v-if="currentCategoryDeletable" @click="deleteCustomCategory(currentCategoryKey)" class="px-1.5 py-1 bg-zinc-800 border border-zinc-700 rounded hover:bg-red-600 hover:text-white text-xs text-zinc-300 shrink-0" title="删除当前分组">🗑️</button>
             </div>
 
-            <!-- 行2.5：快捷标签搜索（点击直接填入搜索框并立即过滤） -->
-            <div class="flex flex-wrap gap-1 mt-1 px-1 max-h-16 overflow-y-auto custom-scrollbar">
-                <span class="text-[10px] text-zinc-500 font-medium flex items-center shrink-0">🔍 快捷:</span>
-                <span v-for="tag in systemCommonTags" :key="'search-'+tag"
-                      @click="appendTagToSearch(tag)"
-                      class="px-1.5 py-0.5 bg-zinc-800/80 text-zinc-400 text-[10px] rounded border border-zinc-700 cursor-pointer hover:bg-blue-600 hover:text-white hover:border-blue-500 transition whitespace-nowrap">
-                    {{ tag }}
-                </span>
+            <!-- 行2.5：快捷标签搜索（按大分类分组，点击直接填入搜索框并立即过滤） -->
+            <div class="mt-1 px-1 max-h-32 overflow-y-auto custom-scrollbar">
+                <span class="text-[10px] text-zinc-500 font-medium">🔍 快捷搜索标签:</span>
+                <template v-for="group in groupedSystemTags" :key="group.key">
+                    <div class="flex items-baseline gap-1 mb-0.5 mt-1 first:mt-0.5 cursor-pointer select-none" @click="toggleTagGroup(group.key)" :title="collapsedTagGroups.has(group.key) ? '点击展开' : '点击折叠'">
+                        <span class="text-[9px] text-zinc-600">{{ collapsedTagGroups.has(group.key) ? '▸' : '▾' }}</span>
+                        <span class="text-[9px] font-bold text-zinc-500">{{ group.icon }} {{ group.name }}</span>
+                    </div>
+                    <div v-show="!collapsedTagGroups.has(group.key)" class="flex flex-wrap gap-1">
+                        <span v-for="tag in group.tags" :key="'search-'+tag"
+                              @click="appendTagToSearch(tag)"
+                              class="px-1.5 py-0.5 bg-zinc-800/80 text-zinc-400 text-[10px] rounded border border-zinc-700 cursor-pointer hover:bg-blue-600 hover:text-white hover:border-blue-500 transition whitespace-nowrap">
+                            {{ tag }}
+                        </span>
+                    </div>
+                </template>
             </div>
 
             <!-- 行3：快捷过滤 chips -->
@@ -545,6 +553,7 @@
 
 <script>
 import { inject, ref, computed } from 'vue';
+import { groupTagsByCategory } from '../utils/tagCategories.js';
 
 export default {
     name: 'SidebarPanel',
@@ -557,6 +566,15 @@ export default {
         const hasActiveFilters = computed(() =>
             (ctx.currentCategoryKey?.value || 'all') !== 'all' || ctx.tagLangMode.value !== 'both'
         );
+        // 🏷️ [标签大分类] 系统标签池按大分类分组（人物关系/角色设定/外貌身材...），快捷搜索更好找
+        const groupedSystemTags = computed(() => groupTagsByCategory(ctx.systemCommonTags?.value || []));
+        // 🏷️ [大分类折叠] 记录被折叠的分类 key（点击分组标题折叠/展开）
+        const collapsedTagGroups = ref(new Set());
+        const toggleTagGroup = (key) => {
+            const next = new Set(collapsedTagGroups.value);
+            if (next.has(key)) next.delete(key); else next.add(key);
+            collapsedTagGroups.value = next;
+        };
 
         // ✅ [世界书模式] 顶部高级功能区折叠面板（URL导入/目录/分组/筛选收进面板，与角色卡模式一致）
         const showWbAdvanced = ref(false);
@@ -627,6 +645,9 @@ export default {
             searchQuery: ctx.searchQuery,
             appendTagToSearch: ctx.appendTagToSearch,
             systemCommonTags: ctx.systemCommonTags,
+            groupedSystemTags,
+            collapsedTagGroups,
+            toggleTagGroup,
             toggleTagLangMode: ctx.toggleTagLangMode,
             tagLangMode: ctx.tagLangMode,
             filteredLibrary: ctx.filteredLibrary,

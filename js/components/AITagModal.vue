@@ -37,20 +37,29 @@
                                     class="px-3 py-1 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-300 disabled:text-gray-500 text-white rounded text-xs transition shrink-0">＋ 添加</button>
                         </div>
 
-                        <div class="text-[11px] text-gray-500 mb-1">💡 快速点击添加系统/常用标签（✕ 可彻底删除）：</div>
-                        <div class="flex flex-wrap gap-1.5 max-h-32 overflow-y-auto p-1 custom-scrollbar">
-                            <div v-for="tag in systemCommonTags" :key="tag" class="group flex items-center shadow-sm rounded">
-                                <button @click="$emit('add-ai-candidate-tag', tag)"
-                                        :disabled="isAITagging || aiCandidateTags.includes(tag)"
-                                        :class="['px-2 py-0.5 text-[11px] border transition-colors rounded-l',
-                                                 aiCandidateTags.includes(tag) ? 'bg-gray-200 border-gray-300 text-gray-400 cursor-not-allowed' : 'bg-white border-gray-300 text-gray-600 hover:bg-blue-600 hover:border-blue-500 hover:text-white']">
-                                    + {{ tag }}
-                                </button>
-                                <button @click.stop="$emit('remove-system-common-tag', tag)" :disabled="isAITagging"
-                                        class="px-1.5 py-0.5 text-[11px] border border-l-0 border-gray-300 bg-gray-100 text-gray-400 hover:bg-red-500 hover:text-white hover:border-red-500 rounded-r transition-colors" title="从全局系统库中彻底删除此标签">
-                                    ✕
-                                </button>
-                            </div>
+                        <div class="text-[11px] text-gray-500 mb-1">💡 快速点击添加系统/常用标签（按大分类分组，✕ 可彻底删除）：</div>
+                        <div class="max-h-44 overflow-y-auto p-1 custom-scrollbar">
+                            <template v-for="group in groupedSystemTags" :key="group.key">
+                                <div class="flex items-baseline gap-1 mb-1 mt-1.5 first:mt-0 cursor-pointer select-none" @click="toggleTagGroup(group.key)" :title="collapsedTagGroups[group.key] ? '点击展开' : '点击折叠'">
+                                    <span class="text-[10px] text-gray-400">{{ collapsedTagGroups[group.key] ? '▸' : '▾' }}</span>
+                                    <span class="text-[11px] font-bold text-gray-700">{{ group.icon }} {{ group.name }}</span>
+                                    <span class="text-[9px] text-gray-400">({{ group.tags.length }})</span>
+                                </div>
+                                <div v-show="!collapsedTagGroups[group.key]" class="flex flex-wrap gap-1.5">
+                                    <div v-for="tag in group.tags" :key="tag" class="group flex items-center shadow-sm rounded">
+                                        <button @click="$emit('add-ai-candidate-tag', tag)"
+                                                :disabled="isAITagging || aiCandidateTags.includes(tag)"
+                                                :class="['px-2 py-0.5 text-[11px] border transition-colors rounded-l',
+                                                         aiCandidateTags.includes(tag) ? 'bg-gray-200 border-gray-300 text-gray-400 cursor-not-allowed' : 'bg-white border-gray-300 text-gray-600 hover:bg-blue-600 hover:border-blue-500 hover:text-white']">
+                                            + {{ tag }}
+                                        </button>
+                                        <button @click.stop="$emit('remove-system-common-tag', tag)" :disabled="isAITagging"
+                                                class="px-1.5 py-0.5 text-[11px] border border-l-0 border-gray-300 bg-gray-100 text-gray-400 hover:bg-red-500 hover:text-white hover:border-red-500 rounded-r transition-colors" title="从全局系统库中彻底删除此标签">
+                                            ✕
+                                        </button>
+                                    </div>
+                                </div>
+                            </template>
                         </div>
                     </div>
 
@@ -261,6 +270,8 @@
 </template>
 
 <script>
+import { groupTagsByCategory } from '../utils/tagCategories.js';
+
 export default {
     name: 'AITagModal',
     props: {
@@ -305,6 +316,21 @@ export default {
         'init-vector-engine', 'delete-vector-cache',
         // 📝 自动打标规则表管理
         'open-auto-tag-rules'
-    ]
+    ],
+    // 🏷️ [标签大分类] 系统标签池按大分类分组（人物关系/角色设定/外貌身材...），候选标签更好找
+    computed: {
+        groupedSystemTags() {
+            return groupTagsByCategory(this.systemCommonTags || []);
+        }
+    },
+    // 🏷️ [大分类折叠] 记录被折叠的分类 key（点击分组标题折叠/展开）
+    data() {
+        return { collapsedTagGroups: {} };
+    },
+    methods: {
+        toggleTagGroup(key) {
+            this.collapsedTagGroups[key] = !this.collapsedTagGroups[key];
+        }
+    }
 };
 </script>

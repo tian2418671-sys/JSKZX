@@ -174,6 +174,8 @@ test('自动规则：sanitizeImportedTags 开启时不带入原生 tags', () => 
     m.crud.processAutoTagsAndCategory(card);
     assert.ok(!card.customTags.includes('他人杂标签'), '开启净化时不带入原生 tags');
     assert.ok(card.customTags.includes('Fantasy (奇幻)'), '自动规则标签照常生成');
+    // v2.1.4：物理清洗——原生 data.tags 必须被清空（防保存写回 PNG / 关闭开关复活）
+    assert.deepEqual(card.data.data.tags, [], '开启净化时原生 data.tags 应被物理清空');
 });
 
 test('自动规则：sanitizeImportedTags 关闭时带入原生 tags 并去重', () => {

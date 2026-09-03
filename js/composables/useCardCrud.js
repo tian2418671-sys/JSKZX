@@ -7,7 +7,7 @@
  * 迁移原则：函数体逐字保留（含 v1.8.5 性能修复与影分身修复注释），不做顺手优化。
  */
 import { triggerRef } from 'vue';
-import { normalizeCardData, isCharacterCardData } from '../utils/cardLoader.js';
+import { normalizeCardData, isCharacterCardData, getCardRejectReason } from '../utils/cardLoader.js';
 import { parsePNGChunk, deepScanForJSON } from '../utils/pngParser.js';
 
 // 🚀 v2.3 Web Worker：批量角色卡解析（CPU 多线程）。把「JSON.parse + 血统鉴定 +
@@ -238,6 +238,14 @@ export function useCardCrud({
         const fullText = [data.description, data.personality, data.scenario, data.first_mes].join('\n');
         // 🧹 导入数据清洗开关：开启时忽略卡片自带的原生 tags（防止他人卡片的杂乱标签混入全局标签池）
         let generatedTags = sanitizeImportedTags.value ? [] : [...(data.tags || [])];
+        // 🔧 修复 v2.1.4：开关开启时【物理清除】卡片原生 data.tags——
+        //    旧实现只过滤显示/搜索层，data.tags 仍保留并随保存写回 PNG，
+        //    导致外来卡标签在关闭开关后复活 / 保存后仍留在卡片文件里，
+        //    用户看到开关“形同虚设”。现在导入即彻底丢弃。
+        if (sanitizeImportedTags.value) {
+            if (Array.isArray(data.tags)) data.tags = [];
+            else if (typeof data.tags === 'string') data.tags = '';
+        }
         let assignedCategory = '未分类';
 
         // 匹配自动标签
@@ -342,9 +350,9 @@ export function useCardCrud({
                 }
                 if (text === null) return false;
                 const parsed = JSON.parse(text);
-                // 内容校验：非角色卡的 JSON（如 config.json）直接跳过，不进入解析与入库
+                // 内容校验：非角色卡的 JSON（如 config.json/世界书/快速回复）直接跳过，不进入解析与入库
                 if (!isCharacterCardData(parsed)) {
-                    console.warn(`跳过非角色卡 JSON: ${file.name}`);
+                    console.warn(`跳过非角色卡 JSON [${getCardRejectReason(parsed)}]: ${file.name}`);
                     return false;
                 }
                 parsedData = parsed;
@@ -416,6 +424,11 @@ export function useCardCrud({
                 // 触发自动标签和分类（会优先应用导入的历史配置）
                 const oldTagsLen = (cardInfo.customTags || []).length;
                 const oldCategory = cardInfo.category;
+                // 🧹 记录清洗前的原生 data.tags 长度（sanitize 物理清洗落盘判定用）
+                const dataLayerBefore = cardInfo.data?.data || cardInfo.data || {};
+                const oldNativeTagsLen = Array.isArray(dataLayerBefore.tags)
+                    ? dataLayerBefore.tags.length
+                    : (typeof dataLayerBefore.tags === 'string' && dataLayerBefore.tags.trim() !== '' ? 1 : 0);
                 processAutoTagsAndCategory(cardInfo);
                 // 🚀 v1.8.5 性能修复：批量加载路径推入 staging 暂存数组（加载完成后一次性
                 //    赋给 library），避免每 push 一张就触发全库 computed（filteredLibrary/
@@ -440,10 +453,15 @@ export function useCardCrud({
                     // 🚀 v2.3 写盘降噪：仅当「真正新增了标签」才落盘 —— 规则命中的标签
                     //    若已存在于原生 data.tags（作者已打标 / 上次已写入），不再重写 PNG，
                     //    消除万卡库重复写盘 IO（首次写入后 mtime 更新，后续启动零重写）。
+                    // 🧹 v2.1.4 例外：sanitize 开关开启时原生 tags 被物理清空，必须写盘把
+                    //    清洗结果同步到 PNG 文件，否则磁盘文件仍残留外来标签（重启复活）。
+                    const nativeCleared = oldNativeTagsLen > 0 && (Array.isArray(dataLayer.tags)
+                        ? dataLayer.tags.length === 0
+                        : (typeof dataLayer.tags !== 'string' || dataLayer.tags.trim() === ''));
                     const existingTags = new Set(Array.isArray(dataLayer.tags) ? dataLayer.tags : []);
                     const newTags = (cardInfo.customTags || []).filter(t => !existingTags.has(t));
-                    if (newTags.length > 0) {
-                        dataLayer.tags = Array.from(new Set([...dataLayer.tags, ...newTags]));
+                    if (newTags.length > 0 || nativeCleared) {
+                        dataLayer.tags = Array.from(new Set([...(Array.isArray(dataLayer.tags) ? dataLayer.tags : []), ...newTags]));
                         if (opts.deferAutoTagSave) {
                             deferredAutoTagSaves.push(cardInfo);
                         } else {

@@ -1,6 +1,6 @@
 {
   "name": "sillytavern-card-manager",
-  "version": "2.1.3",
+  "version": "2.2.0",
   "description": "SillyTavern 角色卡高级解析中心 - 本地桌面版（Vue 3 + Tailwind CSS + Electron）",
   "main": "main.js",
   "author": {
@@ -10,7 +10,7 @@
   "scripts": {
     "dev": "vite",
     "start:dev": "set VITE_DEV_SERVER_URL=http://localhost:5173&& electron .",
-    "build:web": "if exist web rmdir /s /q web && vite build",
+    "build:web": "if exist web rmdir /s /q web & vite build",
     "start": "npm run build:web && electron .",
     "build": "npm run build:web && electron-builder -w",
     "test": "node --test \"test/**/*.test.mjs\""

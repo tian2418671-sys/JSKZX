@@ -19,7 +19,9 @@ export function useTags({
     selectedIds,
     clearSelection,
     syncConfigToDisk,
-    createProgressToast     // 🔧 批量进度 Toast 工厂（并发安全）
+    createProgressToast,     // 🔧 批量进度 Toast 工厂（并发安全）
+    customTagCategories,     // 🛠️ 自定义大分类数组 ref（App.vue 顶层持有 + 持久化）
+    customTagAssignments     // 🎯 手动标签归属 ref（普通对象，便于 JSON 持久化）
 }) {
     // ================= 批量标签与预设系统 =================
     const showBatchTagModal = ref(false);
@@ -424,6 +426,61 @@ export function useTags({
         clearSelection();
     };
 
+    // ================= 自定义大分类系统 =================
+    // 新增自定义分类（key 自动生成 custom_<时间戳>）
+    const addCustomTagCategory = (name, icon = '🏷️') => {
+        const trimmed = String(name || '').trim();
+        if (!trimmed) { nativeAlert('分类名称不能为空', 'warning'); return null; }
+        if (customTagCategories.value.some(c => c.name === trimmed)) {
+            nativeAlert(`已存在同名分类「${trimmed}」`, 'warning'); return null;
+        }
+        const key = `custom_${Date.now().toString(36)}`;
+        customTagCategories.value.push({ key, name: trimmed, icon: String(icon || '🏷️') });
+        syncConfigToDisk();
+        return key;
+    };
+
+    // 重命名自定义分类
+    const renameCustomTagCategory = (key, name) => {
+        const cat = customTagCategories.value.find(c => c.key === key);
+        if (!cat) return false;
+        const trimmed = String(name || '').trim();
+        if (!trimmed) { nativeAlert('分类名称不能为空', 'warning'); return false; }
+        if (customTagCategories.value.some(c => c.key !== key && c.name === trimmed)) {
+            nativeAlert(`已存在同名分类「${trimmed}」`, 'warning'); return false;
+        }
+        cat.name = trimmed;
+        syncConfigToDisk();
+        return true;
+    };
+
+    // 删除自定义分类（同时清除其下所有手动归属标签）
+    const removeCustomTagCategory = (key) => {
+        customTagCategories.value = customTagCategories.value.filter(c => c.key !== key);
+        for (const [tag, catKey] of Object.entries(customTagAssignments.value)) {
+            if (catKey === key) delete customTagAssignments.value[tag];
+        }
+        syncConfigToDisk();
+    };
+
+    // 🎯 手动归属（批量）：将多个标签分配到指定分类（key 为 'other' 时解除归属）。
+    //    批量循环内只改内存态、末尾统一 syncConfigToDisk 一次（避免几百次全量写盘）。
+    const assignTagsToCategory = (tags, key) => {
+        const list = (Array.isArray(tags) ? tags : [tags])
+            .map(t => String(t || '').trim())
+            .filter(Boolean);
+        if (!list.length) return;
+        const lower = k => String(k || '').toLowerCase();
+        if (!key || key === 'other') {
+            for (const t of list) delete customTagAssignments.value[lower(t)];
+        } else {
+            for (const t of list) customTagAssignments.value[lower(t)] = key;
+        }
+        syncConfigToDisk();
+    };
+    // 手动归属单标签（兼容入口：内部走批量实现）
+    const assignTagToCategory = (tag, key) => assignTagsToCategory([tag], key);
+
     return {
         showBatchTagModal, batchInputTags, batchMode, presetTagsLibrary,
         batchTagChips, toggleBatchCommonTag, removeBatchTag,
@@ -431,6 +488,8 @@ export function useTags({
         togglePresetTag, executeBatchTagSave,
         globalAvailableTags, newGlobalTagInput, addTagToGlobalPool,
         removeTagFromGlobalPool, clearAllTagsFromPool, batchRemoveTags,
-        appendTagToSearch, isEditingSystemTags, addGlobalTag
+        appendTagToSearch, isEditingSystemTags, addGlobalTag,
+        addCustomTagCategory, renameCustomTagCategory,
+        removeCustomTagCategory, assignTagToCategory, assignTagsToCategory
     };
 }

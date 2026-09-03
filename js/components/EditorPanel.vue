@@ -79,23 +79,35 @@
                     <button @click="isBatchDeleteTags = !isBatchDeleteTags; if (!isBatchDeleteTags) batchSelectedTags = new Set()"
                             :class="isBatchDeleteTags ? 'bg-red-600 text-white border-red-600' : 'bg-red-500/10 hover:bg-red-500/20 text-red-400 border-red-500/30'"
                             class="px-3 py-1 text-[11px] rounded transition shadow-sm font-bold whitespace-nowrap border" title="进入批量模式，勾选多个标签后一键删除">☑️ 批量删除</button>
+                    <button @click="openTagCategoryModal"
+                            class="px-3 py-1 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 text-[11px] rounded transition shadow-sm font-bold whitespace-nowrap border"
+                            title="自定义标签大分类：新增自定义分类 + 把未归类标签手动归属到分类">🛠️ 分类</button>
                 </div>
 
-                <div class="flex flex-wrap gap-1 p-1.5 bg-zinc-800/60 rounded border border-zinc-700 overflow-y-auto custom-scrollbar max-h-40">
-                    <span v-for="tag in globalAvailableTags" :key="tag"
-                          :class="isBatchDeleteTags
-                              ? (batchSelectedTags.has(tag) ? 'bg-red-600 text-white border-red-600' : 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700 border-zinc-700')
-                              : (activeCardTags.includes(tag) ? 'bg-blue-600 text-white border-blue-600' : 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700 border-zinc-700')"
-                          class="text-[10px] px-2 py-0.5 rounded transition shadow-sm border flex items-center gap-1 group cursor-pointer"
-                          @click="isBatchDeleteTags ? toggleBatchTagSelect(tag) : addGlobalTag(tag)">
-                        <template v-if="isBatchDeleteTags">
-                            <span>{{ batchSelectedTags.has(tag) ? '☑' : '☐' }} {{ tag }}</span>
-                        </template>
-                        <template v-else>
-                            <span>+ {{ tag }}</span>
-                            <span @click.stop="removeTagFromGlobalPool(tag)" class="text-zinc-500 group-hover:text-red-400 hover:bg-red-500/20 hover:text-red-400 rounded-full w-3 h-3 flex items-center justify-center transition-colors font-bold ml-1" title="彻底删除此标签">×</span>
-                        </template>
-                    </span>
+                <div class="p-1.5 bg-zinc-800/60 rounded border border-zinc-700 overflow-y-auto custom-scrollbar max-h-56">
+                    <template v-for="group in groupedGlobalTags" :key="group.key">
+                        <div class="flex items-baseline gap-1 mb-1 mt-1.5 first:mt-0 cursor-pointer select-none" @click="toggleTagGroup(group.key)" :title="collapsedTagGroups.has(group.key) ? '点击展开' : '点击折叠'">
+                            <span class="text-[9px] text-zinc-600">{{ collapsedTagGroups.has(group.key) ? '▸' : '▾' }}</span>
+                            <span class="text-[10px] font-bold text-zinc-400">{{ group.icon }} {{ group.name }}</span>
+                            <span class="text-[9px] text-zinc-600">({{ group.tags.length }})</span>
+                        </div>
+                        <div v-show="!collapsedTagGroups.has(group.key)" class="flex flex-wrap gap-1">
+                            <span v-for="tag in group.tags" :key="tag"
+                                  :class="isBatchDeleteTags
+                                      ? (batchSelectedTags.has(tag) ? 'bg-red-600 text-white border-red-600' : 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700 border-zinc-700')
+                                      : (activeCardTags.includes(tag) ? 'bg-blue-600 text-white border-blue-600' : 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700 border-zinc-700')"
+                                  class="text-[10px] px-2 py-0.5 rounded transition shadow-sm border flex items-center gap-1 group cursor-pointer"
+                                  @click="isBatchDeleteTags ? toggleBatchTagSelect(tag) : addGlobalTag(tag)">
+                                <template v-if="isBatchDeleteTags">
+                                    <span>{{ batchSelectedTags.has(tag) ? '☑' : '☐' }} {{ tag }}</span>
+                                </template>
+                                <template v-else>
+                                    <span>+ {{ tag }}</span>
+                                    <span @click.stop="removeTagFromGlobalPool(tag)" class="text-zinc-500 group-hover:text-red-400 hover:bg-red-500/20 hover:text-red-400 rounded-full w-3 h-3 flex items-center justify-center transition-colors font-bold ml-1" title="彻底删除此标签">×</span>
+                                </template>
+                            </span>
+                        </div>
+                    </template>
                     <div v-if="globalAvailableTags.length === 0" class="text-xs text-zinc-500 py-1">暂无可选标签，请输入后添加</div>
                 </div>
 
@@ -1106,14 +1118,22 @@
             </div>
         </div>
     </Teleport>
+
+    <!-- 🛠️ 自定义标签大分类管理弹窗 -->
+    <TagCategoryModal v-if="showTagCategoryModal" @close="showTagCategoryModal = false" />
 </template>
 
 <script>
 import { inject, ref, computed, watch } from 'vue';
 import { estimateTokens } from '../utils/tokenEstimate.js';
+import { groupTagsByCategory } from '../utils/tagCategories.js';
+import TagCategoryModal from './TagCategoryModal.vue';
 
 export default {
     name: 'EditorPanel',
+    // ⚠️ Options API 组件注册：模板里 <TagCategoryModal> 首字母大写走 resolveComponent 查组件注册表，
+    //    setup() return 的组件变量不会进入注册表（会被当成未知原生元素空渲染）→ 必须在此显式注册。
+    components: { TagCategoryModal },
     setup() {
         const ctx = inject('appCtx');
 
@@ -1134,6 +1154,21 @@ export default {
         // ✅ [批量删除标签] 标签云批量勾选删除模式（本组件本地状态）
         const isBatchDeleteTags = ref(false); // 是否处于批量删除标签模式
         const batchSelectedTags = ref(new Set()); // 批量模式下选中的标签集合
+
+        // 🏷️ [标签大分类] 全局标签池按大分类分组（人物关系/角色设定/外貌身材...），标签云更好找
+        const groupedGlobalTags = computed(() => groupTagsByCategory(ctx.globalAvailableTags?.value || []));
+        // 🛠️ [自定义大分类] 分类管理弹窗（新增/重命名/删除自定义分类 + 未归类标签手动归属）
+        const showTagCategoryModal = ref(false);
+        const openTagCategoryModal = () => {
+            showTagCategoryModal.value = true;
+        };
+        // 🏷️ [大分类折叠] 记录被折叠的分类 key（点击分组标题折叠/展开）
+        const collapsedTagGroups = ref(new Set());
+        const toggleTagGroup = (key) => {
+            const next = new Set(collapsedTagGroups.value);
+            if (next.has(key)) next.delete(key); else next.add(key);
+            collapsedTagGroups.value = next;
+        };
 
         // ✅ [状态栏预览] 源码视图折叠（超长源码默认折叠，避免一坨压缩 JS 刷屏）
         const statusSourceExpanded = ref(false);
@@ -1537,6 +1572,12 @@ export default {
             addSingleTag: ctx.addSingleTag,
             isEditingSystemTags: ctx.isEditingSystemTags,
             globalAvailableTags: ctx.globalAvailableTags,
+            groupedGlobalTags,
+            collapsedTagGroups,
+            toggleTagGroup,
+            // 🛠️ [自定义大分类] 分类管理弹窗
+            showTagCategoryModal,
+            openTagCategoryModal,
             newGlobalTagInput: ctx.newGlobalTagInput,
             addTagToGlobalPool: ctx.addTagToGlobalPool,
             removeTagFromGlobalPool: ctx.removeTagFromGlobalPool,

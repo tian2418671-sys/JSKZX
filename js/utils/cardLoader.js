@@ -113,6 +113,30 @@ export function isCharacterCardData(data) {
 }
 
 /**
+ * 🕵️ 卡片血统鉴定的拒绝原因诊断（配合 isCharacterCardData，日志可解释"为什么跳过"）
+ * 万卡库实测：被拒 JSON 主要是 ①独立世界书(entries) ②酒馆快速回复集(QR，disableSend/injectInput)
+ * ③配套文件(API配置/破限/正则) ④UI 主题配置 ⑤聊天记录 ⑥无内容字段的杂物。
+ */
+export function getCardRejectReason(data) {
+    if (!data || typeof data !== 'object' || Array.isArray(data)) return '非对象数据';
+    if (data.messages || data.chat_metadata) return '聊天记录导出';
+    if (data.entries !== undefined) return '独立世界书(顶层 entries)';
+    if (data.data && typeof data.data === 'object' &&
+        'entries' in data.data && !data.data.character_book) return '独立世界书(data.entries)';
+    if (data.colors || data.user_settings) return 'UI 主题配置';
+    if (typeof data.name === 'string' && data.name.trim() !== '') {
+        if (data.system_settings || data.api_keys || data.public_api) return '酒馆配置文件(config)';
+        if (data.apiType !== undefined || data.openAIKey !== undefined || data.jailbreak !== undefined) return '破限/API 配置文件';
+        if (data.disableSend !== undefined || data.injectInput !== undefined || data.placeBeforeInput !== undefined) return '快速回复集(QR)';
+        if (data.type && !/^chara_card/i.test(String(data.type))) return '自定义类型文件';
+        return '缺少角色内容字段(description/personality/first_mes 等)';
+    }
+    if (typeof data.spec === 'string') return '未知 spec 版本';
+    if (data.type) return '自定义类型文件';
+    return '无角色名且无 spec 标记';
+}
+
+/**
  * 自动贴标签规则（v2.1 升级：系统预设集合 + 用户自定义）
  * - defaultAutoTagRules：系统内置预设规则集合（分 group，默认全部生效，随应用内置）
  *   —— 用户无需逐条添加，它们已经在系统里；UI 分组展示供查看。

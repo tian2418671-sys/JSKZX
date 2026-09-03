@@ -18,6 +18,7 @@ export function useConfigPersistence({
     appConfig,
     // —— 收集源：全局状态 ——
     tagLangMode, customCategories, removedDefaultKeys, systemCommonTags,
+    customTagCategories, customTagAssignments,
     // —— 收集源：自动打标规则表（可配置，v2.1） ——
     autoTagRules, customKeywords,
     // —— 收集源：API 配置 ——
@@ -79,7 +80,9 @@ export function useConfigPersistence({
                 systemPromptPresets: JSON.parse(JSON.stringify(Array.isArray(systemPromptPresets.value) ? systemPromptPresets.value : [])),
                 lastWorldbookDirPath: lastWorldbookDirPath.value || '',
                 lastPresetDirPath: lastPresetDirPath.value || '',
-                wbCategoryMap: JSON.parse(JSON.stringify(wbCategoryMap.value || {}))
+                wbCategoryMap: JSON.parse(JSON.stringify(wbCategoryMap.value || {})),
+                customTagCategories: JSON.parse(JSON.stringify(Array.isArray(customTagCategories.value) ? customTagCategories.value : [])),
+                customTagAssignments: JSON.parse(JSON.stringify(customTagAssignments.value || {}))
             },
             // 📥 卡片导入时间映射 { [path]: timestampMs }（「导入时间」排序持久化）
             cardImportTimes: JSON.parse(JSON.stringify(cardImportTimes.value || {}))
