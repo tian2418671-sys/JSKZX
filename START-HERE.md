@@ -2,7 +2,7 @@
 
 > **本文件是 JSK管理 项目给新接手 AI 的唯一入口。**
 > 只需按顺序读完本文件 + 合并指导文件，即可无缝续写本项目。
-> 最后更新：2026-08-29
+> 最后更新：2026-09-04
 
 ---
 
@@ -26,7 +26,7 @@
 |---|---|
 | 项目 | SillyTavern（酒馆）角色卡本地管理桌面工具（Electron + Vue 3） |
 | 仓库 | `https://github.com/tian2418671-sys/JSKZX.git`（远端 `origin`） |
-| 当前版本 | **v2.0.0**（已发布） |
+| 当前版本 | **v2.2.1**（已发布：GitHub Release + OTA） |
 | 当前分支 | 本地 `master`（2026-08-29 已与 origin 同步） |
 | 构建产物 | `dist/sillytavern-card-manager-<版本>.exe` + `latest.yml` + `.blockmap` + zip 绿色版 |
 
@@ -35,7 +35,7 @@
 ## 🔒 铁律（必须遵守）
 
 1. **没收到用户推送/打包指令，禁止推送 / 打包 / 发 Release**——用户会先自己看效果再决定。
-2. **08-29 用户明确要求**：只构建开发版，**不打包 exe/zip、不上传发布、保持本地**。
+2. **发布策略以用户最新指令为准**：2026-09-04 起用户已要求正常发布（v2.2.1 已 push + GitHub Release + OTA）；历史「仅本地不发布、不打包」限制作废，但仍须用户明示才发布。
 3. 用户常报「某功能坏了」——先**验证代码现状**（grep/读源码）再判断，勿盲改。
 4. 用户提供的代码方案要**适配本项目架构**（Electron IPC、app://、路径白名单、confirmDialog/nativeAlert、Options API 组件规范）再落地。
 5. 重要功能改动后必须 `get_errors` + `vite build` + 真实启动冒烟（`npx electron . --disable-gpu --enable-logging`）。
