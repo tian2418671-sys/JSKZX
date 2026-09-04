@@ -18,12 +18,18 @@
 ### 📝 开关文案澄清
 - 设置菜单开关副文字改为「仅对新导入的卡片生效；历史残留请用下方清洗工具」，消除「开关无效」误解
 
-### 🤖 实验 · AI 归类增强：未命中分组时自动建大分类承接
+### 🤖 AI 归类转正 + 自动建类增强（原「实验」标记移除）
 - 背景：AI 归类原只允许输出现有分类 key，模型给出的「不在现有分组」的分类名会被强制回 other 丢弃（`TagCategoryModal` 345 行）
 - `resolveTagCategoryTarget`（tagCategories.js）：归一 AI 返回值——命中内置 key/中文名、自定义 key/name → 用现有；其余经合理性过滤（限 12 字内、拒绝纯符号数字）→ 标记为新分类候选
-- 系统提示词增加「自拟新分类」纪律：确无法落入现有分类且语义成类时可自拟简洁中文类名，禁止按单标签自造 / 用专名长句作类名；输出值=现有 key/other/自拟类名三选一
+- 判定纪律改「按语义成组自拟」：多个作品/IP/专名可聚成同一自拟简洁中文类名（如多个游戏→「游戏角色」、多部动画→「番剧动画」）统一承接；孤立专名/散杂标签仍 other，绝不单标签自造类
 - 建议视图：未命中的行标「🆕 新建」徽标 + 高亮，下拉新增「🆕 将自动新建」分组可改；应用时自动 `addCustomTagCategory` 建类并把标签归入（建失败回退现有或保留 other）
-- 测试：`resolveTagCategoryTarget` 5 组归一用例 + 提示词自拟断言（全量 72 用例绿）
+- 移除 `TagCategoryModal` 全部 4 处「实验」标记，AI 归类转正
+
+### 🔧 修复：自定义分类 key 碰撞 + 同名规范化（★ 相似 BUG 全查）
+- 根因：`addCustomTagCategory` key = `Date.now().toString(36)`，同一毫秒连续建多个分类（AI 一次应用连建必触发）→ key 碰撞、不同名分类共用 key、标签归属错乱/UI 重复条目
+- 修复：key 追加随机段；`normalizeTagName`（零宽/全角空格/NBSP 折叠）判重；`addCustomTagCategory` 幂等（同名返回已有 key）；`mergeDuplicateTagCategories` 合并同名变体并迁移归属；`ensureUniqueCustomCategoryKeys` 修复历史同 key 条目
+- 相似 BUG 全仓扫描：其余所有时间戳 key/uid 生成均已带随机段，无同类隐患
+- 测试：新增 key 唯一/规范化/幂等/合并用例（全量 78 用例绿）
 
 ---
 

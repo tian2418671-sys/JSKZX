@@ -182,6 +182,20 @@ async function main() {
             } catch (e) { /* 页面切换中 */ }
         }
         console.log('reload-merge →', out || 'not-ready');
+    } else if (cmd === 'state') {
+        // 📊 读取当前分类/归属/全局池概览（诊断 AI 归类结果）
+        const r = await evaluate(`(() => {
+            const st = document.querySelector('#app') && document.querySelector('#app').__vue_app__ && document.querySelector('#app').__vue_app__._instance && document.querySelector('#app').__vue_app__._instance.setupState;
+            if (!st) return JSON.stringify({ ready: false });
+            const cats = (st.customTagCategories || []).map(c => ({ key: c.key, name: c.name }));
+            const as = st.customTagAssignments || {};
+            const grp = {};
+            for (const k of Object.values(as)) grp[k] = (grp[k] || 0) + 1;
+            const pool = st.globalAvailableTags || [];
+            const modal = st.showTagCategoryModal !== undefined ? st.showTagCategoryModal : null;
+            return JSON.stringify({ ready: true, cats, grp, poolLen: pool.length, modal });
+        })()`);
+        console.log('state →', r);
     } else {
         console.log('未知命令');
     }
