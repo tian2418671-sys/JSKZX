@@ -4,7 +4,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { getTagCategory, groupTagsByCategory, TAG_CATEGORIES, setCustomTagState, buildTagClassificationSystemPrompt, buildTagClassificationUserPrompt } from '../js/utils/tagCategories.js';
+import { getTagCategory, groupTagsByCategory, TAG_CATEGORIES, setCustomTagState, buildTagClassificationSystemPrompt, buildTagClassificationUserPrompt, resolveTagCategoryTarget } from '../js/utils/tagCategories.js';
 
 test('默认标签池映射正确（英文+中文注释格式）', () => {
     const cases = [
@@ -185,6 +185,41 @@ test('AI 分类提示词包含内置分类语义与自定义分类、输出纪�
     assert.ok(sys.includes('游戏作品'), '提示词应含自定义分类名');
     assert.ok(sys.includes('other'), '提示词应含 other 兜底');
     assert.ok(sys.includes('JSON'), '提示词应要求输出 JSON');
+    assert.ok(sys.includes('自拟'), '提示词应允许 AI 自拟新分类名（未命中现有分组时自动建类承接）');
     const user = buildTagClassificationUserPrompt(['魔法', '原神']);
     assert.ok(user.includes('魔法') && user.includes('0. '), 'user 提示词应含编号标签');
+});
+
+// ---------- 🆕 AI 归类新分类名归一（v2.2.1 增强：未命中自动建类） ----------
+
+const CUSTOM_FIXTURE = [{ key: 'c1', name: '游戏作品', icon: '🎮' }];
+
+test('resolve：other / 空值 / undefined 一律回 other 不新建', () => {
+    assert.deepEqual(resolveTagCategoryTarget('other', CUSTOM_FIXTURE), { key: 'other', isNew: false });
+    assert.deepEqual(resolveTagCategoryTarget(undefined, CUSTOM_FIXTURE), { key: 'other', isNew: false });
+    assert.deepEqual(resolveTagCategoryTarget('', CUSTOM_FIXTURE), { key: 'other', isNew: false });
+    assert.deepEqual(resolveTagCategoryTarget('   ', CUSTOM_FIXTURE), { key: 'other', isNew: false });
+});
+
+test('resolve：命中现有内置分类（key 或中文名）不新建', () => {
+    assert.deepEqual(resolveTagCategoryTarget('worldview', CUSTOM_FIXTURE), { key: 'worldview', isNew: false });
+    assert.deepEqual(resolveTagCategoryTarget('题材世界观', CUSTOM_FIXTURE), { key: 'worldview', isNew: false });
+    assert.deepEqual(resolveTagCategoryTarget('性玩法', CUSTOM_FIXTURE), { key: 'sexual', isNew: false });
+    assert.deepEqual(resolveTagCategoryTarget('WORLDVIEW', CUSTOM_FIXTURE), { key: 'worldview', isNew: false }, '大小写不敏感');
+});
+
+test('resolve：命中自定义分类（key 或 name）不新建', () => {
+    assert.deepEqual(resolveTagCategoryTarget('c1', CUSTOM_FIXTURE), { key: 'c1', isNew: false });
+    assert.deepEqual(resolveTagCategoryTarget('游戏作品', CUSTOM_FIXTURE), { key: 'c1', isNew: false });
+});
+
+test('resolve：现有分组都没命中 → 合理新名标记 isNew 待自动新建', () => {
+    assert.deepEqual(resolveTagCategoryTarget('哥特', CUSTOM_FIXTURE), { key: '哥特', isNew: true });
+    assert.deepEqual(resolveTagCategoryTarget('蒸汽朋克', CUSTOM_FIXTURE), { key: '蒸汽朋克', isNew: true });
+});
+
+test('resolve：超长 / 纯符号数字等异常值回 other，不建垃圾分类', () => {
+    assert.deepEqual(resolveTagCategoryTarget('这是一个超级无敌长的分类名超过了十二个字长度限制', CUSTOM_FIXTURE), { key: 'other', isNew: false });
+    assert.deepEqual(resolveTagCategoryTarget('12345', CUSTOM_FIXTURE), { key: 'other', isNew: false });
+    assert.deepEqual(resolveTagCategoryTarget('###!!!', CUSTOM_FIXTURE), { key: 'other', isNew: false });
 });

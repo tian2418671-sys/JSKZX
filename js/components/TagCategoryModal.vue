@@ -120,8 +120,10 @@
               </div>
               <div class="text-[10px] text-zinc-500 -mt-1">凡标注「其他(不处理)」的将跳过（作品/IP/人名等保留原样）。</div>
               <div class="flex-1 min-h-0 overflow-y-auto custom-scrollbar border border-zinc-700 rounded bg-zinc-800/40 p-1.5">
-                <div v-for="s in aiSuggestions" :key="s.tag" class="flex items-center gap-2 px-2 py-1 rounded hover:bg-zinc-700/50 transition-colors">
+                <div v-for="s in aiSuggestions" :key="s.tag" class="flex items-center gap-2 px-2 py-1 rounded transition-colors"
+                     :class="s.isNew && s.cat !== 'other' ? 'bg-violet-500/10 ring-1 ring-violet-500/40' : 'hover:bg-zinc-700/50'">
                   <span class="flex-1 min-w-0 truncate text-[11px] text-zinc-200" :title="s.tag">{{ s.tag }}</span>
+                  <span v-if="s.isNew && s.cat !== 'other'" class="shrink-0 text-[9px] text-violet-200 bg-violet-500/20 border border-violet-400/40 rounded px-1 py-0.5" title="AI 未命中现有分组，应用时将自动新建该大分类存放">🆕 新建</span>
                   <select :value="s.cat" @change="s.cat = $event.target.value"
                           :class="s.cat === 'other' ? 'bg-zinc-800 text-zinc-500 border-zinc-700' : 'bg-blue-600/15 text-blue-200 border-blue-500/40'"
                           class="border text-[11px] px-1.5 py-0.5 rounded outline-none font-medium max-w-40 shrink-0 focus:border-blue-400">
@@ -131,6 +133,9 @@
                     </optgroup>
                     <optgroup v-if="customCats.length" label="自定义分类">
                       <option v-for="cat in customCats" :key="cat.key" :value="cat.key">{{ cat.icon }} {{ cat.name }}</option>
+                    </optgroup>
+                    <optgroup v-if="suggestedNewCats.length" label="🆕 将自动新建">
+                      <option v-for="n in suggestedNewCats" :key="'new-' + n" :value="n">🆕 {{ n }}</option>
                     </optgroup>
                   </select>
                 </div>
@@ -144,7 +149,7 @@
 </template>
 
 <script>
-import { TAG_CATEGORIES, getTagCategory, buildTagClassificationSystemPrompt, buildTagClassificationUserPrompt } from '../utils/tagCategories.js';
+import { TAG_CATEGORIES, getTagCategory, buildTagClassificationSystemPrompt, buildTagClassificationUserPrompt, resolveTagCategoryTarget } from '../utils/tagCategories.js';
 
 export default {
     name: 'TagCategoryModal',
@@ -198,9 +203,13 @@ export default {
         aiApplyCount() {
             return this.aiSuggestions.filter(s => s.cat && s.cat !== 'other').length;
         },
-        // 合法分类 key 集合（内置非 other + 自定义）
-        legalKeys() {
-            return new Set(['other', ...this.builtInCats.map(c => c.key), ...this.customCats.map(c => c.key)]);
+        // 🆕 AI 建议里将「自动新建」的大分类名（去重保序，供下拉与徽标展示）
+        suggestedNewCats() {
+            const seen = [];
+            for (const s of this.aiSuggestions || []) {
+                if (s.isNew && s.cat && s.cat !== 'other' && !seen.includes(s.cat)) seen.push(s.cat);
+            }
+            return seen;
         }
     },
     methods: {
@@ -314,7 +323,6 @@ export default {
             this.aiBusy = true;
             this.aiText = '准备调用…';
             this.aiSuggestions = [];
-            const legal = this.legalKeys;
             const suggestions = [];
             try {
                 for (let b = 0; b < batches.length; b++) {
@@ -342,7 +350,10 @@ export default {
                         // 优先“标签原文”为键，回退“序号”为键（模型两种都可能输出）
                         let cat = map[tag];
                         if (cat === undefined && map[String(k)] !== undefined) cat = map[String(k)];
-                        suggestions.push({ tag, cat: (cat && legal.has(cat)) ? cat : 'other' });
+                        // 🆕 v2.2.1 增强：模型若给出不在现有分类里的“新分类名”，不丢弃为 other，
+                        //    归入 resolveTagCategoryTarget 归一 → isNew 候选（应用时自动建类承接）
+                        const r = resolveTagCategoryTarget(cat, this.customCats);
+                        suggestions.push({ tag, cat: r.key, isNew: r.isNew });
                     }
                     if (b < batches.length - 1) await new Promise(r => setTimeout(r, 400));
                 }
@@ -362,24 +373,54 @@ export default {
         backToManual() {
             this.viewMode = 'manual';
         },
-        // ✅ 应用 AI 建议：按分类分组一次批量归属；「其他」= 跳过
-        applyAISuggestions() {
-            if (this.aiSuggestions.length === 0) return;
+        // ✅ 应用 AI 建议：先自动新建 AI 未命中而提议的新大分类，再按分类一次批量归属；「其他」= 跳过
+        async applyAISuggestions() {
+            const list = this.aiSuggestions || [];
+            if (list.length === 0) return;
+            // 1. 归一：解析现有（key/中文名/自定义）与待建新类
+            const snapshot = this.customCats; // 建类前快照（归一现有足够）
+            const items = list.map(s => {
+                if (!s.cat || s.cat === 'other') return { tag: s.tag, key: null, isNew: false };
+                const r = resolveTagCategoryTarget(s.cat, snapshot);
+                return { tag: s.tag, key: r.key, isNew: r.isNew };
+            });
+            // 2. 收集待建新类（去重保序）并逐个自动创建（addCustomTagCategory 返回生成的 custom_xxx key）
+            const newNames = [];
+            for (const it of items) if (it.isNew && it.key && !newNames.includes(it.key)) newNames.push(it.key);
+            const nameToKey = new Map();
+            let created = 0;
+            for (const name of newNames) {
+                const made = this.ctx.addCustomTagCategory(name);
+                if (made) { nameToKey.set(name, made); created++; }
+            }
+            // 3. 组装最终归属（建失败/重名 → 回退现有或跳过）
             const byKey = {};
-            for (const s of this.aiSuggestions) {
-                if (s.cat && s.cat !== 'other') {
-                    if (!byKey[s.cat]) byKey[s.cat] = [];
-                    byKey[s.cat].push(s.tag);
-                }
-            }
             let total = 0;
-            for (const [key, tags] of Object.entries(byKey)) {
-                this.ctx.assignTagsToCategory(tags, key);
-                total += tags.length;
+            for (const it of items) {
+                if (!it.key) continue;
+                let key = it.key;
+                if (it.isNew) {
+                    if (nameToKey.has(it.key)) key = nameToKey.get(it.key);
+                    else {
+                        const r2 = resolveTagCategoryTarget(it.key, this.customCats); // 建失败后再归一（可能已被手工创建）
+                        if (r2.isNew) continue; // 仍无法落位 → 保留「其他」跳过
+                        key = r2.key;
+                    }
+                }
+                if (key === 'other') continue;
+                if (!byKey[key]) byKey[key] = [];
+                byKey[key].push(it.tag);
+                total++;
             }
+            for (const [key, tags] of Object.entries(byKey)) this.ctx.assignTagsToCategory(tags, key);
             this.aiSuggestions = [];
             this.viewMode = 'manual';
-            if (this.ctx.showToast) this.ctx.showToast(`已应用 AI 归类 ${total} 条（其余保留「其他」）`, 'success');
+            if (this.ctx.showToast) {
+                this.ctx.showToast(
+                    `已应用 AI 归类 ${total} 条${created ? `，自动新建大分类 ${created} 个` : ''}（其余保留「其他」）`,
+                    'success'
+                );
+            }
         }
     }
 };

@@ -481,8 +481,10 @@ export function buildTagClassificationSystemPrompt(customCats = []) {
     L.push('3. 有歧义时按该词最常用、最稳定的语义判断；拿不准 → other。');
     L.push('4. 若某分类名(如「游戏作品」)明确对应用户自定义分类，而标签是具体作品/IP 名，优先归入该自定义分类而非 other。');
     L.push('5. 输出必须是被归类标签的“原始原文”，大小写、符号原样保留。');
+    L.push('6. 自拟新分类（最后手段）：若某标签语义清晰、确实无法落入任何现有分类，且你认为这类标签可能不止一个，可自拟一个【简洁中文类名(2~6字)】作为其分类值；同类标签必须共用同一个自拟类名。');
+    L.push('7. 严禁为单一标签自造分类，严禁用长句/超长词/网址/作品名/IP/人名等专名作类名——这类专名一律归 other。');
     L.push('');
-    L.push('输出要求：只输出一个 JSON 对象，键=标签原文、值=分类 key。不要任何解释、代码块围栏或额外文字。');
+    L.push('输出要求：只输出一个 JSON 对象，键=标签原文，值=“现有分类 key / other / 自拟简洁中文类名”三选一。不要任何解释、代码块围栏或额外文字。');
     return L.join('\n');
 }
 
@@ -492,6 +494,49 @@ export function buildTagClassificationUserPrompt(labels = []) {
     if (list.length === 0) return '';
     return '以下是待分类的标签（共 ' + list.length + ' 个）：\n' +
         list.map((l, i) => `${i}. ${l}`).join('\n') +
-        '\n\n请输出 JSON：{ "标签原文": "分类key", ... }';
+        '\n\n请输出 JSON：{ "标签原文": "分类key" }';
+}
+
+// =========================================================
+// 🆕 AI 归类「新分类名」归一（v2.2.1 增强）
+// 模型返回的分类值可能是：现有 key / 现有中文名 / other / 自拟的新分类名。
+// 逐层归一：命中现有（内置 key/中文名、自定义 key/name）→ 返回其 key；
+// 其余通过合理性过滤后 → 视为「待新建的自定义大分类名」（isNew=true），
+// 由 TagCategoryModal 在应用时自动 addCustomTagCategory 创建并承接标签。
+// =========================================================
+const BUILTIN_TARGETS = (() => {
+    const keys = new Set();
+    const names = new Map(); // 中文名小写 → key
+    for (const c of TAG_CATEGORIES) {
+        if (c.key === 'other') continue;
+        keys.add(c.key);
+        names.set(String(c.name || '').trim().toLowerCase(), c.key);
+    }
+    return { keys, names };
+})();
+
+/**
+ * 把 AI 返回的分类值归一为可用目标
+ * @param {*} value 模型输出的分类值（key / 中文名 / other / 自拟新名）
+ * @param {Array} customCats 当前自定义大分类 [{key,name,icon}]（归一现有自定义）
+ * @returns {{ key:string, isNew:boolean }} key=最终分类 key 或新类名；isNew=是否需要自动新建
+ */
+export function resolveTagCategoryTarget(value, customCats = []) {
+    if (value === null || value === undefined) return { key: 'other', isNew: false };
+    const raw = String(value).trim();
+    if (!raw) return { key: 'other', isNew: false };
+    const low = raw.toLowerCase();
+    if (low === 'other') return { key: 'other', isNew: false };
+    // ① 命中现有内置分类（key 或中文名）
+    if (BUILTIN_TARGETS.keys.has(low)) return { key: low, isNew: false };
+    if (BUILTIN_TARGETS.names.has(low)) return { key: BUILTIN_TARGETS.names.get(low), isNew: false };
+    // ② 命中现有自定义分类（key 或 name）
+    const customs = Array.isArray(customCats) ? customCats : [];
+    const c = customs.find(x => x && x.key && (String(x.key).trim().toLowerCase() === low || String(x.name || '').trim().toLowerCase() === low));
+    if (c) return { key: c.key, isNew: false };
+    // ③ 合理性过滤后视为新分类候选（拒绝超长 / 纯符号数字 / 空白）
+    if (raw.length > 12) return { key: 'other', isNew: false };
+    if (!/[A-Za-z\u4e00-\u9fa5]/.test(raw)) return { key: 'other', isNew: false };
+    return { key: raw, isNew: true };
 }
 
