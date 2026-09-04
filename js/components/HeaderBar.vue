@@ -130,7 +130,14 @@
                                           class="absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full transition-transform"></span>
                                 </button>
                             </div>
-                            <span class="block text-[10px] text-zinc-500 mt-1">开启后，新导入的卡片不采用其自带的杂乱标签，防止污染全局标签池</span>
+                            <span class="block text-[10px] text-zinc-500 mt-1">仅对新导入的卡片生效；历史残留请用下方「清洗历史外来标签」</span>
+                        </div>
+                        <div class="px-3 py-2 border-b border-zinc-700/50">
+                            <button @click="cleanForeignTagsFromLibrary()" class="w-full px-2 py-1.5 text-left rounded hover:bg-amber-600 hover:text-white flex items-center justify-between gap-2">
+                                <span>🧹 清洗历史外来标签</span>
+                                <span class="text-[10px] text-zinc-500 group-hover:text-amber-100">执行</span>
+                            </button>
+                            <span class="block text-[10px] text-zinc-500 mt-1">清除开关开启前已收编进卡片的外来标签（保留系统标签库/自动规则/已归类标签），物理落盘</span>
                         </div>
                         <div class="px-3 py-2 border-b border-zinc-700/50">
                             <div class="flex items-center justify-between mb-1">
@@ -291,6 +298,7 @@ export default {
             dedupeTargetLabel,
             viewOptions: ctx.viewOptions,
             sanitizeImportedTags: ctx.sanitizeImportedTags,
+            cleanForeignTagsFromLibrary: ctx.cleanForeignTagsFromLibrary,
             snapshotConfig: ctx.snapshotConfig,
             cleanAllSnapshots: ctx.cleanAllSnapshots,
             cleanOrphanSnapshots: ctx.cleanOrphanSnapshots,

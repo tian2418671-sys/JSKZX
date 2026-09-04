@@ -4311,12 +4311,12 @@ export default {
             toggleTagLangMode, getPresetTagText, displayTagText,
             togglePresetTag, executeBatchTagSave,
             globalAvailableTags, newGlobalTagInput, addTagToGlobalPool,
-            removeTagFromGlobalPool, clearAllTagsFromPool, batchRemoveTags,
+            removeTagFromGlobalPool, clearAllTagsFromPool, batchRemoveTags, cleanForeignTagsFromLibrary,
             appendTagToSearch, isEditingSystemTags, addGlobalTag,
             // 🛠️ 自定义大分类管理
             addCustomTagCategory, renameCustomTagCategory,
             removeCustomTagCategory, assignTagToCategory, assignTagsToCategory
-        } = useTags({ systemCommonTags, tagLangMode, library, sanitizeImportedTags, confirmDialog, nativeAlert, persistCardUpdate, cardData, searchQueryInput, selectedIds, clearSelection, syncConfigToDisk, createProgressToast, customTagCategories, customTagAssignments });
+        } = useTags({ systemCommonTags, tagLangMode, library, sanitizeImportedTags, confirmDialog, nativeAlert, persistCardUpdate, cardData, searchQueryInput, selectedIds, clearSelection, syncConfigToDisk, createProgressToast, customTagCategories, customTagAssignments, compiledAutoTagRules, customKeywords });
 
         // 🧠 标签大分类：向量模型辅助归类（三级策略②层——规则未命中的标签与分类描述语义匹配）
         //    vectorStatus.ready 后全量跑一次；标签池变化时增量跑。静默后台执行，
@@ -4396,7 +4396,7 @@ export default {
             showAutoTagRulesModal, autoTagRules, saveAutoTagRules, resetAutoTagRules,
             // ✏️ 自定义关键词库（候选词池，可增删）
             customKeywords, addCustomKeyword, removeCustomKeyword,
-            globalAvailableTags, newGlobalTagInput, addTagToGlobalPool, removeTagFromGlobalPool, clearAllTagsFromPool, batchRemoveTags, appendTagToSearch,
+            globalAvailableTags, newGlobalTagInput, addTagToGlobalPool, removeTagFromGlobalPool, clearAllTagsFromPool, batchRemoveTags, cleanForeignTagsFromLibrary, appendTagToSearch,
             isEditingSystemTags, addGlobalTag,
             // 🛠️ 自定义大分类（标签云自定义分组 + 手动标签归属）
             customTagCategories, customTagAssignments,

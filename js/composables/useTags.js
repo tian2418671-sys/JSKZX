@@ -21,7 +21,9 @@ export function useTags({
     syncConfigToDisk,
     createProgressToast,     // 🔧 批量进度 Toast 工厂（并发安全）
     customTagCategories,     // 🛠️ 自定义大分类数组 ref（App.vue 顶层持有 + 持久化）
-    customTagAssignments     // 🎯 手动标签归属 ref（普通对象，便于 JSON 持久化）
+    customTagAssignments,    // 🎯 手动标签归属 ref（普通对象，便于 JSON 持久化）
+    compiledAutoTagRules,    // 📋 自动打标规则编译结果 computed（{标签名: RegExp}），作清洗白名单
+    customKeywords           // ✏️ 自定义关键词库 ref（AI 候选词池），作清洗白名单
 }) {
     // ================= 批量标签与预设系统 =================
     const showBatchTagModal = ref(false);
@@ -426,6 +428,89 @@ export function useTags({
         clearSelection();
     };
 
+    // 🧹 一键清洗历史「外来标签」：清除历史上（sanitize 开关开启前）被收编进卡片的、
+    //    不在应用自身标签词表内的标签（customTags + 原生 data.tags 双清），并物理落盘。
+    //    —— 开关只影响「新导入」；历史卡的外来标签已被 persistCardUpdate 永久写回 PNG，
+    //       且 globalAvailableTags 无条件聚合 customTags → 表现为「开关无效」的体感残留。
+    //    customTags 无「用户手动添加 vs 历史收编」元数据，只能按词表白名单反向清洗：
+    //    keep 词表 = 系统/常用标签库 + 自动打标规则标签 + 用户手动归类过的标签 + 自定义关键词库。
+    //    保留策略说明：如需保留个别词表外的标签，请先将其加入「系统/常用标签库」再执行本清洗。
+    const cleanForeignTagsFromLibrary = async () => {
+        if (!library.value.length) return nativeAlert('当前没有已加载的卡片，无需清洗。', 'info');
+
+        // 1. 组装 keep 词表（大小写不敏感比较，兼容自定义归属存小写键）
+        const keepLower = new Set();
+        const addKeep = (v) => { if (typeof v === 'string' && v.trim()) keepLower.add(v.trim().toLowerCase()); };
+        (systemCommonTags.value || []).forEach(addKeep);
+        const rules = (compiledAutoTagRules && compiledAutoTagRules.value) || {};
+        Object.keys(rules).forEach(addKeep);
+        const kw = (customKeywords && customKeywords.value) || [];
+        (Array.isArray(kw) ? kw : []).forEach(addKeep);
+        Object.keys(customTagAssignments.value || {}).forEach(addKeep); // 手动归类键 = 用户显式意图保留
+        const isKeep = (t) => typeof t === 'string' && t.trim() !== '' && keepLower.has(t.trim().toLowerCase());
+
+        // 2. 全库扫描：收集词表外的外来标签 + 受影响卡片
+        const foreign = new Map(); // 标签 → 出现次数
+        const modified = [];
+        const scanTags = (tag) => { if (typeof tag === 'string' && tag.trim() && !isKeep(tag)) foreign.set(tag.trim(), (foreign.get(tag.trim()) || 0) + 1); };
+        library.value.forEach(item => {
+            let hit = false;
+            if (Array.isArray(item.customTags)) {
+                item.customTags.forEach(t => { if (typeof t === 'string' && t.trim() && !isKeep(t)) { scanTags(t); hit = true; } });
+            }
+            const d = item.data?.data || item.data || {};
+            if (Array.isArray(d.tags)) {
+                d.tags.forEach(t => { if (typeof t === 'string' && t.trim() && !isKeep(t)) { scanTags(t); hit = true; } });
+            } else if (typeof d.tags === 'string' && d.tags.trim()) {
+                d.tags.split(',').forEach(t => { t = t.trim(); if (t && !isKeep(t)) { scanTags(t); hit = true; } });
+            }
+            if (hit) modified.push(item);
+        });
+
+        if (foreign.size === 0) return nativeAlert('🎉 未发现外来标签：全库标签均已在系统常用标签库 / 自动规则 / 手动归类范围内。', 'info');
+
+        const tagList = Array.from(foreign.keys()).sort();
+        const preview = tagList.slice(0, 15).join('、') + (tagList.length > 15 ? ` 等共 ${tagList.length} 个` : '');
+        const ok = await confirmDialog(
+            `确定要清洗历史「外来标签」吗？\n\n` +
+            `· 将清除 ${tagList.length} 个不在你系统标签库中的外来标签\n` +
+            `· 涉及 ${modified.length} 张卡片（customTags 与原生 data.tags 双清，物理落盘）\n` +
+            `· 示例：${preview}\n\n` +
+            `✅ 保留：系统/常用标签库 + 自动打标规则标签 + 你手动归类过的标签 + 自定义关键词库\n` +
+            `⚠️ 如需保留个别词表外标签，请先将其加入「系统/常用标签库」再执行本操作\n` +
+            `⚠️ 此操作不可撤销！`
+        );
+        if (!ok) return;
+
+        // 3. 逐张清洗（词表外的标签全部剔除）并物理落盘
+        const total = tagList.length;
+        const savedCount = await runWithProgress(modified, '🧹 清洗外来标签', async (item) => {
+            let isModified = false;
+            if (Array.isArray(item.customTags)) {
+                const f = item.customTags.filter(t => !(typeof t === 'string' && t.trim() !== '' && !isKeep(t)));
+                if (f.length !== item.customTags.length) { item.customTags = f; isModified = true; }
+            }
+            const d = item.data?.data || item.data || {};
+            if (Array.isArray(d.tags)) {
+                const f = d.tags.filter(t => !(typeof t === 'string' && t.trim() !== '' && !isKeep(t)));
+                if (f.length !== d.tags.length) { d.tags = f; isModified = true; }
+            } else if (typeof d.tags === 'string' && d.tags.trim()) {
+                const cleaned = d.tags.split(',').map(t => t.trim()).filter(t => t && isKeep(t)).join(', ');
+                if (cleaned !== d.tags) { d.tags = cleaned; isModified = true; }
+            }
+            if (!isModified) return false;
+            try {
+                await persistCardUpdate(item, { tags: item.customTags || [], category: item.category });
+                return true;
+            } catch (e) {
+                console.error(`清洗外来标签后物理保存失败 [${item.name}]:`, e);
+                return false;
+            }
+        });
+        if (cardData.value) triggerRef(cardData);
+        nativeAlert(`🧹 清洗完成！\n已清除 ${total} 个外来标签，清洗 ${modified.length} 张卡片，物理保存 ${savedCount} 张。`, 'info');
+    };
+
     // ================= 自定义大分类系统 =================
     // 新增自定义分类（key 自动生成 custom_<时间戳>）
     const addCustomTagCategory = (name, icon = '🏷️') => {
@@ -488,6 +573,7 @@ export function useTags({
         togglePresetTag, executeBatchTagSave,
         globalAvailableTags, newGlobalTagInput, addTagToGlobalPool,
         removeTagFromGlobalPool, clearAllTagsFromPool, batchRemoveTags,
+        cleanForeignTagsFromLibrary,
         appendTagToSearch, isEditingSystemTags, addGlobalTag,
         addCustomTagCategory, renameCustomTagCategory,
         removeCustomTagCategory, assignTagToCategory, assignTagsToCategory
