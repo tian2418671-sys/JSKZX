@@ -150,6 +150,38 @@ async function main() {
             return JSON.stringify({ removed, remaining: keep.length });
         })()`);
         console.log('remove-tests →', r);
+    } else if (cmd === 'merge-dupes') {
+        // 🧹 合并同名自定义大分类（含空白/全角/零宽变体），把重复分类的标签归属迁移到保留项
+        const r = await evaluate(`(() => {
+            const st = document.querySelector('#app').__vue_app__._instance.setupState;
+            const merged = (typeof st.mergeDuplicateTagCategories === 'function') ? st.mergeDuplicateTagCategories() : -1;
+            const cats = (st.customTagCategories || []).map(c => ({ key: c.key, name: c.name }));
+            return JSON.stringify({ merged, cats });
+        })()`);
+        console.log('merge-dupes →', r);
+    } else if (cmd === 'reload-merge') {
+        // App.vue 大组件 HMR 不生效 → 整页 reload 让新代码生效后自动合并同名分类
+        await send('Page.enable');
+        await send('Page.reload', { ignoreCache: false });
+        const dl = Date.now() + 25000;
+        let out = null;
+        while (Date.now() < dl) {
+            await new Promise(res => setTimeout(res, 800));
+            try {
+                const r = await evaluate(`(() => {
+                    const st = document.querySelector('#app') && document.querySelector('#app').__vue_app__ && document.querySelector('#app').__vue_app__._instance && document.querySelector('#app').__vue_app__._instance.setupState;
+                    if (!st || typeof st.mergeDuplicateTagCategories !== 'function' || typeof st.ensureUniqueCustomCategoryKeys !== 'function') return null;
+                    const cats0 = st.customTagCategories || [];
+                    if (!cats0.length) return null; // 等待 app_config 注入完成
+                    const fixed = st.ensureUniqueCustomCategoryKeys();
+                    const merged = st.mergeDuplicateTagCategories();
+                    const cats = (st.customTagCategories || []).map(c => ({ key: c.key, name: c.name }));
+                    return JSON.stringify({ fixed, merged, cats, libLen: (st.library || []).length });
+                })()`);
+                if (r) { out = r; break; }
+            } catch (e) { /* 页面切换中 */ }
+        }
+        console.log('reload-merge →', out || 'not-ready');
     } else {
         console.log('未知命令');
     }

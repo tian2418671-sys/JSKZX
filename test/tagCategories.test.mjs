@@ -4,7 +4,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { getTagCategory, groupTagsByCategory, TAG_CATEGORIES, setCustomTagState, buildTagClassificationSystemPrompt, buildTagClassificationUserPrompt, resolveTagCategoryTarget } from '../js/utils/tagCategories.js';
+import { getTagCategory, groupTagsByCategory, TAG_CATEGORIES, setCustomTagState, buildTagClassificationSystemPrompt, buildTagClassificationUserPrompt, resolveTagCategoryTarget, normalizeTagName } from '../js/utils/tagCategories.js';
 
 test('默认标签池映射正确（英文+中文注释格式）', () => {
     const cases = [
@@ -223,4 +223,23 @@ test('resolve：超长 / 纯符号数字等异常值回 other，不建垃圾分�
     assert.deepEqual(resolveTagCategoryTarget('这是一个超级无敌长的分类名超过了十二个字长度限制', CUSTOM_FIXTURE), { key: 'other', isNew: false });
     assert.deepEqual(resolveTagCategoryTarget('12345', CUSTOM_FIXTURE), { key: 'other', isNew: false });
     assert.deepEqual(resolveTagCategoryTarget('###!!!', CUSTOM_FIXTURE), { key: 'other', isNew: false });
+});
+
+// ---------- 🔤 分类名规范化（防同名重复分类） ----------
+
+test('normalize：全角空格 / NBSP / 零宽字符视为同一名', () => {
+    const base = normalizeTagName('虚构组织');
+    assert.equal(normalizeTagName('虚构组织\u00a0'), base, '尾部 NBSP 视为同名');
+    assert.equal(normalizeTagName('虚构组织\u3000'), base, '尾部全角空格视为同名');
+    assert.equal(normalizeTagName('虚构组织\u200b'), base, '尾部零宽字符视为同名');
+    assert.equal(normalizeTagName('  A\u00a0B\u3000 '), 'A B', '内部变体空白折叠为半角空格并去首尾');
+    assert.equal(normalizeTagName(''), '');
+    assert.equal(normalizeTagName(null), '');
+});
+
+test('resolve：模型输出带隐藏空白的重复新名 → 归一为同一 isNew key（不产生字节不同的重复）', () => {
+    const a = resolveTagCategoryTarget('虚构组织\u00a0', []);
+    const b = resolveTagCategoryTarget('虚构组织', []);
+    assert.equal(a.isNew, true);
+    assert.deepEqual(a, b, '两种输入归一为同 key');
 });

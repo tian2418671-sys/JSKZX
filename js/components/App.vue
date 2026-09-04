@@ -4315,7 +4315,7 @@ export default {
             appendTagToSearch, isEditingSystemTags, addGlobalTag,
             // 🛠️ 自定义大分类管理
             addCustomTagCategory, renameCustomTagCategory,
-            removeCustomTagCategory, assignTagToCategory, assignTagsToCategory
+            removeCustomTagCategory, mergeDuplicateTagCategories, ensureUniqueCustomCategoryKeys, assignTagToCategory, assignTagsToCategory
         } = useTags({ systemCommonTags, tagLangMode, library, sanitizeImportedTags, confirmDialog, nativeAlert, persistCardUpdate, cardData, searchQueryInput, selectedIds, clearSelection, syncConfigToDisk, createProgressToast, customTagCategories, customTagAssignments, compiledAutoTagRules, customKeywords });
 
         // 🧠 标签大分类：向量模型辅助归类（三级策略②层——规则未命中的标签与分类描述语义匹配）
@@ -4400,7 +4400,7 @@ export default {
             isEditingSystemTags, addGlobalTag,
             // 🛠️ 自定义大分类（标签云自定义分组 + 手动标签归属）
             customTagCategories, customTagAssignments,
-            addCustomTagCategory, renameCustomTagCategory, removeCustomTagCategory, assignTagToCategory, assignTagsToCategory,
+            addCustomTagCategory, renameCustomTagCategory, removeCustomTagCategory, mergeDuplicateTagCategories, ensureUniqueCustomCategoryKeys, assignTagToCategory, assignTagsToCategory,
             chatHistory, chatInput, isChatting, apiEndpoint, apiKey, apiModel, apiType, saveApiConfig, handleApiTypeChange, chatContainer,
             rebindTavernPath,
             availableModels, isFetchingModels, fetchModelStatus, fetchAvailableModels,

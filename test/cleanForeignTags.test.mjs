@@ -42,7 +42,7 @@ function makeMock(overrides = {}) {
         customKeywords,
         ...overrides
     });
-    return { tags, library, systemCommonTags, customTagAssignments, alerts, confirms, persists, state };
+    return { tags, library, systemCommonTags, customTagCategories, customTagAssignments, alerts, confirms, persists, state };
 }
 
 function makeCard(overrides = {}) {
@@ -139,4 +139,44 @@ test('清洗：空库直接提示无需清洗', async () => {
     await m.tags.cleanForeignTagsFromLibrary();
     assert.equal(m.persists.length, 0);
     assert.ok(m.alerts.some(a => a.type === 'info' && a.m.includes('没有已加载的卡片')), '空库提示');
+});
+
+// ---------- 自定义大分类：同名变体幂等 + 重复合并 ----------
+
+test('addCustomTagCategory：同名变体（含 NBSP）幂等返回已有 key，不重复建分类', () => {
+    const m = makeMock();
+    m.customTagCategories.value.push({ key: 'custom_a', name: '虚构组织', icon: '🏷️' });
+    const k = m.tags.addCustomTagCategory('虚构组织\u00a0');
+    assert.equal(k, 'custom_a', '复用已有分类 key');
+    assert.equal(m.customTagCategories.value.length, 1, '不重复建同名分类');
+});
+
+test('mergeDuplicateTagCategories：合并同名变体分类并把标签归属迁移到保留项', () => {
+    const m = makeMock();
+    m.customTagCategories.value.push({ key: 'c1', name: '虚构组织', icon: '🏷️' });
+    m.customTagCategories.value.push({ key: 'c2', name: '虚构组织\u3000', icon: '🏷️' });
+    m.customTagAssignments.value['某个标签'] = 'c2';
+    const merged = m.tags.mergeDuplicateTagCategories();
+    assert.equal(merged, 1, '合并 1 个重复分类');
+    assert.equal(m.customTagCategories.value.length, 1, '只剩保留分类');
+    assert.equal(m.customTagCategories.value[0].key, 'c1');
+    assert.equal(m.customTagAssignments.value['某个标签'], 'c1', '归属迁移到保留分类');
+});
+
+test('addCustomTagCategory：同毫秒连续建两个分类 key 唯一不碰撞（AI 一次应用连建多类）', () => {
+    const m = makeMock();
+    const k1 = m.tags.addCustomTagCategory('虚构组织');
+    const k2 = m.tags.addCustomTagCategory('游戏动漫作品');
+    assert.notEqual(k1, k2, 'key 必须唯一，不能复用同一毫秒时间戳');
+    assert.equal(m.customTagCategories.value.length, 2);
+    assert.equal(new Set(m.customTagCategories.value.map(c => c.key)).size, 2);
+});
+
+test('ensureUniqueCustomCategoryKeys：同 key 重复条目重发唯一 key', () => {
+    const m = makeMock();
+    m.customTagCategories.value.push({ key: 'custom_x', name: '虚构组织', icon: '🏷️' });
+    m.customTagCategories.value.push({ key: 'custom_x', name: '游戏动漫作品', icon: '🏷️' });
+    const fixed = m.tags.ensureUniqueCustomCategoryKeys();
+    assert.equal(fixed, 1, '修复 1 个同 key 条目');
+    assert.equal(new Set(m.customTagCategories.value.map(c => c.key)).size, 2, '修复后 key 全部唯一');
 });

@@ -5,6 +5,7 @@
  * 若在本组合式函数内部定义会触发 TDZ），其余状态与操作方法在此定义，依赖通过参数注入，保持原有行为不变。
  */
 import { ref, computed, triggerRef } from 'vue';
+import { normalizeTagName } from '../utils/tagCategories.js';
 
 export function useTags({
     systemCommonTags, // ⚠️ 系统常用标签池 ref，由 App.vue 顶层持有（syncConfigToDisk 引用）
@@ -512,26 +513,27 @@ export function useTags({
     };
 
     // ================= 自定义大分类系统 =================
-    // 新增自定义分类（key 自动生成 custom_<时间戳>）
+    // 新增自定义分类（key 自动生成 custom_<时间戳>；幂等：同名（含空白/全角/零宽变体）返回已有 key，杜绝重复分类）
     const addCustomTagCategory = (name, icon = '🏷️') => {
-        const trimmed = String(name || '').trim();
+        const trimmed = normalizeTagName(name);
         if (!trimmed) { nativeAlert('分类名称不能为空', 'warning'); return null; }
-        if (customTagCategories.value.some(c => c.name === trimmed)) {
-            nativeAlert(`已存在同名分类「${trimmed}」`, 'warning'); return null;
-        }
-        const key = `custom_${Date.now().toString(36)}`;
+        const existing = customTagCategories.value.find(c => normalizeTagName(c.name) === trimmed);
+        if (existing) return existing.key; // 幂等：已存在同名 → 复用，不重复建
+        // 🔧 key 防碰撞：Date.now() 毫秒精度在“同一毫秒内连续建多个分类”时碰撞
+        //   （AI 归类一次应用连建多类必然触发）→ 追加随机段保证唯一
+        const key = `custom_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
         customTagCategories.value.push({ key, name: trimmed, icon: String(icon || '🏷️') });
         syncConfigToDisk();
         return key;
     };
 
-    // 重命名自定义分类
+    // 重命名自定义分类（规范化判重）
     const renameCustomTagCategory = (key, name) => {
         const cat = customTagCategories.value.find(c => c.key === key);
         if (!cat) return false;
-        const trimmed = String(name || '').trim();
+        const trimmed = normalizeTagName(name);
         if (!trimmed) { nativeAlert('分类名称不能为空', 'warning'); return false; }
-        if (customTagCategories.value.some(c => c.key !== key && c.name === trimmed)) {
+        if (customTagCategories.value.some(c => c.key !== key && normalizeTagName(c.name) === trimmed)) {
             nativeAlert(`已存在同名分类「${trimmed}」`, 'warning'); return false;
         }
         cat.name = trimmed;
@@ -546,6 +548,49 @@ export function useTags({
             if (catKey === key) delete customTagAssignments.value[tag];
         }
         syncConfigToDisk();
+    };
+
+    // 🧹 合并同名自定义分类（含空白/全角/零宽变体）：保留首个，重复分类的标签归属迁移到保留分类后删除
+    // @returns {number} 合并（删除）的重复分类数
+    const mergeDuplicateTagCategories = () => {
+        const cats = customTagCategories.value || [];
+        const seen = new Map(); // normalized name → 保留 key
+        const dropKeyMap = new Map(); // 被删 key → 保留 key
+        const kept = [];
+        let merged = 0;
+        for (const c of cats) {
+            const n = normalizeTagName(c.name);
+            const keepKey = seen.get(n);
+            if (keepKey) { dropKeyMap.set(c.key, keepKey); merged++; }
+            else { seen.set(n, c.key); kept.push(c); }
+        }
+        if (!merged) return 0;
+        for (const [tag, catKey] of Object.entries(customTagAssignments.value || {})) {
+            const keepKey = dropKeyMap.get(catKey);
+            if (keepKey) customTagAssignments.value[tag] = keepKey;
+        }
+        customTagCategories.value = kept;
+        syncConfigToDisk();
+        return merged;
+    };
+
+    // 🔧 修复历史脏数据：给同 key 的重复分类条目重发唯一 key（歧义标签归属保留给首个条目）
+    // @returns {number} 修复（重发 key）的条目数
+    const ensureUniqueCustomCategoryKeys = () => {
+        const cats = customTagCategories.value || [];
+        const seen = new Set();
+        let fixed = 0;
+        for (const c of cats) {
+            if (!c || seen.has(c.key)) {
+                if (c) {
+                    c.key = `custom_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+                    fixed++;
+                }
+            }
+            if (c) seen.add(c.key);
+        }
+        if (fixed) syncConfigToDisk();
+        return fixed;
     };
 
     // 🎯 手动归属（批量）：将多个标签分配到指定分类（key 为 'other' 时解除归属）。
@@ -576,6 +621,6 @@ export function useTags({
         cleanForeignTagsFromLibrary,
         appendTagToSearch, isEditingSystemTags, addGlobalTag,
         addCustomTagCategory, renameCustomTagCategory,
-        removeCustomTagCategory, assignTagToCategory, assignTagsToCategory
+        removeCustomTagCategory, mergeDuplicateTagCategories, ensureUniqueCustomCategoryKeys, assignTagToCategory, assignTagsToCategory
     };
 }

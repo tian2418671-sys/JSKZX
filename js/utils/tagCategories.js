@@ -507,14 +507,28 @@ export function buildTagClassificationUserPrompt(labels = []) {
 // =========================================================
 const BUILTIN_TARGETS = (() => {
     const keys = new Set();
-    const names = new Map(); // 中文名小写 → key
+    const names = new Map(); // 中文名(规范化) → key
     for (const c of TAG_CATEGORIES) {
         if (c.key === 'other') continue;
         keys.add(c.key);
-        names.set(String(c.name || '').trim().toLowerCase(), c.key);
+        names.set(normalizeTagName(c.name).toLowerCase(), c.key);
     }
     return { keys, names };
 })();
+
+/**
+ * 🔤 分类名/标签名规范化（用于判重）：
+ * 删除零宽字符/BOM，把全角空格、NBSP、变体空白统一为半角空格，折叠连续空白并去首尾。
+ * —— 防止“看起来同名但字节不同”（如模型输出尾随 NBSP/全角空格/零宽）被当成不同分类重复创建。
+ */
+export function normalizeTagName(value) {
+    return String(value == null ? '' : value)
+        .replace(/[\u200b\u200c\u200d]/g, '') // 零宽字符删除
+        .replace(/\ufeff/g, '') // BOM 删除
+        .replace(/[\u00a0\u1680\u180e\u2000-\u200a\u202f\u205f\u3000]/g, ' ') // 变体/全角空白 → 半角空格
+        .replace(/\s+/g, ' ')
+        .trim();
+}
 
 /**
  * 把 AI 返回的分类值归一为可用目标
@@ -523,17 +537,16 @@ const BUILTIN_TARGETS = (() => {
  * @returns {{ key:string, isNew:boolean }} key=最终分类 key 或新类名；isNew=是否需要自动新建
  */
 export function resolveTagCategoryTarget(value, customCats = []) {
-    if (value === null || value === undefined) return { key: 'other', isNew: false };
-    const raw = String(value).trim();
+    const raw = normalizeTagName(value);
     if (!raw) return { key: 'other', isNew: false };
     const low = raw.toLowerCase();
     if (low === 'other') return { key: 'other', isNew: false };
     // ① 命中现有内置分类（key 或中文名）
     if (BUILTIN_TARGETS.keys.has(low)) return { key: low, isNew: false };
     if (BUILTIN_TARGETS.names.has(low)) return { key: BUILTIN_TARGETS.names.get(low), isNew: false };
-    // ② 命中现有自定义分类（key 或 name）
+    // ② 命中现有自定义分类（key 或 name，规范化比较）
     const customs = Array.isArray(customCats) ? customCats : [];
-    const c = customs.find(x => x && x.key && (String(x.key).trim().toLowerCase() === low || String(x.name || '').trim().toLowerCase() === low));
+    const c = customs.find(x => x && x.key && (String(x.key).trim().toLowerCase() === low || normalizeTagName(x.name).toLowerCase() === low));
     if (c) return { key: c.key, isNew: false };
     // ③ 合理性过滤后视为新分类候选（拒绝超长 / 纯符号数字 / 空白）
     if (raw.length > 12) return { key: 'other', isNew: false };
