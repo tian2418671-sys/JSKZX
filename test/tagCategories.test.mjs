@@ -186,6 +186,7 @@ test('AI 分类提示词包含内置分类语义与自定义分类、输出纪�
     assert.ok(sys.includes('other'), '提示词应含 other 兜底');
     assert.ok(sys.includes('JSON'), '提示词应要求输出 JSON');
     assert.ok(sys.includes('自拟'), '提示词应允许 AI 自拟新分类名（未命中现有分组时自动建类承接）');
+    assert.ok(sys.includes('成组'), '提示词应要求按语义成组才自拟建类（孤立专名归 other）');
     const user = buildTagClassificationUserPrompt(['魔法', '原神']);
     assert.ok(user.includes('魔法') && user.includes('0. '), 'user 提示词应含编号标签');
 });

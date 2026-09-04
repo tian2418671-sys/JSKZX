@@ -139,6 +139,17 @@ async function main() {
         const foreign = names.some(n => n.includes('-A')) ? A_FOREIGN : B_FOREIGN;
         const r = await evaluate(stateExpr(names, foreign));
         console.log(r);
+    } else if (cmd === 'remove-tests') {
+        // 🧹 清理测试残留：从内存 library 移除 SanitizeTest-* 测试卡（磁盘文件已单独删除）
+        const r = await evaluate(`(() => {
+            const st = document.querySelector('#app').__vue_app__._instance.setupState;
+            const L = st.library || [];
+            const keep = L.filter(x => !String((x && x.name) || '').startsWith('SanitizeTest-'));
+            const removed = L.length - keep.length;
+            if (removed > 0) st.library = keep;
+            return JSON.stringify({ removed, remaining: keep.length });
+        })()`);
+        console.log('remove-tests →', r);
     } else {
         console.log('未知命令');
     }

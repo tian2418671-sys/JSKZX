@@ -118,7 +118,7 @@
                           class="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-[11px] rounded transition font-bold">✅ 应用 {{ aiApplyCount }} 条</button>
                 </div>
               </div>
-              <div class="text-[10px] text-zinc-500 -mt-1">凡标注「其他(不处理)」的将跳过（作品/IP/人名等保留原样）。</div>
+              <div class="text-[10px] text-zinc-500 -mt-1">归入「🆕 将自动新建」的标签将在应用时自动创建大分类承接；其余保留「其他(不处理)」。</div>
               <div class="flex-1 min-h-0 overflow-y-auto custom-scrollbar border border-zinc-700 rounded bg-zinc-800/40 p-1.5">
                 <div v-for="s in aiSuggestions" :key="s.tag" class="flex items-center gap-2 px-2 py-1 rounded transition-colors"
                      :class="s.isNew && s.cat !== 'other' ? 'bg-violet-500/10 ring-1 ring-violet-500/40' : 'hover:bg-zinc-700/50'">
