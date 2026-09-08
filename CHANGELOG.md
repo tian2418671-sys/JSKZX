@@ -1,7 +1,61 @@
-# SillyTavern 角色卡管理器 · v1.6.2 → v2.2.4 更新汇总
+# SillyTavern 角色卡管理器 · v1.6.2 → v2.2.5 更新汇总
 
-> 更新周期：2026-08-15 ~ 2026-09-07
+> 更新周期：2026-08-15 ~ 2026-09-09
 > 技术栈：Electron + Vue3 + Tailwind + ECharts
+
+---
+
+## 🧩 v2.2.5 —— 插件代码 AI 助手 + 代码编辑器体验增强 + JSON 页可编辑
+
+> 背景：围绕「插件工作区」的代码体验收尾——①加 AI 对话式定位/修改插件代码；②Raw JSON 页从只读变为可编辑、可格式化、可应用回写；③修复 `.json` 插件（内部实为压缩 JS）格式化失效；④搜索面板中文化（原为 CodeMirror 硬编码英文）；⑤格式化按钮由 hover 显隐改为常驻可见。
+
+### 🤖 插件代码 AI 助手（`js/components/AiCodeModal.vue` 新增）
+- 新增 `AiCodeModal.vue`：对话框 UI（🤖 图标 + 目标文件名 + 对话气泡流 + 输入框 `Ctrl+Enter` 发送）
+- 打开时把当前插件源码拼进 system 提示词作上下文；用户描述需求，模型回复 Markdown 代码块，正则解析取**最长** ``` 代码块，一键「应用」回写编辑器
+- 定位类问题 system 提示词明确「只给文字 + 行号，不贴整段代码」
+- 复用现有 AI 链路：`sendChatMessage`(IPC) + `resolveApiModel()` + `extractReplyContent(result)`；API 配置沿用设置里的 endpoint/key/model/type
+
+### 🧩 接入（`js/components/PluginWorkspace.vue`）
+- 顶部控制栏加「🤖 AI 修改」按钮（此前是 📂定位/🗑️删除）；注册 `AiCodeModal` + `showAiModal`
+- `applyAiCode(code)` 回写 `selectedSource`（扩展工程）或 `scripts[0].content`（脚本类）+ `pluginDirty = true`
+- `watch` 把 `selectedFile`/`selectedSource` 注入 `activePlugin._selectedFile`/`_selectedSource`
+- 脚本卡片 `CodeEditor` 显式传 `language="javascript"`（`.json` 插件格式化修复的关键）
+
+### ✨ Raw JSON 可编辑 + 应用回写（`js/components/EditorPanel.vue` / `App.vue`）
+- Raw JSON 页去 `readonly`，改 `v-model="rawJsonDraft"`，顶部加状态栏 + 「✅ 应用修改」按钮
+- `App.vue`：新增 `rawJsonDraft`(ref) + `applyRawJson`（解析 → 校验对象类型 → 写回 `cardData` → `refreshCardData()` → 重新格式化草稿 + `showToast`）
+- 🔴 **数据不显示修复**：原 `watch(cardData)` 用引用比较（`shallowRef` 顶层替换）不可靠 → 改 `watch(formattedJson)` 监听 computed 的 JSON 字符串，用 `lastJsonText` 文本比较；`apply` 后同步 `lastJsonText`
+- 两者加入 `ctx` return（子组件 inject 依赖）
+
+### 🐛 `.json` 插件格式化失效修复（`js/components/CodeEditor.vue`）
+- 根因：按 `.json` 扩展名推断为 `json` 语言，`formatNow` 走 `JSON.parse`；但酒馆助手插件的 `content` 常是压缩 JS，`JSON.parse` 抛错被吞 → 原文不动，表现为「格式化没效果」
+- 修复：`formatNow` 的 `json` 分支加 JS 回退——`JSON.parse` 失败时回退 `js_beautify`；配合脚本卡片显式 `language="javascript"` 双保险
+
+### 🌐 搜索面板中文化（`js/components/CodeEditor.vue`）
+- 根因：CodeMirror `@codemirror/search` 的短语原文即 key，无 provider 时直接返回英文原文
+- 修复：`EditorState.phrases.of({...})` 提供中文映射覆盖（key 覆盖 Find/Replace/next/previous/all/match case/regexp/by word/replace/replace all/close/Go to line/go 等）
+
+### ✨ 格式化按钮常驻可见（`js/components/CodeEditor.vue`）
+- 原为 `opacity-0 group-hover:opacity-100`（hover 才显示，用户找不到）→ 改常驻右上角 + 文字「✨ 格式化」
+
+### 🏷️ 导入打标双开关彻底解耦（`js/composables/useCardCrud.js` / `App.vue` / `HeaderBar.vue`）
+- **动机（v2.2.5 最终契约）**：用户要求两开关职责独立、只对导入的新卡生效：
+  - `sanitizeImportedTags`（🧹忽略卡片自带标签）：**只管**是否物理清空卡片自带原生 `data.tags`——入口统一执行，4 条提前 return 无法绕过；
+  - `autoTagOnImport`（🏷️导入自动打标，默认 `true`）：**只管**是否运行规则引擎（贴规则标签 + 自动分类）。
+- 🔴 **解耦修复（核心 bug）**：初版实现残留旧闸门 `if (!sanitizeImportedTags.value && !alreadyHas)` —— 规则循环里「忽略开关」错误压制「规则开关」，导致 **忽略开 + 规则开时规则标签不贴**（规则开关开了等于没开）。修复：删掉规则循环对忽略开关的依赖，能走到规则循环即规则开关已开 → 命中无条件贴标；`shouldAutoBuildCategory` 同步与忽略开关解耦。
+- **最终四象限**：忽略开+规则开=清原生+规则贴标分类 / 忽略开+规则关=全空白手动 / 忽略关+规则开=保留原生+规则补充 / 忽略关+规则关=保留原生不打标
+- 关闭时不干扰用户历史配置（覆盖层/importedConfig/localCategoryMap/subFolder 用户配置恢复**优先于**该早退判定）
+- 持久化：`ui.autoTagOnImport` 入 `useConfigPersistence` + `loadAppConfig` 恢复 + 集中 watch + `ctx` 暴露；`HeaderBar.vue` 两开关 UI 文案对齐新契约
+- 🔴 **事故记录**：解耦修复中一次 `replace_string_in_file` 发生错位——`App.vue` ctx 行 `currentCustomPushTarget` 被拆成 `curren autoTagOnImport,tCustomPushTarget` 导致 Vite 编译崩溃（`Unexpected token`）。已修复（该行恢复为 `currentCustomPushTarget, autoTagOnImport,`）。⚠️ 教训：多字段单行 ctx 追加字段时，必须用**行首独立锚点 + 整行替换**，勿用模糊子串。
+- ⚠️ 测试教训：`makeMock` 新增 mock 参数后必须同时暴露到 **return 对象**；`cardCrud.test.mjs` 用 V2 结构（`data.data.tags`），断言勿写 `card.data.tags`
+
+### 🐛 dev 启动终端中文乱码（`scripts/dev-run.ps1` 新增）
+- **根因**：Windows PowerShell 终端代码页默认 GBK(936)，Electron/Node/Chromium 输出 UTF-8 → 中文日志与系统错误消息乱码（`閫氬父姣忎釜濂楁帴瀛楀湴鍧€` 等）；libpng/WSALookup 无害噪音夹杂
+- **修复**：新增 `scripts/dev-run.ps1` 一键启动脚本，启动前 `chcp 65001` + `[Console]::OutputEncoding=UTF8` 双保险切 UTF-8，实测 dev 启动日志中文全部正常显示
+- ⚠️ 注意：该乱码仅影响**开发终端显示**，与应用界面/打包版无关（界面 HTML 恒 UTF-8 charset）
+
+### 🧪 测试
+- 四象限 + 历史配置回归：`test/sanitizeImport.test.mjs` ×8、`test/cardCrud.test.mjs` 更新 2 条旧契约断言。全量 **134 用例通过**（v2.2.4 的 128 → v2.2.5 的 134）
 
 ---
 

@@ -712,8 +712,10 @@ export default {
         };
 
         // 点击总条目：激活插件；若切换到不同插件则清空选中文件（避免残留上一插件源码）
-        const activatePluginNode = (plugin) => {
+        // 🧩 脏保护：扩展工程代码页有未保存修改时先确认，防止静默丢弃草稿
+        const activatePluginNode = async (plugin) => {
             const prev = ctx.activePlugin.value;
+            if (prev && prev.id !== plugin.id && ctx.pluginDirty?.value && !(await ctx.confirmDialog('插件代码有未保存的修改，切换插件将丢弃这些改动。确定继续吗？'))) return;
             ctx.activePlugin.value = plugin;
             if (!prev || prev.id !== plugin.id) {
                 if (ctx.pluginSelectedFile) ctx.pluginSelectedFile.value = null;
@@ -722,11 +724,18 @@ export default {
         };
 
         // 点击子条目：激活插件 + 切到代码页 + 选中对应文件（扩展工程读源码；脚本直出 content）
+        // 🧩 脏保护：扩展工程切换文件会覆盖编辑区草稿，有未保存修改时先确认
         const activatePluginChild = async (plugin, node) => {
+            const prev = ctx.activePlugin.value;
+            const switchingPlugin = !prev || prev.id !== plugin.id;
+            const switchingFile = !switchingPlugin && ctx.pluginSelectedFile?.value && ctx.pluginSelectedFile.value.abs !== node.abs;
+            if ((switchingPlugin || switchingFile) && ctx.pluginDirty?.value
+                && !(await ctx.confirmDialog('当前代码有未保存的修改，继续切换将丢弃这些改动。确定继续吗？'))) return;
             ctx.activePlugin.value = plugin;
             if (plugin.kind === 'extension') {
                 if (ctx.pluginTab) ctx.pluginTab.value = 'code';
                 if (ctx.pluginSelectedFile) ctx.pluginSelectedFile.value = node;
+                if (ctx.pluginDirty) ctx.pluginDirty.value = false;
                 if (ctx.pluginSelectedSource) ctx.pluginSelectedSource.value = '读取中…';
                 try {
                     const res = await window.electronAPI.readPluginFile(node.abs);

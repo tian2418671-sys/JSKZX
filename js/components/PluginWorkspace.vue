@@ -35,6 +35,7 @@
                         </div>
                     </div>
                     <div class="flex items-center gap-1.5 shrink-0">
+                        <button @click="showAiModal = true" class="px-2.5 py-1.5 theme-element hover:border-violet-500/60 border rounded-lg text-[11px] transition" title="用大模型定位 / 修改当前代码">🤖 AI 修改</button>
                         <button @click="openPluginInFolder(activePlugin)" class="px-2.5 py-1.5 theme-element hover:border-violet-500/60 border rounded-lg text-[11px] transition" title="在资源管理器中定位插件">📂 定位</button>
                         <button @click="deletePlugin(activePlugin)" class="px-2.5 py-1.5 theme-element hover:border-rose-500/60 border rounded-lg text-[11px] text-rose-300 transition" title="移入回收站">🗑️ 删除</button>
                     </div>
@@ -71,23 +72,40 @@
                         </div>
                     </aside>
                     <div class="flex-1 flex flex-col overflow-hidden min-w-0">
-                        <div class="px-3 py-1.5 bg-zinc-900 border-b border-zinc-800 text-[10px] text-zinc-500 font-mono shrink-0 truncate">{{ selectedFile ? selectedFile.abs : '选择左侧文件查看源码' }}</div>
-                        <textarea v-if="selectedFile" :value="selectedSource" readonly
-                                  class="flex-1 w-full resize-none bg-zinc-900/40 p-4 font-mono text-[11px] leading-relaxed text-zinc-300 outline-none custom-scrollbar"
-                                  spellcheck="false"></textarea>
-                        <div v-else class="flex-1 flex items-center justify-center text-zinc-600 text-xs">← 选择文件查看源码</div>
+                        <div class="px-3 py-1.5 bg-zinc-900 border-b border-zinc-800 flex items-center gap-2 shrink-0">
+                            <span class="text-[10px] text-zinc-500 font-mono truncate flex-1" :title="selectedFile ? selectedFile.abs : ''">{{ selectedFile ? selectedFile.abs : '选择左侧文件查看/编辑源码' }}</span>
+                            <span v-if="pluginDirty && selectedFile" class="text-[10px] text-amber-400 shrink-0" title="有未保存的修改">● 未保存</span>
+                            <button v-if="selectedFile"
+                                    @click="saveCode()"
+                                    :disabled="savingPlugin"
+                                    class="px-2.5 py-1 rounded text-[10px] font-bold shrink-0 transition"
+                                    :class="savingPlugin ? 'bg-zinc-700 text-zinc-500 cursor-not-allowed' : (pluginDirty ? 'bg-emerald-600 hover:bg-emerald-500 text-white shadow' : 'bg-zinc-700 hover:bg-zinc-600 text-zinc-300')"
+                                    :title="savingPlugin ? '保存中…' : '保存修改到磁盘 (Ctrl+S)'">{{ savingPlugin ? '💾 保存中…' : '💾 保存' }}</button>
+                        </div>
+                        <div v-if="selectedFile" class="flex-1 min-h-0 overflow-hidden">
+                            <CodeEditor :model-value="selectedSource" :filename="selectedFile.abs" height="100%"
+                                        @update:model-value="selectedSource = $event"
+                                        @change="pluginDirty = true" />
+                        </div>
+                        <div v-else class="flex-1 flex items-center justify-center text-zinc-600 text-xs">← 选择文件查看/编辑源码</div>
                     </div>
                 </template>
-                <!-- 散落脚本 / 酒馆助手：直出 content -->
+                <!-- 散落脚本 / 酒馆助手：直出 content（可编辑） -->
                 <div v-else class="flex-1 overflow-y-auto custom-scrollbar p-4">
-                    <div v-for="(s, i) in (activePlugin.scripts || [])" :key="i" class="rounded-xl border border-zinc-800 bg-zinc-900/60 overflow-hidden mb-4">
-                        <div class="px-3 py-2 border-b border-zinc-800 flex items-center justify-between">
-                            <span class="text-[11px] font-mono text-zinc-400 truncate">{{ s.file }}</span>
-                            <span class="text-[9px] px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-500">{{ scriptKindLabel(s.kind) }}</span>
+                    <div v-for="(s, i) in (activePlugin.scripts || [])" :key="i" class="rounded-xl border overflow-hidden mb-4"
+                         :class="pluginDirty && activePlugin.kind !== 'extension' ? 'border-amber-500/40' : 'border-zinc-800'">
+                        <div class="px-3 py-2 border-b border-zinc-800 flex items-center gap-2">
+                            <span class="text-[11px] font-mono text-zinc-400 truncate flex-1">{{ s.file }}</span>
+                            <span v-if="pluginDirty && activePlugin.kind !== 'extension'" class="text-[10px] text-amber-400 shrink-0" title="有未保存的修改">● 未保存</span>
+                            <span class="text-[9px] px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-500 shrink-0">{{ scriptKindLabel(s.kind) }}</span>
+                            <button @click="saveCode(i)"
+                                    :disabled="savingPlugin"
+                                    class="px-2.5 py-1 rounded text-[10px] font-bold shrink-0 transition"
+                                    :class="savingPlugin ? 'bg-zinc-700 text-zinc-500 cursor-not-allowed' : (pluginDirty ? 'bg-emerald-600 hover:bg-emerald-500 text-white shadow' : 'bg-zinc-700 hover:bg-zinc-600 text-zinc-300')"
+                                    :title="savingPlugin ? '保存中…' : '保存修改到磁盘 (Ctrl+S)'">{{ savingPlugin ? '💾 保存中…' : '💾 保存' }}</button>
                         </div>
-                        <textarea :value="s.content" readonly
-                                  class="w-full min-h-[420px] resize-y bg-zinc-950/60 p-4 font-mono text-[11px] leading-relaxed text-zinc-300 outline-none custom-scrollbar"
-                                  spellcheck="false"></textarea>
+                        <CodeEditor v-model="s.content" :filename="s.file" language="javascript" height="420px"
+                                    @change="pluginDirty = true" />
                     </div>
                 </div>
             </div>
@@ -105,6 +123,9 @@
                 </div>
             </div>
         </template>
+
+        <!-- 🤖 AI 代码定位/修改对话窗 -->
+        <AiCodeModal v-if="showAiModal" @close="showAiModal = false" @apply="applyAiCode" />
     </div>
 </template>
 
@@ -112,9 +133,12 @@
 import { inject, ref, computed, watch } from 'vue';
 import { resolvePreviewAssets } from '../utils/pluginScanner.js';
 import { buildPluginPreviewHtml } from '../plugins/hostStub.js';
+import CodeEditor from './CodeEditor.vue'; // 🧩 轻量代码编辑器（CodeMirror 封装：语法高亮+行号）
+import AiCodeModal from './AiCodeModal.vue'; // 🤖 AI 代码定位/修改对话窗
 
 export default {
     name: 'PluginWorkspace',
+    components: { CodeEditor, AiCodeModal },
     setup() {
         const ctx = inject('appCtx');
         const activePlugin = ctx.activePlugin;
@@ -125,7 +149,35 @@ export default {
         const pluginTab = ctx.pluginTab;
         const selectedFile = ctx.pluginSelectedFile;
         const selectedSource = ctx.pluginSelectedSource;
+        const pluginDirty = ctx.pluginDirty;          // 代码页未保存脏标记（App.vue 共享，防误切换丢改动）
+        const savingPlugin = ctx.savingPlugin;        // 保存中状态（防重复点击）
         const previewState = ref({ url: null, error: null, loading: false });
+        const showAiModal = ref(false);              // 🤖 AI 对话窗开关
+
+        // 🤖 让 AiCodeModal 能读到当前代码（扩展工程=选中文件源码；脚本类=脚本 content）
+        //    通过给 activePlugin 挂临时字段注入（组件内 collectCode 读取）
+        watch([activePlugin, selectedFile, selectedSource], () => {
+            const p = activePlugin.value;
+            if (!p || p.kind !== 'extension') return;
+            p._selectedFile = selectedFile.value;
+            p._selectedSource = selectedSource.value;
+        }, { immediate: true, deep: false });
+
+        // 🤖 应用 AI 返回的代码：按插件形态回写对应编辑区
+        const applyAiCode = (code) => {
+            if (typeof code !== 'string' || !code.trim()) return;
+            const p = activePlugin.value;
+            if (!p) return;
+            if (p.kind === 'extension') {
+                if (!selectedFile.value) { ctx.showToast('请先在文件树选择一个文件', 'error'); return; }
+                selectedSource.value = code;
+            } else {
+                const scripts = p.scripts || [];
+                if (!scripts.length) return;
+                scripts[0].content = code;
+            }
+            pluginDirty.value = true;
+        };
 
         // 类型徽标文案（与侧边栏一致）
         const pluginKindLabel = (p) => {
@@ -160,7 +212,13 @@ export default {
         });
 
         const selectFile = async (f) => {
+            // 有未保存修改时先确认：同一插件内切换文件会直接覆盖编辑区草稿
+            if (pluginDirty.value && selectedFile.value && selectedFile.value.abs !== f.abs) {
+                const ok = await ctx.confirmDialog('当前文件有未保存的修改，切换文件将丢弃这些改动。确定继续吗？');
+                if (!ok) return;
+            }
             selectedFile.value = f;
+            pluginDirty.value = false;
             selectedSource.value = '读取中…';
             try {
                 const res = await window.electronAPI.readPluginFile(f.abs);
@@ -170,10 +228,41 @@ export default {
             }
         };
 
-        // 切换选项卡：切到「效果」时自动构建预览
+        // 切换选项卡（代码/效果）：内容经 v-model 绑定，切换不会丢失编辑内容
         const switchTab = (tab) => {
             pluginTab.value = tab;
             if (tab === 'effect' && !previewState.value.url) buildPreview();
+        };
+
+        // ================= 💾 保存（三种插件形态统一走 ctx.savePluginSource）=================
+        // extension: 保存当前选中文件；tavern-helper/userscript/slash: 保存对应脚本 content
+        const saveCode = async (scriptIndex = 0) => {
+            const p = activePlugin.value;
+            if (!p || savingPlugin.value) return;
+
+            if (p.kind === 'extension') {
+                // 扩展工程：保存当前选中文件（selectedSource 即编辑器内容）
+                if (!selectedFile.value) return;
+                const ok = await ctx.savePluginSource({
+                    plugin: p,
+                    filePath: selectedFile.value.abs,
+                    content: selectedSource.value
+                });
+                if (ok) pluginDirty.value = false;
+                return;
+            }
+
+            // 脚本类（酒馆助手/用户脚本/命令）：编辑区直接 v-model 到 s.content，保存指定脚本
+            const scripts = p.scripts || [];
+            const s = scripts[scriptIndex] || scripts[0];
+            if (!s) return;
+            const ok = await ctx.savePluginSource({
+                plugin: p,
+                filePath: s.file,
+                content: s.content,
+                scriptIndex
+            });
+            if (ok) pluginDirty.value = false;
         };
 
         // 构建效果预览：非扩展内联 content；扩展读取 bundle js/css 后整包注入
@@ -230,6 +319,7 @@ export default {
         // 不在此重置，避免覆盖「侧边栏子条目点击 → 定位到代码页对应文件」的选中状态）
         watch(activePlugin, () => {
             pluginTab.value = 'code';
+            pluginDirty.value = false;
             previewState.value = { url: null, error: null, loading: false };
         });
 
@@ -237,6 +327,9 @@ export default {
             appMode,
             activePlugin,
             pluginTab,
+            pluginDirty,
+            savingPlugin,
+            saveCode,
             pluginKindLabel,
             pluginKindHint,
             scriptKindLabel,
@@ -247,6 +340,8 @@ export default {
             switchTab,
             previewState,
             buildPreview,
+            showAiModal,
+            applyAiCode,
             openPluginInFolder: ctx.openPluginInFolder,
             deletePlugin: ctx.deletePlugin
         };

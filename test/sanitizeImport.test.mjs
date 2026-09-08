@@ -1,9 +1,13 @@
 /**
- * sanitizeImportedTags 开关（设置菜单「导入时忽略卡片自带标签」）导入行为回归测试。
- * 直接调用生产代码 useCardCrud().processAutoTagsAndCategory（仅 mock 注入依赖）。
- * 覆盖的缺陷：
- *   1) 开关开启时自动打标规则仍把标签贴到新卡（用户体感「开关无效」）→ 只保留自动分类；
- *   2) subFolder/覆盖层/importedConfig/localCategoryMap 四条提前 return 绕过原生 tags 物理清洗。
+ * 导入双开关（v2.2.5 契约）回归测试：
+ *   🧹 sanitizeImportedTags（忽略卡片自带标签）：只管是否清空卡片原生 data.tags（入口物理清除）
+ *   🏷️ autoTagOnImport（导入自动打标）：只管是否运行规则引擎贴规则标签 + 自动分类
+ * 两个开关彻底独立，组合行为：
+ *   忽略开 + 规则开 → 清原生 + 规则贴标/自动分类
+ *   忽略开 + 规则关 → 清原生 + 不打标（全空白，用户手动）
+ *   忽略关 + 规则开 → 保留作者原生 + 规则补充打标/自动分类
+ *   忽略关 + 规则关 → 保留作者原生 + 不打标不自动分类
+ * 另覆盖：subFolder/覆盖层/importedConfig/localCategoryMap 提前 return 不得绕过原生 tags 物理清洗。
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -12,7 +16,7 @@ import { compileAutoTagRules } from '../js/utils/cardLoader.js';
 
 const presetRules = compileAutoTagRules(null); // 系统预设 44 条规则（v2.1 默认全部生效）
 
-function makeEnv({ sanitize, localCategoryMap = {}, importedConfig = {}, overlays = {} }) {
+function makeEnv({ sanitize, autoTag = true, localCategoryMap = {}, importedConfig = {}, overlays = {} }) {
     const env = {
         library: { value: [] },
         cardData: { value: null },
@@ -27,6 +31,7 @@ function makeEnv({ sanitize, localCategoryMap = {}, importedConfig = {}, overlay
         importedConfig: { value: importedConfig },
         localCategoryMap: { value: localCategoryMap },
         sanitizeImportedTags: { value: sanitize },
+        autoTagOnImport: { value: autoTag },
         autoTagRules: { value: presetRules },
         isDragging: { value: false },
         dragCounter: { value: 0 },
@@ -64,13 +69,42 @@ function newCard(name, nativeTags, extra = {}) {
     };
 }
 
-test('开关开启+全新卡：不再贴规则标签，仅保留自动分类，原生 tags 清空', () => {
-    const { crud } = makeEnv({ sanitize: true });
+// ================= [ 四象限：忽略开关 × 自动打标开关 ] =================
+
+test('忽略开 + 规则开：清原生 + 规则贴标 + 自动分类', () => {
+    const { crud } = makeEnv({ sanitize: true, autoTag: true });
     const card = newCard('全新角色卡', FOREIGN);
     crud.processAutoTagsAndCategory(card);
-    assert.deepEqual(card.customTags, [], '规则标签不得写入新卡');
     assert.deepEqual(card.data.data.tags, [], '卡片自带原生 tags 物理清空');
-    assert.equal(card.category, 'Fantasy', '自动分类结果保留（由规则决定）');
+    assert.ok(card.customTags.includes('Fantasy (奇幻)'), '规则标签照常贴入（忽略开关不再压制规则）');
+    assert.ok(!card.customTags.some(t => FOREIGN.includes(t)), '外来原生标签不混入');
+    assert.equal(card.category, 'Fantasy', '自动分类保留');
+});
+
+test('忽略开 + 规则关：清原生 + 不打标 = 全空白（用户手动）', () => {
+    const { crud } = makeEnv({ sanitize: true, autoTag: false });
+    const card = newCard('手动空白卡', FOREIGN);
+    crud.processAutoTagsAndCategory(card);
+    assert.deepEqual(card.customTags, [], '无任何标签');
+    assert.deepEqual(card.data.data.tags, [], '原生 tags 也被物理清空');
+    assert.equal(card.category, '未分类', '不自动分类');
+});
+
+test('忽略关 + 规则开：保留作者原生 + 规则补充 + 自动分类', () => {
+    const { crud } = makeEnv({ sanitize: false, autoTag: true });
+    const card = newCard('保留原标签卡', FOREIGN);
+    crud.processAutoTagsAndCategory(card);
+    assert.deepEqual(card.data.data.tags, FOREIGN, '原生 tags 不动');
+    assert.ok(card.customTags.includes('外来垃圾TagA'), '原生标签并入 customTags');
+    assert.ok(card.customTags.includes('Fantasy (奇幻)'), '规则标签补充生效');
+});
+
+test('忽略关 + 规则关：保留作者原生 + 不打标不自动分类', () => {
+    const { crud } = makeEnv({ sanitize: false, autoTag: false });
+    const card = newCard('原样卡', FOREIGN);
+    crud.processAutoTagsAndCategory(card);
+    assert.deepEqual(card.customTags, FOREIGN, '仅保留作者原生标签，无规则标签');
+    assert.equal(card.category, '未分类', '不自动分类');
 });
 
 test('开关开启+localCategoryMap 命中（同名旧卡）：原生 tags 仍被物理清空', () => {
@@ -122,4 +156,14 @@ test('开关关闭：原生 tags 与规则标签照旧合并（原有行为不�
     assert.deepEqual(card.data.data.tags, FOREIGN, '原生 tags 不动');
     assert.ok(card.customTags.includes('外来垃圾TagA'), '原生标签并入 customTags');
     assert.ok(card.customTags.includes('Fantasy (奇幻)'), '规则标签照旧生效');
+});
+
+// ================= [ 规则开关关闭也不干扰用户历史配置 ] =================
+
+test('规则关 + 忽略关 + 覆盖层命中：仍恢复用户标签与分类（历史配置优先于新开关）', () => {
+    const { crud } = makeEnv({ sanitize: false, autoTag: false, overlays: { 'p1': { category: '已归组', tags: ['历史标签A'] } } });
+    const card = newCard('覆盖层卡', FOREIGN, { path: 'p1' });
+    crud.processAutoTagsAndCategory(card);
+    assert.equal(card.category, '已归组', '覆盖层分类恢复');
+    assert.ok(card.customTags.includes('历史标签A'), '覆盖层标签恢复');
 });

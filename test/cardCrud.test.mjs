@@ -17,6 +17,7 @@ function makeMock(overrides = {}) {
     const importedConfig = { value: {} };
     const localCategoryMap = { value: {} };
     const sanitizeImportedTags = { value: false };
+    const autoTagOnImport = { value: true }; // v2.2.5 导入自动打标开关（默认开，保持原行为）
     const allCategories = { value: [
         { key: 'all', cn: '全部', en: 'All' },
         { key: 'fantasy', cn: '奇幻', en: 'Fantasy' },
@@ -36,6 +37,7 @@ function makeMock(overrides = {}) {
         importedConfig,
         localCategoryMap,
         sanitizeImportedTags,
+        autoTagOnImport,
         // 使用系统预设规则表（含「魔法/精灵 → Fantasy (奇幻)」等默认规则）编译结果
         autoTagRules: { value: compileAutoTagRules(null) },
         isDragging: { value: false },
@@ -52,7 +54,7 @@ function makeMock(overrides = {}) {
         cleanupEmptyCategories: async () => {},
         ...overrides
     });
-    return { crud, appConfig, importedConfig, localCategoryMap, sanitizeImportedTags, allCategories, customCategories };
+    return { crud, appConfig, importedConfig, localCategoryMap, sanitizeImportedTags, autoTagOnImport, allCategories, customCategories };
 }
 
 // 构造一张待处理卡片（V2 结构，data 在 data 层）
@@ -167,18 +169,18 @@ test('自动规则：未知分组名不设分类（保持未分类）', () => {
     assert.equal(card.category, '未分类', '未知分组不设分类');
 });
 
-test('自动规则：sanitizeImportedTags 开启时不带入原生 tags，规则只定分类不贴标签', () => {
+test('v2.2.5 忽略开+规则开：原生 tags 被清空，规则标签照常贴入并定分类', () => {
     const m = makeMock();
-    m.sanitizeImportedTags.value = true;
+    m.sanitizeImportedTags.value = true; // 🧹 忽略开关开
+    // autoTagOnImport 默认 true（🏷️ 规则开关开）
     const card = makeCard({ data: { data: { name: '测试卡', description: '魔法', tags: ['他人杂标签'] } } });
     m.crud.processAutoTagsAndCategory(card);
-    assert.ok(!card.customTags.includes('他人杂标签'), '开启净化时不带入原生 tags');
-    // 开关契约：开启后仅保留自动分类结果（见 App.vue 导入数据清洗开关注释），
-    // 自动规则只承担分类，不再把规则标签贴到新导入的卡片上。
-    assert.deepEqual(card.customTags, [], '开启净化时自动规则不再贴标签');
-    assert.equal(card.category, 'Fantasy', '自动规则仍承担分类');
+    assert.ok(!card.customTags.includes('他人杂标签'), '忽略开时原生 tags 不入 customTags');
+    // v2.2.5 解耦契约：忽略开关只管清原生，规则开关开时规则标签应照常贴入
+    assert.ok(card.customTags.includes('Fantasy (奇幻)'), '规则标签照常贴入（不再被忽略开关压制）');
+    assert.equal(card.category, 'Fantasy', '自动规则承担分类');
     // v2.1.4：物理清洗——原生 data.tags 必须被清空（防保存写回 PNG / 关闭开关复活）
-    assert.deepEqual(card.data.data.tags, [], '开启净化时原生 data.tags 应被物理清空');
+    assert.deepEqual(card.data.data.tags, [], '忽略开时原生 data.tags 应被物理清空');
 });
 
 test('自动规则：sanitizeImportedTags 关闭时带入原生 tags 并去重', () => {
@@ -203,6 +205,31 @@ test('自动规则：预设外分类不补建分组（防幽灵分组）', () =>
     assert.ok(card.customTags.includes('Fantasy (奇幻)'), '标签照常生成');
     assert.equal(card.category, '未分类', '未知预设不设分类');
     assert.deepEqual(m.customCategories.value, [], '绝不自动创建幽灵分组');
+});
+
+// ---------- v2.2.5 导入自动打标开关 ----------
+
+test('v2.2.5 自动打标关闭：新卡不贴规则标签、不自动分类', () => {
+    const m = makeMock();
+    m.autoTagOnImport.value = false;
+    const card = makeCard({ data: { data: { name: '不打标卡', description: '魔法 精灵', tags: [] } } });
+    m.crud.processAutoTagsAndCategory(card);
+    assert.deepEqual(card.customTags, [], '不贴规则标签');
+    assert.equal(card.category, '未分类', '不自动分类');
+});
+
+test('v2.2.5 自动打标关闭不干扰用户历史配置（覆盖层优先于新开关）', () => {
+    const m = makeMock();
+    m.autoTagOnImport.value = false;
+    m.appConfig.value.cardOverlays['/lib/已归组卡.json'] = { category: '幻想', tags: ['历史标签A', '历史标签B'] };
+    const card = makeCard({
+        path: '/lib/已归组卡.json',
+        data: { data: { name: '已归组卡', description: '魔法 精灵', tags: [] } }
+    });
+    m.crud.processAutoTagsAndCategory(card);
+    assert.equal(card.category, '幻想', '覆盖层分类恢复（不受新开关影响）');
+    assert.deepEqual(card.customTags, ['历史标签A', '历史标签B'], '覆盖层标签恢复');
+    assert.equal(card.data.data.tags.length, 2, '标签已同步回原生层');
 });
 
 // ---------- 边界 ----------

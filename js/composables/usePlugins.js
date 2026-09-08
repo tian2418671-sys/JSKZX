@@ -149,6 +149,74 @@ export function usePlugins({
         }
     };
 
+    // =========================================================
+    // 工作区「代码」页编辑保存：把修改物理写回插件源文件
+    // 三种形态统一入口：
+    //   - extension：直接覆写对应文本资源文件
+    //   - json（酒馆助手）：改写 data.content 后整份 JSON 原子覆写
+    //   - script（散落脚本）：整文件覆写 JS 文本
+    // 保存后重建 plugin.scripts[].content（代码页/效果页即时生效）并重扫当前目录刷新文件树。
+    // =========================================================
+
+    const savingPlugin = ref(false);   // 防重复点击保存
+
+    const savePluginSource = async ({ plugin, filePath, content, scriptIndex = 0 }) => {
+        if (!plugin) return false;
+        if (savingPlugin.value) return false;
+        savingPlugin.value = true;
+        try {
+            const kind = plugin.kind;
+            if (kind === 'extension') {
+                // 扩展工程：单文件覆写（plugin:writeFile 内部做白名单/类型/体积/JSON 语法校验）
+                const res = await window.electronAPI.writePluginFile({ filePath, content });
+                if (!res || !res.success) throw new Error((res && res.error) || '保存失败');
+            } else if (kind === 'tavern-helper') {
+                // 酒馆助手 JSON 脚本：content 是 JSON 内的字段，需读原文 → 改字段 → 整份覆写
+                const origin = plugin.source?.origin || filePath;
+                const readRes = await window.electronAPI.readPluginFile(origin);
+                if (!readRes || !readRes.success) throw new Error((readRes && readRes.error) || '读取原 JSON 失败');
+                let parsed;
+                try { parsed = JSON.parse(readRes.data); } catch (e) { throw new Error('原 JSON 已损坏，无法保存：' + e.message); }
+                const arr = Array.isArray(parsed.content) ? parsed.content : null;
+                if (arr) {
+                    // 少数卡把 content 做成数组（多脚本），按 scriptIndex 定位
+                    if (arr[scriptIndex] !== undefined) arr[scriptIndex] = content;
+                    else arr.push(content);
+                } else {
+                    parsed.content = content;
+                }
+                const writeRes = await window.electronAPI.writePluginFile({
+                    filePath: origin,
+                    content: JSON.stringify(parsed, null, 4)
+                });
+                if (!writeRes || !writeRes.success) throw new Error((writeRes && writeRes.error) || '保存失败');
+            } else {
+                // 散落脚本（userscript / slash）：整文件覆写
+                const origin = plugin.source?.origin || filePath;
+                const res = await window.electronAPI.writePluginFile({ filePath: origin, content });
+                if (!res || !res.success) throw new Error((res && res.error) || '保存失败');
+            }
+
+            // 内存同步：更新 plugin.scripts[].content，代码页/效果页无需重扫即可用新内容
+            const scripts = plugin.scripts || [];
+            const target = scripts.length === 1 ? scripts[0] : (scripts[scriptIndex] || scripts[0]);
+            if (target) target.content = content;
+            addLog(`💾 插件已保存: ${plugin.name || filePath}`, 'success');
+            return true;
+        } catch (err) {
+            nativeAlert(`保存插件失败: ${err.message}`, 'error');
+            addLog(`保存插件失败: ${err.message}`, 'error');
+            return false;
+        } finally {
+            savingPlugin.value = false;
+        }
+    };
+
+    // 保存后重扫当前插件目录：刷新文件树（扩展工程新增/删除文件后与磁盘对齐）
+    const rescanPluginDir = async () => {
+        if (lastPluginDirPath.value) await scanPluginDir(lastPluginDirPath.value);
+    };
+
     return {
         // 状态
         pluginSearchQuery,
@@ -163,6 +231,10 @@ export function usePlugins({
         openPluginContextMenu,
         openPluginInFolder,
         // 源码读取
-        readPluginSource
+        readPluginSource,
+        // 源码编辑保存
+        savingPlugin,
+        savePluginSource,
+        rescanPluginDir
     };
 }

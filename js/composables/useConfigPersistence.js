@@ -25,7 +25,7 @@ export function useConfigPersistence({
     // —— 收集源：API 配置 ——
     apiEndpoint, apiKey, apiModel, apiType,
     // —— 收集源：UI 状态 ——
-    theme, appSettings, sanitizeImportedTags, snapshotConfig, localCategoryMap,
+    theme, appSettings, sanitizeImportedTags, autoTagOnImport, snapshotConfig, localCategoryMap,
     sidebarWidth, viewMode, isCompactMode, sortBy,
     systemPromptPresets, lastWorldbookDirPath, lastPresetDirPath, wbCategoryMap,
     // —— 收集源：导入时间映射（卡片首次入库时刻持久化） ——
@@ -72,6 +72,7 @@ export function useConfigPersistence({
                 theme: theme.value,
                 appSettings: JSON.parse(JSON.stringify(appSettings.value || {})),
                 sanitizeImportedTags: sanitizeImportedTags.value,
+                autoTagOnImport: autoTagOnImport.value,
                 snapshotConfig: JSON.parse(JSON.stringify(snapshotConfig.value || {})),
                 localCategoryMap: JSON.parse(JSON.stringify(localCategoryMap.value || {})),
                 sidebarWidth: Number(sidebarWidth.value) || 0,

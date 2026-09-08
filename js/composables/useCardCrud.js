@@ -61,6 +61,7 @@ export function useCardCrud({
     importedConfig,       // 外部导入的库配置（历史分类/标签恢复）
     localCategoryMap,     // localStorage 分类映射
     sanitizeImportedTags, // 导入时忽略卡片自带标签开关
+    autoTagOnImport,      // 导入自动打标开关（v2.2.5）：开=自动用规则打标+自动分类；关=彻底不运行规则引擎
     autoTagRules,         // 自动打标规则表（compileAutoTagRules 编译结果，v2.1 可配置；导入自动分类用）
     isDragging,           // 拖拽遮罩状态
     dragCounter,          // 拖拽深度计数器
@@ -242,19 +243,32 @@ export function useCardCrud({
         const data = cardInfo.data?.data || cardInfo.data;
         if (!data) return;
 
+        // 🏷️ 导入自动打标开关（v2.2.5）：关闭时【不运行规则引擎】——不贴规则标签、不自动分类（保持「未分类」）。
+        //    与 sanitizeImportedTags 彻底独立（v2.2.5 契约，两开关各自管一个维度）：
+        //      · sanitizeImportedTags（🧹忽略自带标签）只管【是否清空卡片自带原生 tags】——已上移到函数入口统一执行；
+        //      · autoTagOnImport（🏷️自动打标）只管【是否运行规则引擎贴规则标签 + 自动分类】。
+        //    规则开关关闭时：保留的内容 = 忽略开关清剩的原生 tags（忽略开→空 / 忽略关→作者原标签），其余交给用户手动。
+        if (!autoTagOnImport.value) {
+            cardInfo.customTags = Array.from(new Set(sanitizeImportedTags.value ? [] : [...(data.tags || [])]));
+            cardInfo.category = '未分类';
+            return;
+        }
+
         // 提取所有文本用于分析
         const fullText = [data.description, data.personality, data.scenario, data.first_mes].join('\n');
-        // 🧹 导入数据清洗开关：开启时忽略卡片自带的原生 tags（防止他人卡片的杂乱标签混入全局标签池）。
-        //    原生 data.tags 的物理清除已上移到函数入口统一执行，此处不再重复。
+        // 规则引擎的起始标签池：
+        //   · 忽略开关开 → 原生 tags 已被入口物理清空，从空池开始（只贴规则标签）；
+        //   · 忽略开关关 → 保留作者原生 tags，规则在此基础上补充。
         let generatedTags = sanitizeImportedTags.value ? [] : [...(data.tags || [])];
         let assignedCategory = '未分类';
 
-        // 匹配自动规则：开关开启时只承担【自动分类】，不再把规则标签贴到卡片上
-        // （开关契约：开启后仅保留自动分类结果，见 App.vue「导入数据清洗开关」注释）。
+        // 匹配自动规则：走到这里 autoTagOnImport 必为开（关时已提前 return），
+        // 故规则命中【无条件贴标签】，不再受忽略开关约束（v2.2.5 解耦修复——旧闸门
+        // `!sanitizeImportedTags.value` 会让「忽略开+规则开」时规则标签被错误压制）。
         for (const [tag, regex] of Object.entries(autoTagRules.value)) {
             if (!regex.test(fullText)) continue;
             const alreadyHas = generatedTags.includes(tag);
-            if (!sanitizeImportedTags.value && !alreadyHas) {
+            if (!alreadyHas) {
                 generatedTags.push(tag);
             }
             // 【修复】自动分类仅落到已知预设分组：
@@ -273,15 +287,15 @@ export function useCardCrud({
         cardInfo.customTags = Array.from(new Set(generatedTags));
         cardInfo.category = assignedCategory;
 
-        // 【修复 BUG-3】自动分类不再盲目创建分组：
-        //  · 开关开启（导入即净化）：完全不自动创建分组，自动分类仅落到卡片属性；
-        //  · 开关关闭：也先过滤「未分类」，仅对真正的新分类才补建分组。
-        //  分组在物理文件夹体系下以库目录子文件夹为准（walkLibraryDir 一级文件夹），
-        //  此处避免把自动贴标签引入的普通分类词当成分组，产生"幽灵分组"。
-        const shouldAutoBuildCategory = !sanitizeImportedTags.value;
+        // 【修复 BUG-3】自动分类不再盲目创建分组（防"幽灵分组"）：
+        //   · 走到这里必为「规则引擎运行中」（autoTagOnImport 关时已提前 return），
+        //     与忽略开关解耦——忽略开关只清原生标签，不再抑制规则自动建组（v2.2.5）。
+        //   · 下方 assignedCategory 只会被置为 allCategories 中已存在的预设分组
+        //     （规则循环里 `allCategories.some(...)` 命中才赋值），否则保持「未分类」，
+        //     因此 push 分支实际几乎不触发——自动分类只落到已有分组，绝不产生幽灵分组。
+        //  分组在物理文件夹体系下以库目录子文件夹为准（walkLibraryDir 一级文件夹）。
         const catTrimmed = String(assignedCategory || '').trim();
-        if (shouldAutoBuildCategory
-            && catTrimmed && catTrimmed !== '未分类'
+        if (catTrimmed && catTrimmed !== '未分类'
             && !allCategories.value.some(c => c.cn === assignedCategory || c.en === assignedCategory || c.key === assignedCategory)) {
             customCategories.value.push(assignedCategory);
         }

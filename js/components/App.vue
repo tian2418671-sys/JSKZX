@@ -27,8 +27,8 @@
             <!-- 【右侧】编辑器面板（子组件 EditorPanel） -->
             <editor-panel />
 
-            <!-- 【右侧】插件工作区（子组件 PluginWorkspace，appMode === 'plugins' 时显示） -->
-            <plugin-workspace />
+            <!-- 【右侧】插件工作区（子组件 PluginWorkspace，appMode === 'plugins' 时显示）；ref 供 Ctrl+S 快捷键路由保存调用 -->
+            <plugin-workspace ref="pluginWorkspaceRef" />
         </div>
 
         <!-- ================= [ 弹窗：单卡添加标签（子组件 SingleTagModal） ] ================= -->
@@ -687,14 +687,29 @@ export default {
             try { localStorage.setItem('appSettings', JSON.stringify(newVal)); } catch (e) { /* 忽略 */ }
         }, { deep: true });
 
-        // ================= [ 导入数据清洗开关 ] =================
-        // 开启后，导入/扫描卡片时将忽略卡片自带的原生 tags（防止他人卡片的杂乱标签混入全局标签池），
-        // 仅保留自动分类结果；分类统一由自动规则或用户手动指定。
+        // ================= [ 🧹 导入数据清洗开关：忽略卡片自带标签 ] =================
+        // v2.2.5 契约：本开关【只管】导入/扫描时是否清空卡片自带的原生 data.tags
+        // （入口物理清除，防他人卡片的杂乱标签混入全局标签池）。与「自动打标」开关彻底独立：
+        //   · 本开关开 → 原生 tags 清空（是否被规则补标由 autoTagOnImport 决定）；
+        //   · 本开关关 → 保留作者原生 tags。
         const sanitizeImportedTags = ref((() => {
             try { return localStorage.getItem('jsTavern_sanitizeImportedTags') === '1'; } catch (e) { return false; }
         })());
         watch(sanitizeImportedTags, (v) => {
             try { localStorage.setItem('jsTavern_sanitizeImportedTags', v ? '1' : '0'); } catch (e) { /* 忽略 */ }
+        });
+
+        // ================= [ 🏷️ 导入自动打标开关（v2.2.5） ] =================
+        // 契约：本开关【只管】导入/扫描新卡时是否运行系统自动打标规则引擎（贴规则标签 + 自动分类）：
+        //   · 开（默认）= 规则引擎运行：在忽略开关清剩的标签池上按规则补标 + 自动分类；
+        //   · 关 = 不运行规则引擎：不贴规则标签、不自动分类（保持「未分类」），留给用户手动。
+        // ⚠️ 与 sanitizeImportedTags 彻底独立（互不干扰、可任意组合）：
+        //   忽略开关管「是否清作者原生 tags」，本开关管「是否运行规则引擎」。忽略开+本关 = 全空白手动。
+        const autoTagOnImport = ref((() => {
+            try { return localStorage.getItem('jsTavern_autoTagOnImport') !== '0'; } catch (e) { return true; }
+        })());
+        watch(autoTagOnImport, (v) => {
+            try { localStorage.setItem('jsTavern_autoTagOnImport', v ? '1' : '0'); } catch (e) { /* 忽略 */ }
         });
 
         
@@ -1738,9 +1753,42 @@ export default {
 
         const currentTabInfo = computed(() => tabs.value.find(t => t.id === currentTab.value) || tabs.value[0]);
 
+        // 💻 Raw JSON 视图：格式化的当前卡源码（编辑区直接回写 cardData）
         const formattedJson = computed(() => {
             return cardData.value ? JSON.stringify(cardData.value, null, 2) : '';
         });
+
+        // 💻 Raw JSON 草稿（可编辑）：监听 formattedJson 变化（切卡/刷新后自动同步最新源码），
+        //    用户手动编辑时 rawJsonDraft 更新但 formattedJson 不变 → 不会覆盖用户输入
+        const rawJsonDraft = ref('');
+        let lastJsonText = ''; // 记录上次同步的格式化文本，避免「应用」后重复覆盖
+        watch(formattedJson, (txt) => {
+            if (txt !== lastJsonText) {
+                lastJsonText = txt;
+                rawJsonDraft.value = txt;
+            }
+        }, { immediate: true });
+
+        // 💻 应用 Raw JSON 编辑：解析草稿 → 校验 → 写回 cardData → 刷新
+        const applyRawJson = async () => {
+            if (!cardData.value) { showToast('当前无卡片数据', 'error'); return; }
+            let parsed;
+            try {
+                parsed = JSON.parse(rawJsonDraft.value);
+            } catch (e) {
+                showToast('JSON 解析失败：' + e.message, 'error');
+                return;
+            }
+            if (typeof parsed !== 'object' || parsed === null) {
+                showToast('JSON 必须是对象类型', 'error');
+                return;
+            }
+            cardData.value = parsed;
+            refreshCardData();
+            rawJsonDraft.value = JSON.stringify(parsed, null, 2);
+            lastJsonText = rawJsonDraft.value; // 同步基准，避免 watch 重复覆盖
+            showToast('已应用 Raw JSON 修改', 'success');
+        };
 
         // ================= [ 性能优化：搜索防抖 ] =================
         // （搜索防抖/全字段过滤/分页计算已拆分为组合式函数 useSearch）
@@ -1783,6 +1831,7 @@ export default {
         // 📏 侧边栏宽度自定义（拖拽把手调节 + localStorage 持久化）
         // =========================================================
         const sidebarEl = ref(null); // 侧边栏 DOM 引用（拖拽时读取当前宽度）
+        const pluginWorkspaceRef = ref(null); // 🧩 插件工作区组件引用（Ctrl+S 快捷键路由到插件保存）
         const sidebarWidth = ref((() => {
             try {
                 const w = parseInt(localStorage.getItem('jsTavern_sidebarWidth') || '', 10);
@@ -2014,6 +2063,7 @@ export default {
                                     appSettings.value = { ...appSettings.value, ...cfg.ui.appSettings };
                                 }
                                 if (typeof cfg.ui.sanitizeImportedTags === 'boolean') sanitizeImportedTags.value = cfg.ui.sanitizeImportedTags;
+                                if (typeof cfg.ui.autoTagOnImport === 'boolean') autoTagOnImport.value = cfg.ui.autoTagOnImport;
                                 if (cfg.ui.snapshotConfig && typeof cfg.ui.snapshotConfig === 'object') {
                                     snapshotConfig.value = { ...snapshotConfig.value, ...cfg.ui.snapshotConfig };
                                 }
@@ -2099,7 +2149,18 @@ export default {
             const handleGlobalKeys = (e) => {
                 if (!(e.ctrlKey || e.metaKey)) return;
                 const k = e.key.toLowerCase();
-                if (k === 's') { e.preventDefault(); saveCurrentAsset(); } // 【修复】Ctrl+S 走智能保存路由，避免世界书模式下误保存角色卡
+                if (k === 's') {
+                    e.preventDefault();
+                    // 🧩 插件模式：插件代码页有未保存修改时优先保存插件（避免误触角色卡保存）
+                    if (appMode.value === 'plugins') {
+                        const pw = pluginWorkspaceRef.value;
+                        if (pw && typeof pw.saveCode === 'function' && pluginDirty.value) {
+                            pw.saveCode();
+                            return;
+                        }
+                    }
+                    saveCurrentAsset(); // 【修复】Ctrl+S 走智能保存路由，避免世界书模式下误保存角色卡
+                }
                 else if (k === 'o') { e.preventDefault(); selectFixedDirectory(); }
                 else if (k === 'i') { e.preventDefault(); importCards(); }
                 else if (k === 'a') {
@@ -2120,6 +2181,9 @@ export default {
 
                 // Ctrl+F：聚焦全局搜索框（即使已在输入框也允许，覆盖浏览器默认查找）
                 if (e.ctrlKey && e.key.toLowerCase() === 'f') {
+                    // 🧩 CodeMirror 代码编辑器内按 Ctrl+F：交给编辑器自身查找面板，不劫持到全局搜索
+                    const ae = document.activeElement;
+                    if (ae && ae.closest && ae.closest('.cm-editor')) return;
                     e.preventDefault();
                     const searchInput = document.getElementById('global-search-input');
                     if (searchInput) { searchInput.focus(); searchInput.select(); }
@@ -3051,6 +3115,7 @@ export default {
         const pluginTab = ref('code');           // 插件工作区当前选项卡（code / effect）
         const pluginSelectedFile = ref(null);    // 代码页当前选中文件 { abs, rel, icon }
         const pluginSelectedSource = ref('');    // 代码页当前选中文件源码文本
+        const pluginDirty = ref(false);          // 代码页是否有未保存修改（防误切换丢改动）
 
         // =========================================================
         // 📟 全局终端控制台与日志状态（角色卡/世界书双模式共用）
@@ -3482,7 +3547,7 @@ export default {
         // 与此处建立集中 watch：所有相关 ref 已声明完毕（最后一个为 wbCategoryMap），
         // 回调里的 syncConfigToDisk 已内置 isRestoringConfig guard，恢复期触发的写盘会被自动拦截，无需 immediate。
         watch(
-            [theme, appSettings, sanitizeImportedTags, snapshotConfig, sidebarWidth, viewMode, isCompactMode, sortBy, systemPromptPresets, lastWorldbookDirPath, lastPresetDirPath, wbCategoryMap, cardImportTimes],
+            [theme, appSettings, sanitizeImportedTags, autoTagOnImport, snapshotConfig, sidebarWidth, viewMode, isCompactMode, sortBy, systemPromptPresets, lastWorldbookDirPath, lastPresetDirPath, wbCategoryMap, cardImportTimes],
             // 🚀 v1.8.5 性能修复：改走 500ms 防抖落盘。旧版直接调 syncConfigToDisk（全量
             //    序列化 appSettings/cardOverlays/wbCategoryMap + 加密 IPC + 同步写盘），
             //    连续 UI 微调（拖侧栏宽度/切主题等）每次都全量写盘，千卡库 overlays 体积
@@ -4087,7 +4152,7 @@ export default {
             builtinCatRenames, builtinCatHidden,
             autoTagRules, customKeywords,
             apiEndpoint, apiKey, apiModel, apiType,
-            theme, appSettings, sanitizeImportedTags, snapshotConfig, localCategoryMap,
+            theme, appSettings, sanitizeImportedTags, autoTagOnImport, snapshotConfig, localCategoryMap,
             sidebarWidth, viewMode, isCompactMode, sortBy,
             systemPromptPresets, lastWorldbookDirPath, lastPresetDirPath, wbCategoryMap,
             cardImportTimes
@@ -4153,6 +4218,7 @@ export default {
             library, cardData, currentFolderPath, appConfig,
             customCategories, allCategories, isCategoryKnown,
             importedConfig, localCategoryMap, sanitizeImportedTags,
+            autoTagOnImport,
             autoTagRules: compiledAutoTagRules,
             isDragging, dragCounter, importFileInput,
             // 横切服务
@@ -4338,7 +4404,8 @@ export default {
             pluginSearchQuery,
             loadPlugins, scanPluginDir, filteredPlugins,
             deletePlugin,
-            openPluginContextMenu, openPluginInFolder, readPluginSource
+            openPluginContextMenu, openPluginInFolder, readPluginSource,
+            savingPlugin, savePluginSource, rescanPluginDir
         } = usePlugins({
             plugins, activePlugin, lastPluginDirPath,
             nativeAlert, confirmDialog, addLog, appPrompt,
@@ -4439,14 +4506,14 @@ export default {
         // ===== SFC 化：构建全局上下文对象（provide 给 HeaderBar/SidebarPanel/EditorPanel 子组件共享） =====
         const ctx = {
             theme, toggleTheme, appSettings, showApiModal, resetPersonalizationSettings, resetApiSettings,
-            showExperimentalMenu, pushToTavern, showPushModal, currentOpenCardItem, currentPushTargetName, currentPushTargetHint, customPushTargets, currentCustomPushTarget,
+            showExperimentalMenu, pushToTavern, showPushModal, currentOpenCardItem, currentPushTargetName, currentPushTargetHint, customPushTargets, currentCustomPushTarget, autoTagOnImport,
             useSillyTavernPushTarget, useCustomPushTarget, setCurrentCustomPushTarget, addCustomPushTarget, renameCurrentCustomPushTarget, removeCurrentCustomPushTarget,
             viewOptions, importFileInput, handleImportFiles, importCards, downloadCardFromUrl, selectAllCards, cleanGlobalTagsPrompt, sanitizeImportedTags,
             openBakFolder, openTrashFolder, openGlobalTrash, openChatTab,
             isScanningDisk, diskScanProgress, useSizeFilter, runDiskScan, showDiskScanModal,
             currentFolderPath, handleScanImported, refreshLibrary,
             isDragging, dragCounter, handleDragEnter, handleDragLeave, cardData, imgUrl, tabs, currentTab, currentTabInfo,
-            safeData, specVersion, worldbookEntries, getEntryUid, getRegexUid, regexScripts, formattedJson, refreshCardData,
+            safeData, specVersion, worldbookEntries, getEntryUid, getRegexUid, regexScripts, formattedJson, rawJsonDraft, applyRawJson, refreshCardData,
             addRegexScript, deleteRegexScript, syncRegexScriptField,
             // 📊 渲染预览器（美化/状态栏）
             statusbarInput, statusbarViewMode, resetStatusbarDemo,
@@ -4549,7 +4616,8 @@ export default {
             loadPlugins, scanPluginDir, filteredPlugins,
             deletePlugin,
             openPluginContextMenu, openPluginInFolder, readPluginSource,
-            pluginTab, pluginSelectedFile, pluginSelectedSource,
+            pluginTab, pluginSelectedFile, pluginSelectedSource, pluginDirty,
+            savingPlugin, savePluginSource, rescanPluginDir,
             // 🌍 世界书网址导入与重命名
             importUrl, isImportingWb, importWorldbookFromUrl, renameWorldbook,
             // 🌍 世界书文件夹导入 + 删除/克隆 + 专属右键菜单

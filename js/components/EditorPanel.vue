@@ -208,11 +208,17 @@
                         <textarea v-model="safeData.extensions.depth_prompt.prompt" @input="refreshCardData" rows="4" class="w-full text-xs p-2 border border-purple-500/40 rounded outline-none bg-zinc-900 text-zinc-200 resize-y leading-relaxed font-medium custom-scrollbar transition-all focus:ring-2 focus:ring-purple-500/50 focus:border-purple-500"></textarea>
                     </div>
                     <div v-if="safeData.alternate_greetings && safeData.alternate_greetings.length > 0">
-                        <label class="text-xs font-bold text-zinc-400 uppercase mb-2 block">附加问候语 (Alternate Greetings)</label>
+                        <div class="flex justify-between items-center mb-2">
+                            <label class="text-xs font-bold text-zinc-400 uppercase">附加问候语 (Alternate Greetings)</label>
+                            <span class="text-[10px] text-zinc-500">{{ safeData.alternate_greetings.length }} 条</span>
+                        </div>
                         <div class="space-y-2">
-                            <div v-for="(greeting, index) in safeData.alternate_greetings" :key="index" class="relative">
-                                <span class="absolute top-1 right-2 bg-zinc-800 text-zinc-500 text-[10px] font-bold px-1.5 py-0.5 rounded">#{{index + 1}}</span>
-                                <textarea v-model="safeData.alternate_greetings[index]" @input="refreshCardData" rows="3" class="w-full text-xs p-2 pr-10 border border-zinc-700 rounded outline-none bg-zinc-900 text-zinc-200 resize-y leading-relaxed font-medium custom-scrollbar transition-all focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500"></textarea>
+                            <div v-for="(greeting, index) in safeData.alternate_greetings" :key="index">
+                                <div class="flex justify-between items-center mb-1">
+                                    <span class="text-[10px] text-zinc-500 font-bold bg-zinc-800 px-1.5 py-0.5 rounded">#{{ index + 1 }}</span>
+                                    <button @click="openTextModal('附加问候语 #' + (index + 1) + ' (Alternate Greetings)', safeData.alternate_greetings, index)" class="text-[10px] text-blue-400 hover:text-blue-300 font-medium flex items-center gap-1 transition" title="放大全屏查看 / 编辑本条附加问候语">🔍 放大</button>
+                                </div>
+                                <textarea v-model="safeData.alternate_greetings[index]" @input="refreshCardData" rows="3" class="w-full text-xs p-2 border border-zinc-700 rounded outline-none bg-zinc-900 text-zinc-200 resize-y leading-relaxed font-medium custom-scrollbar transition-all focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500"></textarea>
                             </div>
                         </div>
                     </div>
@@ -638,9 +644,17 @@
                     </div>
                 </div>
 
-                <!-- 4. 原始代码 (Raw JSON) -->
-                <div v-if="currentTab === 'raw'" class="h-full">
-                    <pre class="bg-[#1e1e1e] text-[#d4d4d4] p-4 rounded text-[11px] overflow-auto h-full font-mono leading-tight custom-scrollbar">{{ formattedJson }}</pre>
+                <!-- 4. 原始代码 (Raw JSON)：CodeMirror JSON 高亮编辑器（行号/折叠/搜索/格式化/编辑回写） -->
+                <div v-if="currentTab === 'raw'" class="h-full min-h-0 flex flex-col overflow-hidden">
+                    <div class="px-3 py-1.5 bg-zinc-900 border-b border-zinc-800 flex items-center gap-2 shrink-0">
+                        <span class="text-[10px] text-zinc-500">💻 Raw JSON 源码（可直接编辑，Ctrl+Shift+F 格式化，改完点「应用」写回卡片）</span>
+                        <button @click="applyRawJson"
+                                class="ml-auto px-2.5 py-1 rounded text-[10px] font-bold bg-emerald-600 hover:bg-emerald-500 text-white transition"
+                                title="解析当前 JSON 并写回卡片数据">✅ 应用修改</button>
+                    </div>
+                    <div class="flex-1 min-h-0 overflow-hidden">
+                        <CodeEditor v-model="rawJsonDraft" language="json" height="100%" />
+                    </div>
                 </div>
 
             </div>
@@ -1128,12 +1142,13 @@ import { inject, ref, computed, watch } from 'vue';
 import { estimateTokens } from '../utils/tokenEstimate.js';
 import { groupTagsByCategory } from '../utils/tagCategories.js';
 import TagCategoryModal from './TagCategoryModal.vue';
+import CodeEditor from './CodeEditor.vue'; // 💻 轻量代码编辑器（CodeMirror：语法高亮/行号/搜索/折叠）
 
 export default {
     name: 'EditorPanel',
     // ⚠️ Options API 组件注册：模板里 <TagCategoryModal> 首字母大写走 resolveComponent 查组件注册表，
     //    setup() return 的组件变量不会进入注册表（会被当成未知原生元素空渲染）→ 必须在此显式注册。
-    components: { TagCategoryModal },
+    components: { TagCategoryModal, CodeEditor },
     setup() {
         const ctx = inject('appCtx');
 
@@ -1664,6 +1679,8 @@ export default {
             chatInput: ctx.chatInput,
             sendMessage: ctx.sendMessage,
             formattedJson: ctx.formattedJson,
+            rawJsonDraft: ctx.rawJsonDraft,
+            applyRawJson: ctx.applyRawJson,
             activeWorldbook: ctx.activeWorldbook,
             entrySearchQuery: ctx.entrySearchQuery,
             entryFilterState: ctx.entryFilterState,

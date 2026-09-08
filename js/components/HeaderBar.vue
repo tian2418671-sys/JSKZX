@@ -130,7 +130,19 @@
                                           class="absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full transition-transform"></span>
                                 </button>
                             </div>
-                            <span class="block text-[10px] text-zinc-500 mt-1">仅对新导入的卡片生效；历史残留请用下方「清洗历史外来标签」</span>
+                            <span class="block text-[10px] text-zinc-500 mt-1">只管清掉作者写进卡片的原生标签（与下方"自动打标"相互独立，可任意组合）；仅对新导入卡片生效</span>
+                        </div>
+                        <div class="px-3 py-2 border-b border-zinc-700/50">
+                            <div class="flex items-center justify-between">
+                                <span class="text-zinc-300">🏷️ 导入时自动为卡片打标</span>
+                                <button @click="autoTagOnImport = !autoTagOnImport"
+                                        :class="autoTagOnImport ? 'bg-indigo-600' : 'bg-zinc-700'"
+                                        class="w-9 h-5 rounded-full relative transition-colors shrink-0">
+                                    <span :class="autoTagOnImport ? 'translate-x-4' : 'translate-x-0'"
+                                          class="absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full transition-transform"></span>
+                                </button>
+                            </div>
+                            <span class="block text-[10px] text-zinc-500 mt-1">开=用系统规则给清洗后的新卡自动打标+自动分类；关=不自动打标，留给你手动标；仅对新导入卡片生效</span>
                         </div>
                         <div class="px-3 py-2 border-b border-zinc-700/50">
                             <button @click="cleanForeignTagsFromLibrary()" class="w-full px-2 py-1.5 text-left rounded hover:bg-amber-600 hover:text-white flex items-center justify-between gap-2">
@@ -298,6 +310,7 @@ export default {
             dedupeTargetLabel,
             viewOptions: ctx.viewOptions,
             sanitizeImportedTags: ctx.sanitizeImportedTags,
+            autoTagOnImport: ctx.autoTagOnImport,
             cleanForeignTagsFromLibrary: ctx.cleanForeignTagsFromLibrary,
             snapshotConfig: ctx.snapshotConfig,
             cleanAllSnapshots: ctx.cleanAllSnapshots,

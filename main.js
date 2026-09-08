@@ -3196,6 +3196,41 @@ app.whenReady().then(() => {
     }
   });
 
+  // ✏️ 插件工作区「代码」页编辑保存：物理覆写插件文本资源（原子写；白名单 + 文本类型 + 体积上限三重校验）
+  ipcMain.handle('plugin:writeFile', async (event, { filePath, content }) => {
+    try {
+      if (!filePath || !isPathAllowed(filePath)) return forbidden();
+      if (typeof content !== 'string') return { success: false, error: '内容必须为文本。' };
+      const ext = path.extname(filePath).toLowerCase();
+      if (!['.js', '.mjs', '.css', '.json', '.html', '.svg'].includes(ext)) {
+        return { success: false, error: '仅支持编辑文本类资源（js/mjs/css/json/html/svg）。' };
+      }
+      if (!fs.existsSync(filePath)) return { success: false, error: '原文件不存在，无法保存。' };
+      if (Buffer.byteLength(content, 'utf-8') > MAX_PLUGIN_SCRIPT_BYTES) {
+        return { success: false, error: '内容超过 2MB 上限，已拒绝保存。' };
+      }
+      // JSON 文件保存前语法校验：防止把整份插件 JSON 写坏（脚本 content 本身是字符串，不在此校验范围内）
+      if (ext === '.json') {
+        try { JSON.parse(content); } catch (e) {
+          return { success: false, error: 'JSON 语法错误，已取消保存：' + e.message };
+        }
+      }
+      // 原子覆写（tmp 唯一命名 + rename，失败清理 tmp，对齐 preset:save / wb:save 惯例）
+      const tmpPath = `${filePath}.${process.pid}.${Date.now()}_${Math.floor(Math.random() * 1e6)}.tmp`;
+      try {
+        await fs.promises.writeFile(tmpPath, content, 'utf-8');
+        await fs.promises.rename(tmpPath, filePath);
+      } catch (writeErr) {
+        await fs.promises.unlink(tmpPath).catch(() => { });
+        throw writeErr;
+      }
+      return { success: true };
+    } catch (err) {
+      console.error('保存插件文件失败:', err);
+      return { success: false, error: err.message };
+    }
+  });
+
   // 🧩 插件「效果」页预览：渲染进程生成预览 HTML 后存主进程内存，返回 app:// 预览 URL
   ipcMain.handle('plugin:setPreview', async (event, html) => {
     try {

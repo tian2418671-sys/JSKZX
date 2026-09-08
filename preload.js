@@ -134,6 +134,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     scanPlugins: (dirPath) => ipcRenderer.invoke('plugin:scan', dirPath),
     // 🧩 插件专属通道：读取扩展工程文本资源源码
     readPluginFile: (filePath) => ipcRenderer.invoke('plugin:readFile', filePath),
+    // 🧩 插件专属通道：物理覆写插件文本资源（工作区「代码」页编辑保存；原子写 + 白名单/类型/体积校验）
+    writePluginFile: (params) => ipcRenderer.invoke('plugin:writeFile', params),
     // 🧩 插件「效果」预览：预览 HTML 存主进程内存，返回独立 app:// 预览 URL（绕过父页 CSP 对内联脚本的拦截）
     setPluginPreview: (html) => ipcRenderer.invoke('plugin:setPreview', html),
     // 🗑️ 智能查重清洗：将冗余文件移动到 userData 下的全局回收站（绝不物理删除）
