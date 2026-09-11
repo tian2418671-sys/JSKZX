@@ -318,7 +318,65 @@
             @resolve-group="resolvePresetDedupeGroup"
         />
 
-        <!-- ================= [ 🧬 内容级跨名称版本查重弹窗（子组件 ContentDedupeModal） ] ================= -->
+        <!-- ================= [ � 预设缝合中心弹窗（子组件 PresetStitchModal） ] ================= -->
+        <preset-stitch-modal
+            :show="showPresetStitchModal"
+            :targetMode="stitchTargetMode"
+            :basePath="stitchBasePath"
+            :overwritePath="stitchOverwritePath"
+            :newName="stitchNewName"
+            :sourcePaths="stitchSourcePaths"
+            :sourceCandidates="stitchSourceCandidates"
+            :poolQuery="stitchPoolQuery"
+            :poolGroups="stitchPoolGroups"
+            :items="visibleStitchItems"
+            :selectedUid="stitchSelectedUid"
+            :conflictOnly="stitchShowConflictOnly"
+            :showPlanDetail="stitchShowPlanDetail"
+            :planChangedOnly="stitchPlanChangedOnly"
+            :previewRows="stitchPlanPreviewRows"
+            :previewStats="stitchPreviewStats"
+            :busy="stitchBusy"
+            :snippets="presetStitchSnippets"
+            :basePreset="stitchBasePreset"
+            :baseTimeline="stitchBaseTimeline"
+            :plan="stitchPlan"
+            :summary="stitchSummaryText"
+            :conflictCount="stitchConflictCount"
+            :pendingCount="stitchPendingCount"
+            :anchorLabelFn="anchorLabel"
+            @close="exitStitch"
+            @execute="executeStitch"
+            @update:targetMode="setStitchTargetMode"
+            @update:basePath="setStitchBasePath"
+            @update:newName="stitchNewName = $event"
+            @update:poolQuery="stitchPoolQuery = $event"
+            @update:selectedUid="stitchSelectedUid = $event"
+            @update:conflictOnly="stitchShowConflictOnly = $event"
+            @update:showPlanDetail="stitchShowPlanDetail = $event"
+            @update:planChangedOnly="stitchPlanChangedOnly = $event"
+            @toggle-source="toggleStitchSource"
+            @clearSources="clearStitchSources"
+            @select-all-sources="selectAllStitchSources"
+            @add-item="addStitchItem"
+            @add-all-from-preset="addAllFromPreset"
+            @add-custom="addCustomStitchItem"
+            @clearItems="clearStitchItems"
+            @remove-item="removeStitchItem"
+            @move-item="moveStitchItem"
+            @refresh-conflicts="refreshStitchConflicts"
+            @apply-decision="applyStitchDecision"
+            @apply-place="applyStitchPlace"
+            @set-anchor="setStitchAnchor"
+            @set-anchor-hint="addLog('📍 请在右侧「🎯 基座时间线」点击目标条目来设定锚点', 'info')"
+            @open-text-modal="openTextModal"
+            @snippet-insert="insertSnippetToStage"
+            @snippet-save="saveStitchItemAsSnippet"
+            @snippet-rename="renameSnippet"
+            @snippet-delete="deleteSnippet"
+        />
+
+        <!-- ================= [ �🧬 内容级跨名称版本查重弹窗（子组件 ContentDedupeModal） ] ================= -->
         <content-dedupe-modal
             :show="showContentDedupeModal"
             :groups="contentDuplicateGroups"
@@ -485,6 +543,7 @@ import WbGraphModal from './WbGraphModal.vue'; // 世界书词条逻辑关联图
 import DedupeModal from './DedupeModal.vue'; // 智能版本查重中心弹窗
 import WbDedupeModal from './WbDedupeModal.vue'; // 世界书智能版本对比查重弹窗
 import PresetDedupeModal from './PresetDedupeModal.vue'; // 预设智能查重弹窗
+import PresetStitchModal from './PresetStitchModal.vue'; // 🧵 预设缝合中心弹窗
 import ContentDedupeModal from './ContentDedupeModal.vue'; // 🧬 内容级跨名称版本查重弹窗
 import DiffModal from './DiffModal.vue'; // 数据版本差异深度比对弹窗
 import WbMergeModal from './WbMergeModal.vue'; // 多本世界书智能合并弹窗
@@ -514,6 +573,7 @@ import { useCardGroups } from '../composables/useCardGroups.js'; // 📁 角色�
 import { useDedupe } from '../composables/useDedupe.js'; // 🔍 查重与差异比对功能（拆分出的组合式函数）
 import { useWorldbooks } from '../composables/useWorldbooks.js'; // 🌍 世界书库与分组功能（拆分出的组合式函数）
 import { usePresets } from '../composables/usePresets.js'; // ⚙️ 酒馆预设管理功能
+import { usePresetStitch } from '../composables/usePresetStitch.js'; // 🧵 预设缝合中心（条目跨预设搬运 + 自定义条目 + order 重建）
 import { usePlugins } from '../composables/usePlugins.js'; // 🧩 酒馆插件管理功能
 import { useWorldbookEntries } from '../composables/useWorldbookEntries.js'; // 📚 世界书词条深度编辑（Entry IDE）组合式函数
 import { useGlobalEntrySearch } from '../composables/useGlobalEntrySearch.js'; // 🔎 全库词条搜索与反向引用组合式函数
@@ -551,7 +611,7 @@ document.addEventListener('dragover', (e) => e.preventDefault());
 document.addEventListener('drop', (e) => e.preventDefault());
 
 export default {
-    components: { Section, DragOverlay, AppLoadingOverlay, ToastContainer, BatchTagModal, PromptModal, OptionSelectModal, SingleTagModal, DiskScanModal, UpdateModal, TextModal, ImageModal, ApiSettingsModal, GlobalAssetModal, GraphModal, WbGraphModal, DedupeModal, WbDedupeModal, PresetDedupeModal, ContentDedupeModal, DiffModal, WbMergeModal, WbImportModal, GlobalEntrySearchModal, WbSnapshotModal, ContextMenu, WbContextMenu, AiTagModal, AutoTagRulesModal, HeaderBar, SidebarPanel, EditorPanel, PluginWorkspace, SnapshotModal, PushModal },
+    components: { Section, DragOverlay, AppLoadingOverlay, ToastContainer, BatchTagModal, PromptModal, OptionSelectModal, SingleTagModal, DiskScanModal, UpdateModal, TextModal, ImageModal, ApiSettingsModal, GlobalAssetModal, GraphModal, WbGraphModal, DedupeModal, WbDedupeModal, PresetDedupeModal, PresetStitchModal, ContentDedupeModal, DiffModal, WbMergeModal, WbImportModal, GlobalEntrySearchModal, WbSnapshotModal, ContextMenu, WbContextMenu, AiTagModal, AutoTagRulesModal, HeaderBar, SidebarPanel, EditorPanel, PluginWorkspace, SnapshotModal, PushModal },
     setup() {
         // 主题状态（localStorage 在自定义协议下可能不可用，做防御性读取；默认暗夜极客）
         let savedTheme = 'dark';
@@ -1370,6 +1430,9 @@ export default {
         });
         // 📥 卡片导入时间映射 { [path]: timestampMs }（「导入时间」排序持久化；首次入库时刻记录）
         const cardImportTimes = ref({});
+        // 🧵 预设缝合中心「常用条目库」（持久化到 app_config.json → ui.presetStitchSnippets，跨重启可复用）
+        //    ⚠️ 必须定义在 useConfigPersistence（setup 尾部）之前：它由中枢收集落盘
+        const presetStitchSnippets = ref([]);
         const snapshotConfig = ref((() => {
             const defaults = { enabled: true, intervalMinutes: 5, maxSnapshots: 10 };
             try {
@@ -1602,6 +1665,78 @@ export default {
             if (cardData.value && regexScripts.value[index] !== undefined) {
                 regexScripts.value.splice(index, 1);
             }
+        };
+
+        // =========================================================
+        // ☑️ [批量操作] 角色卡正则栏：批量选择 / 全选 / 启用停用 / 克隆 / 删除
+        //    选中键用 getRegexUid（WeakMap 稳定标识），数组增删也不会错位
+        // =========================================================
+        const regexBatchMode = ref(false);
+        const regexBatchSelected = ref(new Set()); // 存 getRegexUid(script)
+
+        const toggleRegexBatchMode = () => {
+            regexBatchMode.value = !regexBatchMode.value;
+            if (!regexBatchMode.value) regexBatchSelected.value = new Set();
+        };
+        const toggleRegexBatchSelect = (script) => {
+            if (!script) return;
+            const uid = getRegexUid(script);
+            const s = new Set(regexBatchSelected.value);
+            s.has(uid) ? s.delete(uid) : s.add(uid);
+            regexBatchSelected.value = s;
+        };
+        const isRegexSelected = (script) => regexBatchSelected.value.has(getRegexUid(script));
+        const selectAllRegexScripts = () => {
+            regexBatchSelected.value = new Set((regexScripts.value || []).map(s => getRegexUid(s)));
+        };
+        const clearRegexBatchSelection = () => { regexBatchSelected.value = new Set(); };
+        // 选中项（原数组引用，便于原地修改/删除）
+        const selectedRegexScripts = () => (regexScripts.value || []).filter(s => regexBatchSelected.value.has(getRegexUid(s)));
+        const exitRegexBatch = () => { regexBatchMode.value = false; regexBatchSelected.value = new Set(); };
+
+        // 批量启用 / 停用（复用 syncRegexScriptField：camelCase/snake_case 双写 + 手动刷新视图）
+        const batchRegexToggleEnabled = (enabled) => {
+            const targets = selectedRegexScripts();
+            if (!targets.length) return;
+            targets.forEach(s => syncRegexScriptField(s, 'disabled', !enabled));
+            addLog(`已${enabled ? '启用' : '停用'} ${targets.length} 条正则脚本`, 'success');
+            exitRegexBatch();
+        };
+
+        // 批量克隆选中脚本（副本插在原脚本之后）
+        const batchDuplicateRegexScripts = () => {
+            const arr = ensureRegexScriptsArray();
+            if (!Array.isArray(arr)) return;
+            const targets = selectedRegexScripts();
+            if (!targets.length) return;
+            targets.forEach(target => {
+                const index = arr.indexOf(target);
+                if (index === -1) return;
+                const cloned = JSON.parse(JSON.stringify(target));
+                cloned.id = 'regex_' + Date.now() + '_' + Math.random().toString(36).substr(2, 5);
+                cloned.scriptName = (cloned.scriptName || cloned.script_name || '正则脚本') + ' (副本)';
+                if (cloned.script_name !== undefined) cloned.script_name = cloned.scriptName;
+                arr.splice(index + 1, 0, cloned);
+            });
+            if (cardData.value) { triggerRef(cardData); cardTokensCache.delete(cardData.value); }
+            addLog(`📋 批量克隆了 ${targets.length} 条正则脚本`, 'info');
+            exitRegexBatch();
+        };
+
+        // 批量删除（二次确认，倒序 splice 防索引错位）
+        const batchDeleteRegexScripts = async () => {
+            const arr = ensureRegexScriptsArray();
+            if (!Array.isArray(arr)) return;
+            const targets = selectedRegexScripts();
+            if (!targets.length) return;
+            const ok = await confirmDialog(`确定删除选中的 ${targets.length} 条正则脚本吗？操作不可逆！`);
+            if (!ok) return;
+            for (let i = arr.length - 1; i >= 0; i--) {
+                if (regexBatchSelected.value.has(getRegexUid(arr[i]))) arr.splice(i, 1);
+            }
+            if (cardData.value) { triggerRef(cardData); cardTokensCache.delete(cardData.value); }
+            addLog(`🗑️ 批量删除了 ${targets.length} 条正则脚本`, 'warning');
+            exitRegexBatch();
         };
 
         // 安全规范化单个正则脚本字段（双向同步 camelCase 与 snake_case，兼容不同前端导出）
@@ -2107,6 +2242,26 @@ export default {
                                         if (k && typeof v === 'string' && v.trim()) cleanR[k] = String(v).trim();
                                     }
                                     builtinCatRenames.value = cleanR;
+                                }
+                                // 🧵 预设缝合中心「常用条目库」恢复（白名单校验：只收有 name/content 的对象）
+                                if (Array.isArray(cfg.ui.presetStitchSnippets)) {
+                                    presetStitchSnippets.value = cfg.ui.presetStitchSnippets
+                                        .filter(s => s && typeof s === 'object')
+                                        .map(s => ({
+                                            id: String(s.id || `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`),
+                                            name: String(s.name || '未命名条目'),
+                                            content: String(s.content || ''),
+                                            role: ['system', 'user', 'assistant'].includes(s.role) ? s.role : 'system',
+                                            enabled: s.enabled !== false,
+                                            injection_position: Number(s.injection_position) === 1 ? 1 : 0,
+                                            injection_depth: Number.isFinite(Number(s.injection_depth)) ? Number(s.injection_depth) : 4,
+                                            injection_order: Number.isFinite(Number(s.injection_order)) ? Number(s.injection_order) : 100,
+                                            marker: !!s.marker,
+                                            system_prompt: String(s.system_prompt || ''),
+                                            forbid_overrides: !!s.forbid_overrides,
+                                            createdAt: Number(s.createdAt) || Date.now(),
+                                            updatedAt: Number(s.updatedAt) || Date.now()
+                                        }));
                                 }
                             }
                         } finally {
@@ -3314,16 +3469,48 @@ export default {
         const characterWorldbookSearchQuery = ref('');   // 词条关键字搜索（角色卡世界书 tab 专用）
 
         // 确保角色卡存在 character_book.entries，返回该数组（V2/V3 的 data 内，或 V1 顶层）
+        // ⚠️ 必须兼容 3 种历史形态（读取口径与 cardLoader.extractBookEntries 一致），否则：
+        //    ① character_book 本身是数组（最老形态）
+        //    ② character_book.entries 是数组（酒馆标准 V2/V3）
+        //    ③ character_book.entries 是对象字典（旧版前端导出）
+        //    → 旧实现在 ① 会新建 .entries 覆盖、在 ③ 会把整本字典替换成空数组 = **静默清空该卡全部词条**（数据丢失级）
         const ensureCharacterBookEntries = () => {
             if (!cardData.value) return null;
             const target = safeData.value;
             if (!target.character_book || typeof target.character_book !== 'object') {
                 target.character_book = { entries: [] };
             }
-            if (!Array.isArray(target.character_book.entries)) {
-                target.character_book.entries = [];
+            const book = target.character_book;
+            if (Array.isArray(book)) return book;                              // ① 顶层就是数组
+            if (Array.isArray(book.entries)) return book.entries;              // ② 标准数组
+            if (book.entries && typeof book.entries === 'object') {            // ③ 字典 → 归一化为数组（保留既有词条）
+                const arr = Object.values(book.entries).filter(e => e && typeof e === 'object');
+                book.entries = arr;
+                return arr;
             }
-            return target.character_book.entries;
+            book.entries = [];
+            return book.entries;
+        };
+
+        // 卡内世界书条目容器解析（增/删/克隆统一入口，兼容上述 3 种形态）
+        // 返回 { kind:'array'|'arrayProp'|'dict', entries(数组视图，用于定位), dictObj(字典形态时的源对象) }
+        const characterBookEntriesRef = () => {
+            const resolveBook = (book) => {
+                if (!book || typeof book !== 'object') return null;
+                if (Array.isArray(book)) return { kind: 'array', entries: book };
+                if (Array.isArray(book.entries)) return { kind: 'arrayProp', book, entries: book.entries };
+                if (book.entries && typeof book.entries === 'object') {
+                    return {
+                        kind: 'dict',
+                        book,
+                        dictObj: book.entries,
+                        entries: Object.values(book.entries).filter(e => e && typeof e === 'object')
+                    };
+                }
+                return null;
+            };
+            return resolveBook(safeData.value && safeData.value.character_book)
+                || resolveBook(cardData.value && cardData.value.character_book);
         };
 
         // =========================================================
@@ -3412,44 +3599,175 @@ export default {
             addLog('➕ 新增了一条世界书词条', 'info');
         };
 
-        // 删除词条（走原生 confirmDialog 确认）
+        // 删除词条（走原生 confirmDialog 确认；兼容数组/字典两种 entries 形态）
         const deleteCharacterWorldbookEntry = async (entry) => {
-            const entries = safeData.value.character_book?.entries;
-            if (!Array.isArray(entries)) return;
-            const index = entries.indexOf(toRaw(entry));   // toRaw 找回原始对象（worldbookEntries 返回的是 reactive 代理）
-            if (index === -1) return;
+            const ref = characterBookEntriesRef();
+            if (!ref) return;
+            const raw = toRaw(entry);
+            const index = ref.kind === 'dict'
+                ? Object.keys(ref.dictObj).find(k => toRaw(ref.dictObj[k]) === raw)
+                : ref.entries.indexOf(raw);   // toRaw 找回原始对象（worldbookEntries 返回的是 reactive 代理）
+            if (index === undefined || index === -1) return;
             const ok = await confirmDialog('确定要删除这条世界书设定吗？操作不可逆！');
             if (ok) {
-                entries.splice(index, 1);
+                if (ref.kind === 'dict') delete ref.dictObj[index];
+                else ref.entries.splice(index, 1);
                 refreshCardData();
                 addLog('🗑️ 删除了一条世界书词条', 'warning');
             }
         };
 
-        // 克隆词条（在后方插入副本）
+        // 克隆词条（在后方插入副本；兼容数组/字典两种 entries 形态）
         const duplicateCharacterWorldbookEntry = (entry) => {
-            const entries = safeData.value.character_book?.entries;
-            if (!Array.isArray(entries)) return;
-            const index = entries.indexOf(toRaw(entry));
-            if (index === -1) return;
+            const ref = characterBookEntriesRef();
+            if (!ref) return;
+            const raw = toRaw(entry);
             const cloned = JSON.parse(JSON.stringify(entry));
             cloned.uid = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
             cloned.comment = (cloned.comment || cloned.name || '词条') + ' (副本)';
-            entries.splice(index + 1, 0, cloned);
+            if (ref.kind === 'dict') {
+                const key = Object.keys(ref.dictObj).find(k => toRaw(ref.dictObj[k]) === raw);
+                if (key === undefined) return;
+                ref.dictObj[`c${Date.now()}`] = cloned;   // 字典无插入位置概念，追加到末尾
+            } else {
+                const index = ref.entries.indexOf(raw);
+                if (index === -1) return;
+                ref.entries.splice(index + 1, 0, cloned);
+            }
             refreshCardData();
             addLog('📋 复制了一条世界书词条', 'info');
         };
 
-        // 上移/下移（dir = -1 上移，+1 下移）
+        // =========================================================
+        // ☑️ [批量操作] 角色卡内嵌世界书条目：批量选择 / 全选 / 启用停用 / 常驻 / 克隆 / 删除
+        //    选中键用 getEntryUid（条目对象稳定 WeakMap 标识），过滤/排序后也不错位
+        //    ⚠️ worldbookEntries 返回的是 reactive 代理 → 落数组前统一 toRaw 找回源对象
+        // =========================================================
+        const characterWbBatchMode = ref(false);
+        const characterWbBatchSelected = ref(new Set()); // 存 getEntryUid(entry)
+
+        const exitCharacterWbBatch = () => { characterWbBatchMode.value = false; characterWbBatchSelected.value = new Set(); };
+        const toggleCharacterWbBatchMode = () => {
+            characterWbBatchMode.value = !characterWbBatchMode.value;
+            if (!characterWbBatchMode.value) characterWbBatchSelected.value = new Set();
+        };
+        const toggleCharacterWbBatchSelect = (entry) => {
+            if (!entry) return;
+            const uid = getEntryUid(entry);
+            const s = new Set(characterWbBatchSelected.value);
+            s.has(uid) ? s.delete(uid) : s.add(uid);
+            characterWbBatchSelected.value = s;
+        };
+        const isCharacterWbSelected = (entry) => characterWbBatchSelected.value.has(getEntryUid(entry));
+        // 全选（仅当前搜索结果内的条目）
+        const selectAllCharacterWbEntries = () => {
+            characterWbBatchSelected.value = new Set((filteredCharacterWorldbookEntries.value || []).map(e => getEntryUid(e)));
+        };
+        const clearCharacterWbBatchSelection = () => { characterWbBatchSelected.value = new Set(); };
+        // 选中项对应的「原始条目」（就地修改 / 从底层数组移除用）
+        const selectedCharacterWbRawEntries = () => (worldbookEntries.value || [])
+            .filter(e => characterWbBatchSelected.value.has(getEntryUid(e)))
+            .map(e => toRaw(e));
+
+        // 批量启用 / 停用
+        const batchCharacterWbToggleEnabled = (enabled) => {
+            const targets = selectedCharacterWbRawEntries();
+            if (!targets.length) return;
+            targets.forEach(e => { e.enabled = enabled; });
+            refreshCardData();
+            addLog(`已${enabled ? '启用' : '停用'} ${targets.length} 条世界书词条`, 'success');
+            exitCharacterWbBatch();
+        };
+
+        // 批量常驻 / 取消常驻
+        const batchCharacterWbToggleConstant = (constant) => {
+            const targets = selectedCharacterWbRawEntries();
+            if (!targets.length) return;
+            targets.forEach(e => { e.constant = constant; });
+            refreshCardData();
+            addLog(`已将 ${targets.length} 条世界书词条设为${constant ? '常驻' : '非常驻'}`, 'success');
+            exitCharacterWbBatch();
+        };
+
+        // 批量克隆（副本插在原条目之后；兼容数组/字典 entries 形态）
+        const batchCharacterWbDuplicate = () => {
+            const ref = characterBookEntriesRef();
+            if (!ref) return;
+            const targets = selectedCharacterWbRawEntries();
+            if (!targets.length) return;
+            const cloneOf = (target) => {
+                const cloned = JSON.parse(JSON.stringify(target));
+                cloned.uid = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+                cloned.comment = (cloned.comment || cloned.name || '词条') + ' (副本)';
+                return cloned;
+            };
+            if (ref.kind === 'dict') {
+                let n = 0;
+                targets.forEach(target => {
+                    if (!Object.keys(ref.dictObj).some(k => toRaw(ref.dictObj[k]) === toRaw(target))) return;
+                    ref.dictObj[`c${Date.now() + (n++)}`] = cloneOf(target);
+                });
+            } else {
+                targets.forEach(target => {
+                    const index = ref.entries.indexOf(toRaw(target));
+                    if (index === -1) return;
+                    ref.entries.splice(index + 1, 0, cloneOf(target));
+                });
+            }
+            refreshCardData();
+            addLog(`📋 批量克隆了 ${targets.length} 条世界书词条`, 'info');
+            exitCharacterWbBatch();
+        };
+
+        // 批量删除（二次确认；数组倒序 splice / 字典按键 delete，保持原数据结构不变）
+        const batchCharacterWbDelete = async () => {
+            const ref = characterBookEntriesRef();
+            if (!ref) return;
+            const targets = selectedCharacterWbRawEntries();
+            if (!targets.length) return;
+            const ok = await confirmDialog(`确定删除选中的 ${targets.length} 条世界书设定吗？操作不可逆！`);
+            if (!ok) return;
+            const kill = new Set(targets.map(t => toRaw(t)));
+            if (ref.kind === 'dict') {
+                Object.keys(ref.dictObj).forEach(k => { if (kill.has(toRaw(ref.dictObj[k]))) delete ref.dictObj[k]; });
+            } else {
+                for (let i = ref.entries.length - 1; i >= 0; i--) {
+                    if (kill.has(toRaw(ref.entries[i]))) ref.entries.splice(i, 1);
+                }
+            }
+            refreshCardData();
+            addLog(`🗑️ 批量删除了 ${targets.length} 条世界书词条`, 'warning');
+            exitCharacterWbBatch();
+        };
+
+        // 切换角色卡时自动退出批量模式（避免选中项跨卡残留导致误删）
+        watch(cardData, () => { exitRegexBatch(); exitCharacterWbBatch(); });
+
+        // 上移/下移（dir = -1 上移，+1 下移；兼容数组/字典 entries 形态）
         const moveCharacterWorldbookEntry = (entry, dir) => {
-            const entries = safeData.value.character_book?.entries;
-            if (!Array.isArray(entries)) return;
-            const index = entries.indexOf(toRaw(entry));
-            if (index === -1) return;
-            const target = index + dir;
-            if (target < 0 || target >= entries.length) return;
-            const [item] = entries.splice(index, 1);
-            entries.splice(target, 0, item);
+            const ref = characterBookEntriesRef();
+            if (!ref) return;
+            const raw = toRaw(entry);
+            if (ref.kind === 'dict') {
+                // 字典形态：键集合保持不变，仅把值按新顺序重新绑定（Object.keys 即插入顺序）
+                const keys = Object.keys(ref.dictObj);
+                const arr = keys.map(k => ref.dictObj[k]);
+                const index = arr.indexOf(raw);
+                if (index === -1) return;
+                const target = index + dir;
+                if (target < 0 || target >= arr.length) return;
+                const [item] = arr.splice(index, 1);
+                arr.splice(target, 0, item);
+                keys.forEach((k, i) => { ref.dictObj[k] = arr[i]; });
+            } else {
+                const entries = ref.entries;
+                const index = entries.indexOf(raw);
+                if (index === -1) return;
+                const target = index + dir;
+                if (target < 0 || target >= entries.length) return;
+                const [item] = entries.splice(index, 1);
+                entries.splice(target, 0, item);
+            }
             refreshCardData();
         };
 
@@ -4155,13 +4473,19 @@ export default {
             theme, appSettings, sanitizeImportedTags, autoTagOnImport, snapshotConfig, localCategoryMap,
             sidebarWidth, viewMode, isCompactMode, sortBy,
             systemPromptPresets, lastWorldbookDirPath, lastPresetDirPath, wbCategoryMap,
-            cardImportTimes
+            cardImportTimes,
+            // 🧵 预设缝合中心：常用条目库（随 ui 段一起落盘）
+            presetStitchSnippets
         });
 
         // �️ 自动打标规则表自动持久化保险（v2.1）：任何修改（保存/恢复默认）都自动落盘，
         //    不依赖按钮显式调用；syncConfigToDisk 内部已有 isRestoringConfig 闸门防启动期误写。
         //    ⚠️ 必须放在 useConfigPersistence 之后（引用其返回的 syncConfigToDiskDebounced，闭包安全）。
         watch(autoTagRules, () => { syncConfigToDiskDebounced(); }, { deep: true });
+
+        // 🧵 缝合中心「常用条目库」自动落盘（增删改/改名后 500ms 防抖合并写入 app_config.json）
+        //    syncConfigToDisk 内部已有 isRestoringConfig 闸门，启动恢复期不会误写
+        watch(presetStitchSnippets, () => { syncConfigToDiskDebounced(); }, { deep: true });
 
         // �🌍 角色卡内嵌世界书编辑：组合式函数注入（条目派生/uid/折叠展开/触发词工具）
         // ⚠️ 调用时序：必须晚于 cardTokensCache 的定义（updateEntryKeys 运行时引用）；
@@ -4369,6 +4693,7 @@ export default {
             // ⚠️ 重命名：与 useTags 的标签批量模式 batchMode 区分（词条批量模式为布尔开关）
             batchMode: entryBatchMode, batchSelected, toggleBatchMode: toggleEntryBatchMode, toggleBatchSelect, selectAllEntries, clearBatchSelection,
             batchToggleEnabled, batchDeleteEntries,
+            batchToggleConstant, batchToggleSelective, batchDuplicateEntries,
             entryHealthReport, runEntryHealthCheck
         } = useWorldbookEntries({ activeWorldbook, addLog, confirmDialog, nativeAlert });
 
@@ -4397,6 +4722,32 @@ export default {
             presets, activePreset, lastPresetDirPath,
             nativeAlert, confirmDialog, addLog, appPrompt,
             contextMenu, closeContextMenu, appMode
+        });
+
+        // 🧵 预设缝合中心：组合式函数注入（跨预设搬运条目 + 自定义条目 + prompts/prompt_order 双写重建 + ⭐常用条目库）
+        //    ⚠️ 必须晚于 usePresets（用其 presets/activePreset）与 useConfigPersistence（用其 syncConfigToDisk）
+        const {
+            showPresetStitchModal, openPresetStitch, exitStitch,
+            stitchTargetMode, setStitchTargetMode,
+            stitchBasePath, stitchOverwritePath, setStitchBasePath,
+            stitchNewName, stitchSourcePaths, stitchSourceCandidates, toggleStitchSource, clearStitchSources, selectAllStitchSources,
+            stitchPoolQuery, stitchPoolGroups,
+            stitchItems, visibleStitchItems, stitchSelectedUid, stitchShowConflictOnly, stitchShowPlanDetail,
+            stitchPlanChangedOnly, stitchPlanPreviewRows, stitchPreviewStats,
+            stitchBusy, stitchVersion,
+            addStitchItem, addAllFromPreset, addCustomStitchItem, removeStitchItem, clearStitchItems, moveStitchItem,
+            refreshStitchConflicts,
+            stitchConflictCount, stitchPendingCount,
+            applyStitchDecision, applyStitchPlace, setStitchAnchor, anchorLabel,
+            stitchBasePreset, stitchBasePrompts, stitchBaseTimeline,
+            stitchPlan, stitchSummaryText,
+            executeStitch,
+            saveStitchItemAsSnippet, insertSnippetToStage, renameSnippet, deleteSnippet
+        } = usePresetStitch({
+            presets, activePreset, lastPresetDirPath, appMode,
+            nativeAlert, confirmDialog, addLog, appPrompt,
+            snippets: presetStitchSnippets,
+            syncConfigToDisk
         });
 
         // 🧩 插件管理：组合式函数注入
@@ -4515,6 +4866,9 @@ export default {
             isDragging, dragCounter, handleDragEnter, handleDragLeave, cardData, imgUrl, tabs, currentTab, currentTabInfo,
             safeData, specVersion, worldbookEntries, getEntryUid, getRegexUid, regexScripts, formattedJson, rawJsonDraft, applyRawJson, refreshCardData,
             addRegexScript, deleteRegexScript, syncRegexScriptField,
+            // ☑️ 卡内正则栏批量操作
+            regexBatchMode, regexBatchSelected, toggleRegexBatchMode, toggleRegexBatchSelect, isRegexSelected,
+            selectAllRegexScripts, clearRegexBatchSelection, batchRegexToggleEnabled, batchDuplicateRegexScripts, batchDeleteRegexScripts,
             // 📊 渲染预览器（美化/状态栏）
             statusbarInput, statusbarViewMode, resetStatusbarDemo,
             statusbarTemplateMeta, statusbarPromptMeta,
@@ -4610,6 +4964,18 @@ export default {
             saveActivePreset, renamePreset, deletePreset, duplicatePreset,
             openPresetContextMenu, openPresetInFolder, importPresetFromUrl, exportPresetsBatch,
             listPresetSnapshots, restorePresetSnapshot, deletePresetSnapshot,
+            // 🧵 预设缝合中心（跨预设搬运条目 / 自定义条目 / prompts+prompt_order 双写 / ⭐常用条目库）
+            showPresetStitchModal, openPresetStitch, exitStitch,
+            stitchTargetMode, setStitchTargetMode, stitchBasePath, stitchOverwritePath, setStitchBasePath,
+            stitchNewName, stitchSourcePaths, stitchSourceCandidates, toggleStitchSource, clearStitchSources, selectAllStitchSources,
+            stitchPoolQuery, stitchPoolGroups, stitchItems, visibleStitchItems, stitchSelectedUid,
+            stitchShowConflictOnly, stitchShowPlanDetail, stitchPlanChangedOnly, stitchPlanPreviewRows, stitchPreviewStats,
+            stitchBusy, stitchVersion,
+            addStitchItem, addAllFromPreset, addCustomStitchItem, removeStitchItem, clearStitchItems, moveStitchItem,
+            refreshStitchConflicts, stitchConflictCount, stitchPendingCount,
+            applyStitchDecision, applyStitchPlace, setStitchAnchor, anchorLabel,
+            stitchBasePreset, stitchBasePrompts, stitchBaseTimeline, stitchPlan, stitchSummaryText, executeStitch,
+            presetStitchSnippets, saveStitchItemAsSnippet, insertSnippetToStage, renameSnippet, deleteSnippet,
             // 🧩 插件管理
             plugins, activePlugin, lastPluginDirPath,
             pluginSearchQuery,
@@ -4633,6 +4999,7 @@ export default {
             entrySearchQuery, entryFilterState, entrySortBy, filteredWorldbookEntries,
             entryBatchMode, batchSelected, toggleEntryBatchMode, toggleBatchSelect, selectAllEntries, clearBatchSelection,
             batchToggleEnabled, batchDeleteEntries,
+            batchToggleConstant, batchToggleSelective, batchDuplicateEntries,
             entryHealthReport, runEntryHealthCheck,
             // 🔎 全库词条搜索与反向引用
             globalEntryIndex, globalEntrySearchQuery, globalEntrySearchResults,
@@ -4645,6 +5012,10 @@ export default {
             characterWorldbookSearchQuery, filteredCharacterWorldbookEntries,
             addCharacterWorldbookEntry, deleteCharacterWorldbookEntry,
             duplicateCharacterWorldbookEntry, moveCharacterWorldbookEntry,
+            // ☑️ 卡内世界书条目批量操作
+            characterWbBatchMode, characterWbBatchSelected, toggleCharacterWbBatchMode, toggleCharacterWbBatchSelect, isCharacterWbSelected,
+            selectAllCharacterWbEntries, clearCharacterWbBatchSelection, batchCharacterWbToggleEnabled, batchCharacterWbToggleConstant,
+            batchCharacterWbDuplicate, batchCharacterWbDelete,
             addEntryKey, removeEntryKey, handleEntryKeyInput, updateEntryComment,
             // 📥 从世界书库导入词条到角色卡（与「📤 提取为世界书」对称）
             showCardWbImportModal, cardWbImportSource, cardWbImportCandidates, cardWbSelectedEntries,

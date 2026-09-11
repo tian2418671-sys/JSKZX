@@ -241,19 +241,38 @@
                             </div>
                             <div class="flex gap-2 items-center">
                                 <input v-model="characterWorldbookSearchQuery" type="text" placeholder="🔍 搜索: 触发词 / 正文 / 备注..." class="flex-1 bg-zinc-800 border border-zinc-700 rounded px-2 py-1.5 outline-none text-xs text-zinc-200 placeholder-zinc-500 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/50">
+                                <button @click="toggleCharacterWbBatchMode"
+                                        :class="characterWbBatchMode ? 'bg-emerald-600 hover:bg-emerald-500 border-emerald-600' : 'bg-zinc-800 hover:bg-zinc-700 border-zinc-700'"
+                                        class="px-2.5 py-1 border text-xs font-medium rounded whitespace-nowrap transition" title="进入批量模式，勾选多条词条后批量操作">☑️ 批量</button>
                                 <button @click="addCharacterWorldbookEntry" class="px-2.5 py-1 bg-blue-600 hover:bg-blue-500 text-white text-xs font-medium rounded whitespace-nowrap">➕ 新增词条</button>
+                            </div>
+                            <!-- ☑️ 批量操作栏 -->
+                            <div v-if="characterWbBatchMode" class="mt-2 p-2 rounded border border-emerald-500/40 bg-emerald-500/10 flex flex-wrap items-center gap-1.5">
+                                <span class="text-[11px] text-emerald-400 font-bold">已选 {{ characterWbBatchSelected.size }} / {{ filteredCharacterWorldbookEntries.length }} 条</span>
+                                <div class="flex-1"></div>
+                                <button @click="selectAllCharacterWbEntries" class="h-6 px-2 bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 rounded text-[10px] text-zinc-300 transition">全选</button>
+                                <button @click="clearCharacterWbBatchSelection" class="h-6 px-2 bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 rounded text-[10px] text-zinc-300 transition">清空</button>
+                                <button @click="batchCharacterWbToggleEnabled(true)" class="h-6 px-2 bg-emerald-600 hover:bg-emerald-500 text-white border border-emerald-600 rounded text-[10px] transition">启用</button>
+                                <button @click="batchCharacterWbToggleEnabled(false)" class="h-6 px-2 bg-zinc-700 hover:bg-zinc-600 text-white border border-zinc-600 rounded text-[10px] transition">停用</button>
+                                <button @click="batchCharacterWbToggleConstant(true)" class="h-6 px-2 bg-purple-600 hover:bg-purple-500 text-white border border-purple-600 rounded text-[10px] transition">常驻</button>
+                                <button @click="batchCharacterWbToggleConstant(false)" class="h-6 px-2 bg-zinc-700 hover:bg-zinc-600 text-white border border-zinc-600 rounded text-[10px] transition">取消常驻</button>
+                                <button @click="batchCharacterWbDuplicate" class="h-6 px-2 bg-blue-600 hover:bg-blue-500 text-white border border-blue-600 rounded text-[10px] transition">克隆</button>
+                                <button @click="batchCharacterWbDelete" class="h-6 px-2 bg-rose-600 hover:bg-rose-500 text-white border border-rose-600 rounded text-[10px] transition">删除</button>
+                                <button @click="toggleCharacterWbBatchMode" class="h-6 px-2 bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 rounded text-[10px] text-zinc-400 transition">退出</button>
                             </div>
                         </div>
 
                         <!-- 词条列表 -->
                         <div class="space-y-2">
                             <div v-if="filteredCharacterWorldbookEntries.length === 0" class="text-zinc-500 text-center py-8 border border-dashed border-zinc-800 rounded">无匹配词条</div>
-                            <div v-for="(entry, index) in filteredCharacterWorldbookEntries" :key="getEntryUid(entry)" class="bg-zinc-900 border border-zinc-800 rounded shadow-sm overflow-hidden transition-all" :class="{ 'opacity-60': entry.enabled === false }">
+                            <div v-for="(entry, index) in filteredCharacterWorldbookEntries" :key="getEntryUid(entry)" class="bg-zinc-900 border border-zinc-800 rounded shadow-sm overflow-hidden transition-all"
+                                 :class="{ 'opacity-60': entry.enabled === false && !characterWbBatchMode, 'ring-2 ring-emerald-500/60 border-emerald-500/50': characterWbBatchMode && isCharacterWbSelected(entry) }">
 
                                 <!-- 词条头部 -->
-                                <div @click="toggleWorldbookEntry(entry)" class="px-3 py-2.5 bg-zinc-800/60 hover:bg-zinc-800 cursor-pointer flex justify-between items-center select-none">
+                                <div @click="characterWbBatchMode ? toggleCharacterWbBatchSelect(entry) : toggleWorldbookEntry(entry)" class="px-3 py-2.5 bg-zinc-800/60 hover:bg-zinc-800 cursor-pointer flex justify-between items-center select-none">
                                     <div class="flex items-center gap-2 overflow-hidden">
-                                        <span class="text-zinc-500 text-xs transition-transform inline-block" :class="worldbookExpanded[getEntryUid(entry)] ? 'rotate-90' : ''">▶</span>
+                                        <input v-if="characterWbBatchMode" type="checkbox" :checked="isCharacterWbSelected(entry)" @click.stop @change="toggleCharacterWbBatchSelect(entry)" class="shrink-0 rounded accent-emerald-500">
+                                        <span v-else class="text-zinc-500 text-xs transition-transform inline-block" :class="worldbookExpanded[getEntryUid(entry)] ? 'rotate-90' : ''">▶</span>
                                         <span class="font-bold text-xs text-zinc-200 truncate">{{ entry.comment || entry.name || '未命名条目' }}</span>
                                         <span v-if="entry.enabled === false" class="text-[10px] px-1.5 py-0.5 rounded border border-zinc-600 bg-zinc-800 text-zinc-500 whitespace-nowrap">禁用</span>
                                         <span v-if="entry.constant" class="text-[10px] px-1.5 py-0.5 rounded border border-purple-500/30 bg-purple-500/10 text-purple-400 whitespace-nowrap">常驻</span>
@@ -261,7 +280,7 @@
                                             🔑 {{ entry.keys.join(', ') }}
                                         </span>
                                     </div>
-                                    <div class="flex items-center gap-1.5 shrink-0">
+                                    <div v-if="!characterWbBatchMode" class="flex items-center gap-1.5 shrink-0">
                                         <span class="text-[10px] px-1.5 py-0.5 bg-zinc-800 rounded text-zinc-400 border border-zinc-700">优先级: {{ entry.insertion_order ?? 50 }}</span>
                                         <button @click.stop="moveCharacterWorldbookEntry(entry, -1)" class="text-zinc-400 hover:text-white hover:bg-zinc-700 px-1 py-0.5 rounded text-xs" title="上移">↑</button>
                                         <button @click.stop="moveCharacterWorldbookEntry(entry, 1)" class="text-zinc-400 hover:text-white hover:bg-zinc-700 px-1 py-0.5 rounded text-xs" title="下移">↓</button>
@@ -271,7 +290,7 @@
                                 </div>
 
                                 <!-- 词条展开详情 -->
-                                <div v-if="worldbookExpanded[getEntryUid(entry)]" class="p-3 border-t border-zinc-800 bg-zinc-950/60 space-y-3 text-xs">
+                                <div v-if="worldbookExpanded[getEntryUid(entry)] && !characterWbBatchMode" class="p-3 border-t border-zinc-800 bg-zinc-950/60 space-y-3 text-xs">
 
                                     <!-- 名称 + 优先级 + 权重 -->
                                     <div class="grid grid-cols-4 gap-2">
@@ -360,33 +379,56 @@
                 <!-- 正则脚本：兼容 V2/V3 的可视化编辑器 -->
                 <div v-if="currentTab === 'regex'">
                     <div class="bg-zinc-900/90 border border-zinc-800 rounded-lg p-4 mb-4 shadow-sm">
-                        <div class="flex items-center justify-between mb-3 pb-2 border-b border-zinc-800">
+                        <div class="flex items-center justify-between mb-3 pb-2 border-b border-zinc-800 flex-wrap gap-2">
                             <div class="flex items-center gap-2">
                                 <span class="text-sm font-bold text-amber-400">⚡ 正则与脚本配置 (Regex Scripts)</span>
                                 <span class="text-xs px-2 py-0.5 bg-amber-500/10 text-amber-400 border border-amber-500/20 rounded-full font-mono">{{ regexScripts.length }} 条脚本</span>
                             </div>
-                            <button @click="addRegexScript" class="px-2.5 py-1 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium rounded shadow flex items-center gap-1 transition">
-                                ➕ 添加正则脚本
-                            </button>
+                            <div class="flex items-center gap-2">
+                                <button v-if="regexScripts.length > 0" @click="toggleRegexBatchMode"
+                                        :class="regexBatchMode ? 'bg-emerald-600 text-white border-emerald-600' : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border-zinc-700'"
+                                        class="px-2.5 py-1 border rounded text-xs font-medium transition flex items-center gap-1" title="进入批量模式，勾选多条脚本后批量操作">☑️ 批量</button>
+                                <button @click="addRegexScript" class="px-2.5 py-1 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium rounded shadow flex items-center gap-1 transition">
+                                    ➕ 添加正则脚本
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- ☑️ 批量操作栏 -->
+                        <div v-if="regexBatchMode" class="mb-3 p-2 rounded-lg border border-emerald-500/40 bg-emerald-500/10 flex flex-wrap items-center gap-1.5">
+                            <span class="text-[11px] text-emerald-400 font-bold">已选 {{ regexBatchSelected.size }} / {{ regexScripts.length }} 条</span>
+                            <div class="flex-1"></div>
+                            <button @click="selectAllRegexScripts" class="h-6 px-2 bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 rounded text-[10px] text-zinc-300 transition">全选</button>
+                            <button @click="clearRegexBatchSelection" class="h-6 px-2 bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 rounded text-[10px] text-zinc-300 transition">清空</button>
+                            <button @click="batchRegexToggleEnabled(true)" class="h-6 px-2 bg-emerald-600 hover:bg-emerald-500 text-white border border-emerald-600 rounded text-[10px] transition">启用</button>
+                            <button @click="batchRegexToggleEnabled(false)" class="h-6 px-2 bg-zinc-700 hover:bg-zinc-600 text-white border border-zinc-600 rounded text-[10px] transition">停用</button>
+                            <button @click="batchDuplicateRegexScripts" class="h-6 px-2 bg-indigo-600 hover:bg-indigo-500 text-white border border-indigo-600 rounded text-[10px] transition">克隆</button>
+                            <button @click="batchDeleteRegexScripts" class="h-6 px-2 bg-rose-600 hover:bg-rose-500 text-white border border-rose-600 rounded text-[10px] transition">删除</button>
+                            <button @click="toggleRegexBatchMode" class="h-6 px-2 bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 rounded text-[10px] text-zinc-400 transition">退出</button>
                         </div>
 
                         <div v-if="regexScripts.length > 0" class="space-y-3">
-                            <div v-for="(script, index) in regexScripts" :key="getRegexUid(script)" class="bg-zinc-800/80 border border-zinc-700/80 rounded-lg p-3 transition" :class="{ 'opacity-50 border-dashed': script.disabled }">
+                            <div v-for="(script, index) in regexScripts" :key="getRegexUid(script)"
+                                 @click="regexBatchMode ? toggleRegexBatchSelect(script) : null"
+                                 class="bg-zinc-800/80 border border-zinc-700/80 rounded-lg p-3 transition"
+                                 :class="{ 'opacity-50 border-dashed': script.disabled && !regexBatchMode, 'cursor-pointer': regexBatchMode, 'ring-2 ring-emerald-500/60 border-emerald-500/50': regexBatchMode && isRegexSelected(script) }">
                                 <div class="flex items-center justify-between gap-3 mb-2.5">
                                     <div class="flex items-center gap-2 flex-1">
-                                        <span class="text-xs font-mono text-zinc-400 shrink-0">#{{ index + 1 }}</span>
-                                        <input :value="script.scriptName || script.script_name || ''" @input="syncRegexScriptField(script, 'scriptName', $event.target.value)" type="text" placeholder="脚本名称 (如: 去除思考词)" class="w-full bg-zinc-900 border border-zinc-700 rounded px-2.5 py-1 text-xs text-zinc-100 font-medium focus:border-amber-500 focus:outline-none">
+                                        <input v-if="regexBatchMode" type="checkbox" :checked="isRegexSelected(script)" @click.stop @change="toggleRegexBatchSelect(script)" class="shrink-0 rounded accent-emerald-500">
+                                        <span v-if="!regexBatchMode" class="text-xs font-mono text-zinc-400 shrink-0">#{{ index + 1 }}</span>
+                                        <input :value="script.scriptName || script.script_name || ''" :disabled="regexBatchMode" @input="syncRegexScriptField(script, 'scriptName', $event.target.value)" type="text" placeholder="脚本名称 (如: 去除思考词)" class="w-full bg-zinc-900 border border-zinc-700 rounded px-2.5 py-1 text-xs text-zinc-100 font-medium focus:border-amber-500 focus:outline-none disabled:opacity-70">
                                         <span class="text-[10px] bg-indigo-500/10 text-indigo-400 px-1.5 py-0.5 rounded border border-indigo-500/30 shrink-0 whitespace-nowrap">作用域: {{ getRegexPlacement(script.placement) }}</span>
                                     </div>
                                     <div class="flex items-center gap-3 shrink-0">
-                                        <label class="flex items-center gap-1.5 cursor-pointer text-xs select-none">
+                                        <label v-if="!regexBatchMode" class="flex items-center gap-1.5 cursor-pointer text-xs select-none">
                                             <input type="checkbox" :checked="!script.disabled" @change="syncRegexScriptField(script, 'disabled', !$event.target.checked)" class="rounded bg-zinc-900 border-zinc-700 text-indigo-600 focus:ring-0">
                                             <span :class="!script.disabled ? 'text-emerald-400 font-bold' : 'text-zinc-500'">{{ !script.disabled ? '已启用' : '已禁用' }}</span>
                                         </label>
-                                        <button @click="deleteRegexScript(index)" class="text-zinc-400 hover:text-rose-400 p-1 rounded hover:bg-zinc-700/50 transition text-xs" title="删除此正则">🗑️ 删除</button>
+                                        <span v-else class="text-[10px] px-1.5 py-0.5 rounded border whitespace-nowrap" :class="!script.disabled ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'bg-zinc-800 text-zinc-500 border-zinc-700'">{{ !script.disabled ? '已启用' : '已禁用' }}</span>
+                                        <button v-if="!regexBatchMode" @click.stop="deleteRegexScript(index)" class="text-zinc-400 hover:text-rose-400 p-1 rounded hover:bg-zinc-700/50 transition text-xs" title="删除此正则">🗑️ 删除</button>
                                     </div>
                                 </div>
-                                <div class="grid grid-cols-2 gap-2.5">
+                                <div v-if="!regexBatchMode" class="grid grid-cols-2 gap-2.5">
                                     <div>
                                         <label class="block text-[10px] text-zinc-400 mb-1">🔍 查找正则表达式 (Find Regex)</label>
                                         <input :value="script.findRegex || script.find_regex || ''" @input="syncRegexScriptField(script, 'findRegex', $event.target.value)" type="text" placeholder="例: &lt;think&gt;.*?&lt;/think&gt;" class="regex-input-find w-full bg-zinc-900 border border-zinc-700 rounded px-2.5 py-1.5 text-xs text-amber-300 font-mono focus:border-amber-500 focus:outline-none">
@@ -396,6 +438,7 @@
                                         <input :value="script.replaceString !== undefined ? script.replaceString : (script.replace_string || '')" @input="syncRegexScriptField(script, 'replaceString', $event.target.value)" type="text" placeholder="留空表示直接删除匹配项" class="regex-input-replace w-full bg-zinc-900 border border-zinc-700 rounded px-2.5 py-1.5 text-xs text-emerald-300 font-mono focus:border-amber-500 focus:outline-none">
                                     </div>
                                 </div>
+                                <p v-else class="text-[10px] text-zinc-500 font-mono truncate">🔍 {{ script.findRegex || script.find_regex || '（未设置查找正则）' }}</p>
                             </div>
                         </div>
                         <div v-else class="text-center py-6 border border-dashed border-zinc-800 rounded-lg text-zinc-500 text-xs">
@@ -841,12 +884,33 @@
                         <div v-else class="p-10 text-center text-xs text-[color:var(--text-sub)]">当前预设没有脚本，点击右上角添加。</div>
                     </section>
                     <section v-if="presetEditorMode === 'regex'" class="rounded-xl border-[color:var(--border-color)] bg-[color:var(--bg-surface)] shadow-xl overflow-hidden">
-                        <div class="px-4 py-3 border-b border-[color:var(--border-color)] flex items-center justify-between"><div><h3 class="text-xs font-bold text-amber-400">⚡ 正则脚本</h3><p class="text-[10px] text-[color:var(--text-sub)] mt-0.5">编辑当前预设附加的正则脚本</p></div><button @click="addPresetRegex" class="px-2.5 py-1 rounded bg-amber-600 hover:bg-amber-500 text-white text-[10px] font-bold">＋ 添加正则</button></div>
+                        <div class="px-4 py-3 border-b border-[color:var(--border-color)] flex items-center justify-between gap-2"><div><h3 class="text-xs font-bold text-amber-400">⚡ 正则脚本</h3><p class="text-[10px] text-[color:var(--text-sub)] mt-0.5">编辑当前预设附加的正则脚本</p></div><div class="flex items-center gap-2"><button v-if="presetRegexScripts.length" @click="togglePresetRegexBatchMode" :class="presetRegexBatchMode ? 'bg-emerald-600 hover:bg-emerald-500 text-white' : 'bg-[color:var(--bg-element)] hover:border-amber-500 text-[color:var(--text-sub)] border border-[color:var(--border-color)]'" class="px-2.5 py-1 rounded text-[10px] font-bold transition" title="进入批量模式，勾选多条正则后批量操作">☑️ 批量</button><button @click="addPresetRegex" class="px-2.5 py-1 rounded bg-amber-600 hover:bg-amber-500 text-white text-[10px] font-bold">＋ 添加正则</button></div></div>
+                        <!-- ☑️ 批量操作栏 -->
+                        <div v-if="presetRegexBatchMode" class="mx-3 mt-3 p-2 rounded-lg border border-emerald-500/40 bg-emerald-500/10 flex flex-wrap items-center gap-1.5">
+                            <span class="text-[10px] text-emerald-400 font-bold">已选 {{ presetRegexBatchSelected.size }} / {{ presetRegexScripts.length }} 条</span>
+                            <div class="flex-1"></div>
+                            <button @click="selectAllPresetRegex" class="h-6 px-2 bg-[color:var(--bg-element)] hover:border-emerald-500 border border-[color:var(--border-color)] rounded text-[10px] text-[color:var(--text-sub)] transition">全选</button>
+                            <button @click="clearPresetRegexBatchSelection" class="h-6 px-2 bg-[color:var(--bg-element)] hover:border-emerald-500 border border-[color:var(--border-color)] rounded text-[10px] text-[color:var(--text-sub)] transition">清空</button>
+                            <button @click="batchPresetRegexToggleEnabled(true)" class="h-6 px-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded text-[10px] transition">启用</button>
+                            <button @click="batchPresetRegexToggleEnabled(false)" class="h-6 px-2 bg-zinc-600 hover:bg-zinc-500 text-white rounded text-[10px] transition">停用</button>
+                            <button @click="batchDuplicatePresetRegex" class="h-6 px-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded text-[10px] transition">克隆</button>
+                            <button @click="batchRemovePresetRegex" class="h-6 px-2 bg-rose-600 hover:bg-rose-500 text-white rounded text-[10px] transition">删除</button>
+                            <button @click="togglePresetRegexBatchMode" class="h-6 px-2 bg-[color:var(--bg-element)] border border-[color:var(--border-color)] rounded text-[10px] text-[color:var(--text-sub)] transition">退出</button>
+                        </div>
                         <div v-if="presetRegexScripts.length" class="p-3 space-y-3">
-                            <article v-for="(regex, index) in presetRegexScripts" :key="index" class="rounded-lg border-[color:var(--border-color)] bg-[color:var(--bg-element)] p-3 space-y-2">
-                                <div class="flex items-center gap-2"><input v-model="regex.scriptName" @input="syncPresetResources('regex')" class="flex-1 bg-transparent border-b border-[color:var(--border-color)] text-xs text-[color:var(--text-main)] px-1 py-1 outline-none focus:border-amber-500" :placeholder="`正则 ${index + 1} 名称`"><label class="text-[10px] text-[color:var(--text-sub)] whitespace-nowrap"><input type="checkbox" :checked="!regex.disabled" @change="regex.disabled = !$event.target.checked; syncPresetResources('regex')" class="accent-amber-500"> 启用</label><button @click="removePresetRegex(index)" class="text-red-400 text-xs">删除</button></div>
-                                <div class="grid grid-cols-1 md:grid-cols-2 gap-2"><label class="text-[10px] text-[color:var(--text-sub)]">匹配表达式<textarea v-model="regex.findRegex" @input="syncPresetResources('regex')" class="mt-1 w-full min-h-[100px] resize-y rounded-md bg-[color:var(--bg-element)] border border-[color:var(--border-color)] p-2 font-mono text-[11px] text-amber-400 outline-none focus:border-amber-500"></textarea></label><label class="text-[10px] text-[color:var(--text-sub)]">替换文本<textarea v-model="regex.replaceString" @input="syncPresetResources('regex')" class="mt-1 w-full min-h-[100px] resize-y rounded-md bg-[color:var(--bg-element)] border border-[color:var(--border-color)] p-2 font-mono text-[11px] text-emerald-400 outline-none focus:border-amber-500"></textarea></label></div>
-                                <div v-if="regex.trimStrings !== undefined" class="grid grid-cols-1 md:grid-cols-3 gap-2"><label class="text-[10px] text-[color:var(--text-sub)]">去除字符串<textarea v-model="regex.trimStrings" @input="syncPresetResources('regex')" class="mt-1 w-full min-h-[60px] resize-y rounded-md bg-[color:var(--bg-element)] border border-[color:var(--border-color)] p-2 font-mono text-[10px] text-[color:var(--text-main)] outline-none focus:border-amber-500"></textarea></label><label class="text-[10px] text-[color:var(--text-sub)]">应用位置<textarea v-model="regex.placement" @input="syncPresetResources('regex')" class="mt-1 w-full min-h-[60px] resize-y rounded-md bg-[color:var(--bg-element)] border border-[color:var(--border-color)] p-2 font-mono text-[10px] text-[color:var(--text-main)] outline-none focus:border-amber-500"></textarea></label><label class="text-[10px] text-[color:var(--text-sub)]">深度范围<input v-model="regex.minDepth" @input="syncPresetResources('regex')" class="mt-1 w-full bg-[color:var(--bg-element)] border border-[color:var(--border-color)] rounded-md px-2 py-1 text-[10px] text-[color:var(--text-main)]"></label></div>
+                            <article v-for="(regex, index) in presetRegexScripts" :key="index"
+                                     @click="presetRegexBatchMode ? togglePresetRegexBatchSelect(regex) : null"
+                                     class="rounded-lg border-[color:var(--border-color)] bg-[color:var(--bg-element)] p-3 space-y-2 transition"
+                                     :class="{ 'cursor-pointer': presetRegexBatchMode, 'border-emerald-500/70 ring-1 ring-emerald-500/40': presetRegexBatchMode && isPresetRegexSelected(regex) }">
+                                <div v-if="presetRegexBatchMode" class="flex items-center gap-2">
+                                    <input type="checkbox" :checked="isPresetRegexSelected(regex)" @click.stop @change="togglePresetRegexBatchSelect(regex)" class="accent-emerald-500 shrink-0">
+                                    <span class="text-xs text-[color:var(--text-main)] font-bold truncate">{{ regex.scriptName || `正则 ${index + 1}` }}</span>
+                                    <span class="text-[9px] px-1.5 py-0.5 rounded border whitespace-nowrap" :class="!regex.disabled ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'bg-zinc-500/10 text-[color:var(--text-sub)] border-[color:var(--border-color)]'">{{ !regex.disabled ? '已启用' : '已禁用' }}</span>
+                                    <span class="flex-1 min-w-0 text-[10px] text-[color:var(--text-sub)] font-mono truncate">🔍 {{ regex.findRegex || '（未设置查找正则）' }}</span>
+                                </div>
+                                <div v-else class="flex items-center gap-2"><input v-model="regex.scriptName" @input="syncPresetResources('regex')" class="flex-1 bg-transparent border-b border-[color:var(--border-color)] text-xs text-[color:var(--text-main)] px-1 py-1 outline-none focus:border-amber-500" :placeholder="`正则 ${index + 1} 名称`"><label class="text-[10px] text-[color:var(--text-sub)] whitespace-nowrap"><input type="checkbox" :checked="!regex.disabled" @change="regex.disabled = !$event.target.checked; syncPresetResources('regex')" class="accent-amber-500"> 启用</label><button @click="removePresetRegex(index)" class="text-red-400 text-xs">删除</button></div>
+                                <div v-if="!presetRegexBatchMode" class="grid grid-cols-1 md:grid-cols-2 gap-2"><label class="text-[10px] text-[color:var(--text-sub)]">匹配表达式<textarea v-model="regex.findRegex" @input="syncPresetResources('regex')" class="mt-1 w-full min-h-[100px] resize-y rounded-md bg-[color:var(--bg-element)] border border-[color:var(--border-color)] p-2 font-mono text-[11px] text-amber-400 outline-none focus:border-amber-500"></textarea></label><label class="text-[10px] text-[color:var(--text-sub)]">替换文本<textarea v-model="regex.replaceString" @input="syncPresetResources('regex')" class="mt-1 w-full min-h-[100px] resize-y rounded-md bg-[color:var(--bg-element)] border border-[color:var(--border-color)] p-2 font-mono text-[11px] text-emerald-400 outline-none focus:border-amber-500"></textarea></label></div>
+                                <div v-if="!presetRegexBatchMode && regex.trimStrings !== undefined" class="grid grid-cols-1 md:grid-cols-3 gap-2"><label class="text-[10px] text-[color:var(--text-sub)]">去除字符串<textarea v-model="regex.trimStrings" @input="syncPresetResources('regex')" class="mt-1 w-full min-h-[60px] resize-y rounded-md bg-[color:var(--bg-element)] border border-[color:var(--border-color)] p-2 font-mono text-[10px] text-[color:var(--text-main)] outline-none focus:border-amber-500"></textarea></label><label class="text-[10px] text-[color:var(--text-sub)]">应用位置<textarea v-model="regex.placement" @input="syncPresetResources('regex')" class="mt-1 w-full min-h-[60px] resize-y rounded-md bg-[color:var(--bg-element)] border border-[color:var(--border-color)] p-2 font-mono text-[10px] text-[color:var(--text-main)] outline-none focus:border-amber-500"></textarea></label><label class="text-[10px] text-[color:var(--text-sub)]">深度范围<input v-model="regex.minDepth" @input="syncPresetResources('regex')" class="mt-1 w-full bg-[color:var(--bg-element)] border border-[color:var(--border-color)] rounded-md px-2 py-1 text-[10px] text-[color:var(--text-main)]"></label></div>
                             </article>
                         </div>
                         <div v-else class="p-10 text-center text-xs text-[color:var(--text-sub)]">当前预设没有正则脚本，点击右上角添加。</div>
@@ -964,6 +1028,11 @@
                                 <div class="flex-1"></div>
                                 <button @click="batchToggleEnabled(true)" class="h-6 px-1.5 bg-emerald-600 hover:bg-emerald-500 text-white border border-emerald-600 rounded text-[10px] transition">启用</button>
                                 <button @click="batchToggleEnabled(false)" class="h-6 px-1.5 bg-zinc-700 hover:bg-zinc-600 text-white border border-zinc-600 rounded text-[10px] transition">停用</button>
+                                <button @click="batchToggleConstant(true)" class="h-6 px-1.5 bg-purple-600 hover:bg-purple-500 text-white border border-purple-600 rounded text-[10px] transition" title="批量设为常驻显示">常驻</button>
+                                <button @click="batchToggleConstant(false)" class="h-6 px-1.5 bg-zinc-700 hover:bg-zinc-600 text-white border border-zinc-600 rounded text-[10px] transition" title="批量取消常驻">取消常驻</button>
+                                <button @click="batchToggleSelective(true)" class="h-6 px-1.5 bg-amber-600 hover:bg-amber-500 text-white border border-amber-600 rounded text-[10px] transition" title="批量设为条件触发">条件</button>
+                                <button @click="batchToggleSelective(false)" class="h-6 px-1.5 bg-zinc-700 hover:bg-zinc-600 text-white border border-zinc-600 rounded text-[10px] transition" title="批量取消条件触发">取消条件</button>
+                                <button @click="batchDuplicateEntries" class="h-6 px-1.5 bg-blue-600 hover:bg-blue-500 text-white border border-blue-600 rounded text-[10px] transition" title="批量克隆词条">克隆</button>
                                 <button @click="batchDeleteEntries" class="h-6 px-1.5 bg-rose-600 hover:bg-rose-500 text-white border border-rose-600 rounded text-[10px] transition">删除</button>
                             </div>
 
@@ -1400,6 +1469,70 @@ export default {
             syncPresetResources('regex');
         };
         const removePresetRegex = index => { presetRegexScripts.value.splice(index, 1); syncPresetResources('regex'); };
+
+        // =========================================================
+        // ☑️ 预设正则区批量操作（批量选择 / 全选 / 启用停用 / 克隆 / 删除）
+        //    选中键用脚本对象本身（列表不做排序重排，引用稳定）
+        // =========================================================
+        const presetRegexBatchMode = ref(false);
+        const presetRegexBatchSelected = ref(new Set());
+        const exitPresetRegexBatch = () => { presetRegexBatchMode.value = false; presetRegexBatchSelected.value = new Set(); };
+        const togglePresetRegexBatchMode = () => {
+            presetRegexBatchMode.value = !presetRegexBatchMode.value;
+            if (!presetRegexBatchMode.value) presetRegexBatchSelected.value = new Set();
+        };
+        const togglePresetRegexBatchSelect = (script) => {
+            if (!script) return;
+            const s = new Set(presetRegexBatchSelected.value);
+            s.has(script) ? s.delete(script) : s.add(script);
+            presetRegexBatchSelected.value = s;
+        };
+        const isPresetRegexSelected = (script) => presetRegexBatchSelected.value.has(script);
+        const selectAllPresetRegex = () => { presetRegexBatchSelected.value = new Set(presetRegexScripts.value); };
+        const clearPresetRegexBatchSelection = () => { presetRegexBatchSelected.value = new Set(); };
+        const selectedPresetRegexScripts = () => presetRegexScripts.value.filter(s => presetRegexBatchSelected.value.has(s));
+
+        // 批量启用 / 停用
+        const batchPresetRegexToggleEnabled = (enabled) => {
+            const targets = selectedPresetRegexScripts();
+            if (!targets.length) return;
+            targets.forEach(r => { r.disabled = !enabled; });
+            syncPresetResources('regex');
+            ctx.addLog?.(`已${enabled ? '启用' : '停用'} ${targets.length} 条预设正则`, 'success');
+            exitPresetRegexBatch();
+        };
+
+        // 批量克隆（副本插在原脚本之后）
+        const batchDuplicatePresetRegex = () => {
+            const targets = selectedPresetRegexScripts();
+            if (!targets.length) return;
+            targets.forEach(target => {
+                const index = presetRegexScripts.value.indexOf(target);
+                if (index === -1) return;
+                const cloned = JSON.parse(JSON.stringify(target));
+                cloned.scriptName = (cloned.scriptName || '正则') + ' (副本)';
+                presetRegexScripts.value.splice(index + 1, 0, cloned);
+            });
+            syncPresetResources('regex');
+            ctx.addLog?.(`📋 批量克隆了 ${targets.length} 条预设正则`, 'info');
+            exitPresetRegexBatch();
+        };
+
+        // 批量删除（二次确认）
+        const batchRemovePresetRegex = async () => {
+            const targets = selectedPresetRegexScripts();
+            if (!targets.length) return;
+            const ok = await ctx.confirmDialog(`确定删除选中的 ${targets.length} 条正则脚本吗？操作不可逆！`);
+            if (!ok) return;
+            const kill = new Set(targets);
+            presetRegexScripts.value = presetRegexScripts.value.filter(r => !kill.has(r));
+            syncPresetResources('regex');
+            ctx.addLog?.(`🗑️ 批量删除了 ${targets.length} 条预设正则`, 'warning');
+            exitPresetRegexBatch();
+        };
+
+        // 切换预设时自动退出批量模式（避免跨预设残留选中）
+        watch(() => ctx.activePreset?.value, () => { exitPresetRegexBatch(); });
         const presetAdvancedParams = [
             { key: 'seed', label: '随机种子', type: 'number', step: '1', min: '0', placeholder: '留空表示随机' },
             { key: 'min_p', label: 'Min P', type: 'number', step: '0.01', min: '0', max: '1', placeholder: '例如 0.05' },
@@ -1502,6 +1635,18 @@ export default {
                 presetJsonText.value = JSON.stringify(ctx.activePreset.value.data || {}, null, 4);
             }
         };
+
+        // 🧵 缝合中心「写回当前预设」后全量刷新预设编辑视图
+        //    （prompts 列表 / 脚本 / 正则 / 原始 JSON 同步重载，否则编辑区仍显示缝合前的旧内容）
+        watch(() => ctx.stitchVersion && ctx.stitchVersion.value, () => {
+            const preset = ctx.activePreset && ctx.activePreset.value;
+            if (!preset) return;
+            presetJsonText.value = JSON.stringify(preset.data || {}, null, 4);
+            refreshPresetPrompts(preset.data);
+            refreshPresetResources(preset.data);
+            presetScriptPreviews.value = {};
+            presetScriptCollapsed.value = {};
+        });
         return {
             // ✅ [状态栏预览] 模板库合并：📚 渲染模板 / 📜 世界书指令 双选项卡 + 整体折叠
             statusLibTab: ref('render'),
@@ -1527,6 +1672,17 @@ export default {
             removePresetScript,
             addPresetRegex,
             removePresetRegex,
+            // ☑️ 预设正则区批量操作
+            presetRegexBatchMode,
+            presetRegexBatchSelected,
+            togglePresetRegexBatchMode,
+            togglePresetRegexBatchSelect,
+            isPresetRegexSelected,
+            selectAllPresetRegex,
+            clearPresetRegexBatchSelection,
+            batchPresetRegexToggleEnabled,
+            batchDuplicatePresetRegex,
+            batchRemovePresetRegex,
             isRenderScript,
             presetScriptPreviews,
             presetScriptCollapsed,
@@ -1621,6 +1777,18 @@ export default {
             characterWorldbookSearchQuery: ctx.characterWorldbookSearchQuery,
             filteredCharacterWorldbookEntries: ctx.filteredCharacterWorldbookEntries,
             addCharacterWorldbookEntry: ctx.addCharacterWorldbookEntry,
+            // ☑️ 卡内世界书条目批量操作
+            characterWbBatchMode: ctx.characterWbBatchMode,
+            characterWbBatchSelected: ctx.characterWbBatchSelected,
+            toggleCharacterWbBatchMode: ctx.toggleCharacterWbBatchMode,
+            toggleCharacterWbBatchSelect: ctx.toggleCharacterWbBatchSelect,
+            isCharacterWbSelected: ctx.isCharacterWbSelected,
+            selectAllCharacterWbEntries: ctx.selectAllCharacterWbEntries,
+            clearCharacterWbBatchSelection: ctx.clearCharacterWbBatchSelection,
+            batchCharacterWbToggleEnabled: ctx.batchCharacterWbToggleEnabled,
+            batchCharacterWbToggleConstant: ctx.batchCharacterWbToggleConstant,
+            batchCharacterWbDuplicate: ctx.batchCharacterWbDuplicate,
+            batchCharacterWbDelete: ctx.batchCharacterWbDelete,
             deleteCharacterWorldbookEntry: ctx.deleteCharacterWorldbookEntry,
             duplicateCharacterWorldbookEntry: ctx.duplicateCharacterWorldbookEntry,
             moveCharacterWorldbookEntry: ctx.moveCharacterWorldbookEntry,
@@ -1640,6 +1808,17 @@ export default {
             syncRegexScriptField: ctx.syncRegexScriptField,
             getRegexPlacement: ctx.getRegexPlacement,
             deleteRegexScript: ctx.deleteRegexScript,
+            // ☑️ 卡内正则栏批量操作
+            regexBatchMode: ctx.regexBatchMode,
+            regexBatchSelected: ctx.regexBatchSelected,
+            toggleRegexBatchMode: ctx.toggleRegexBatchMode,
+            toggleRegexBatchSelect: ctx.toggleRegexBatchSelect,
+            isRegexSelected: ctx.isRegexSelected,
+            selectAllRegexScripts: ctx.selectAllRegexScripts,
+            clearRegexBatchSelection: ctx.clearRegexBatchSelection,
+            batchRegexToggleEnabled: ctx.batchRegexToggleEnabled,
+            batchDuplicateRegexScripts: ctx.batchDuplicateRegexScripts,
+            batchDeleteRegexScripts: ctx.batchDeleteRegexScripts,
             // 📊 渲染预览器（美化/状态栏）
             statusbarInput: ctx.statusbarInput,
             statusbarViewMode: ctx.statusbarViewMode,
@@ -1693,6 +1872,9 @@ export default {
             clearBatchSelection: ctx.clearBatchSelection,
             batchToggleEnabled: ctx.batchToggleEnabled,
             batchDeleteEntries: ctx.batchDeleteEntries,
+            batchToggleConstant: ctx.batchToggleConstant,
+            batchToggleSelective: ctx.batchToggleSelective,
+            batchDuplicateEntries: ctx.batchDuplicateEntries,
             moveEntry: ctx.moveEntry,
             entryHealthReport: ctx.entryHealthReport,
             runEntryHealthCheck: ctx.runEntryHealthCheck,

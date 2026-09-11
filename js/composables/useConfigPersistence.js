@@ -29,7 +29,9 @@ export function useConfigPersistence({
     sidebarWidth, viewMode, isCompactMode, sortBy,
     systemPromptPresets, lastWorldbookDirPath, lastPresetDirPath, wbCategoryMap,
     // —— 收集源：导入时间映射（卡片首次入库时刻持久化） ——
-    cardImportTimes
+    cardImportTimes,
+    // —— 收集源：预设缝合中心「常用条目库」（🧵 自定义条目复用） ——
+    presetStitchSnippets
 }) {
     // 🛡️ 启动配置恢复保护：loadAppConfig 恢复字段时置 true，防止各 watch 触发写盘把「恢复值/旧残留」回写 app_config.json
     //    （否则旧文件 / localStorage 残留会在加载竞态中被写回权威文件，导致「删除/清空后重启复活」）
@@ -86,7 +88,9 @@ export function useConfigPersistence({
                 customTagCategories: JSON.parse(JSON.stringify(Array.isArray(customTagCategories.value) ? customTagCategories.value : [])),
                 customTagAssignments: JSON.parse(JSON.stringify(customTagAssignments.value || {})),
                 builtinCatHidden: JSON.parse(JSON.stringify(builtinCatHidden.value || {})),
-                builtinCatRenames: JSON.parse(JSON.stringify(builtinCatRenames.value || {}))
+                builtinCatRenames: JSON.parse(JSON.stringify(builtinCatRenames.value || {})),
+                // 🧵 预设缝合中心：常用条目库（自定义条目跨重启复用）
+                presetStitchSnippets: JSON.parse(JSON.stringify(Array.isArray(presetStitchSnippets && presetStitchSnippets.value) ? presetStitchSnippets.value : []))
             },
             // 📥 卡片导入时间映射 { [path]: timestampMs }（「导入时间」排序持久化）
             cardImportTimes: JSON.parse(JSON.stringify(cardImportTimes.value || {}))

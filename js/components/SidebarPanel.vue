@@ -517,6 +517,10 @@
                             class="px-2.5 py-1.5 bg-zinc-800 hover:bg-blue-600 text-zinc-200 text-xs rounded border border-zinc-700/60 transition">
                         📦 导出
                     </button>
+                    <button @click="openPresetStitch({ mode: 'new' })" title="🧵 缝合中心：把多个预设的条目（或新建自定义条目）缝进目标预设，生成新预设 / 覆盖 / 写回当前"
+                            class="px-2.5 py-1.5 bg-zinc-800 hover:bg-emerald-600 text-zinc-200 text-xs rounded border border-zinc-700/60 transition whitespace-nowrap">
+                        🧵 缝合
+                    </button>
                 </div>
             </div>
 
@@ -779,6 +783,7 @@ export default {
             deletePreset: ctx.deletePreset,
             openPresetContextMenu: ctx.openPresetContextMenu,
             openPresetInFolder: ctx.openPresetInFolder,
+            openPresetStitch: ctx.openPresetStitch,
             plugins: ctx.plugins,
             activePlugin: ctx.activePlugin,
             pluginSearchQuery: ctx.pluginSearchQuery,

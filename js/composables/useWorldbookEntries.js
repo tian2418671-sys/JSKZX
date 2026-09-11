@@ -3,7 +3,7 @@
  * 从 App.vue 拆分而来，收敛：世界书（独立世界书库模式）词条的新增/删除/克隆/排序/筛选/批量/体检，以及词条搜索过滤。
  * activeWorldbook 等共享状态保留在 App.vue 并注入；行为保持不变。
  */
-import { ref, computed } from 'vue';
+import { ref, computed, watch } from 'vue';
 
 export function useWorldbookEntries({ activeWorldbook, addLog, confirmDialog, nativeAlert }) {
 
@@ -153,6 +153,9 @@ export function useWorldbookEntries({ activeWorldbook, addLog, confirmDialog, na
     };
     const clearBatchSelection = () => { batchSelected.value = new Set(); };
 
+    // 切换世界书时自动退出批量模式（避免选中项跨书残留导致误删）
+    watch(activeWorldbook, () => { batchMode.value = false; batchSelected.value = new Set(); });
+
     const batchToggleEnabled = (enabled) => {
         const entries = activeWorldbook.value?.data?.entries || [];
         let n = 0;
@@ -160,6 +163,46 @@ export function useWorldbookEntries({ activeWorldbook, addLog, confirmDialog, na
         batchMode.value = false;
         batchSelected.value = new Set();
         addLog(`已${enabled ? '启用' : '停用'} ${n} 个词条`, 'success');
+    };
+
+    // 批量常驻 / 取消常驻（constant）
+    const batchToggleConstant = (constant) => {
+        const entries = activeWorldbook.value?.data?.entries || [];
+        let n = 0;
+        entries.forEach(e => { if (batchSelected.value.has(ensureUid(e))) { e.constant = constant; n++; } });
+        batchMode.value = false;
+        batchSelected.value = new Set();
+        addLog(`已将 ${n} 个词条设为${constant ? '常驻' : '非常驻'}`, 'success');
+    };
+
+    // 批量条件触发 / 取消条件触发（selective）
+    const batchToggleSelective = (selective) => {
+        const entries = activeWorldbook.value?.data?.entries || [];
+        let n = 0;
+        entries.forEach(e => { if (batchSelected.value.has(ensureUid(e))) { e.selective = selective; n++; } });
+        batchMode.value = false;
+        batchSelected.value = new Set();
+        addLog(`已将 ${n} 个词条设为${selective ? '条件触发' : '非条件触发'}`, 'success');
+    };
+
+    // 批量克隆（副本插在原词条之后）
+    const batchDuplicateEntries = () => {
+        const entries = activeWorldbook.value?.data?.entries;
+        if (!Array.isArray(entries)) return;
+        const targets = entries.filter(e => batchSelected.value.has(ensureUid(e)));
+        if (targets.length === 0) return;
+        targets.forEach(target => {
+            const index = entries.indexOf(target);
+            if (index === -1) return;
+            const cloned = JSON.parse(JSON.stringify(target));
+            cloned.uid = REGEN_UID();
+            cloned.comment = (cloned.comment || '词条') + ' (副本)';
+            cloned._collapsed = false;
+            entries.splice(index + 1, 0, cloned);
+        });
+        batchMode.value = false;
+        batchSelected.value = new Set();
+        addLog(`📋 批量克隆了 ${targets.length} 个词条`, 'info');
     };
 
     const batchDeleteEntries = async () => {
@@ -231,6 +274,7 @@ export function useWorldbookEntries({ activeWorldbook, addLog, confirmDialog, na
         entrySearchQuery, entryFilterState, entrySortBy, filteredWorldbookEntries,
         batchMode, batchSelected, toggleBatchMode, toggleBatchSelect, selectAllEntries, clearBatchSelection,
         batchToggleEnabled, batchDeleteEntries,
+        batchToggleConstant, batchToggleSelective, batchDuplicateEntries,
         entryHealthReport, runEntryHealthCheck
     };
 }
