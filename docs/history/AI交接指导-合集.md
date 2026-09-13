@@ -175,7 +175,7 @@ test/              6 个测试文件 / 47 个单测（node:test，`npm test`）
 - 会话 ded86a3f / 1443a95f / 29bf9088（cwd=h:\01\北派盗墓笔记，仓库 gui.git）：另一个项目（小说→世界书/UI 前端），与本 JSK管理 项目无关，**不要混淆**
 
 ### 📅 2026-08-29（向量模型下载 + AI 打标崩溃修复 + v2.0 性能优化）
-- **向量模型下载链路修复**（commit 40b68f8）：本地向量引擎 `Xenova/paraphrase-multilingual-MiniLM-L12-v2` 三源下载（hf-mirror → huggingface → GitHub 仓库兜底）+ onnx 8 片断点续传 + 注入浏览器 UA 绕过 hf-mirror RST。详见 `memory/2026-08-29.md`
+- **向量模型下载链路修复**（commit 40b68f8）：本地向量引擎 `Xenova/paraphrase-multilingual-MiniLM-L12-v2` 三源下载（hf-mirror → huggingface → GitHub 仓库兜底）+ onnx 8 片断点续传 + 注入浏览器 UA 绕过 hf-mirror RST。详见 `docs/history/memory/2026-08-29.md`
 - **AI 打标渲染进程崩溃修复**（exitCode -36861）：根因是打标每改一张卡 → `triggerRef(library)` → `watch(library)` 全量重建搜索索引 + Token 预热，几千张卡 × 正则/分词 → 渲染进程 native 崩溃。修复：打标期间跳过索引重建（`pendingRebuild` 标记），打标结束补建一次
 - **AI 打标进度条修复**：规则匹配层实时进度（原卡「0」不动）；向量匹配层把 `vector:batchProgress` 合并进 `aiTaggingProgress`；三层 O(n²) find → O(1) Map；修复 LLM 层 `targetIds[i]`→`llmTargetIds[i]` 索引 bug
 - **v2.0 性能优化**：useCardCrud `seenPaths` O(1) 去重 + 流式批量拉取（readTextBatch/readEmbeddedBatch 分块 IPC）；useWorldbooks/Extras `triggerRef`；pngParser 大卡兜底；tokenEstimate 超长文本防护

@@ -19,7 +19,7 @@
 | 文件 | 说明 |
 |---|---|
 | [`docs/reference/ui-model-TestSidebar.vue.txt`](../reference/ui-model-TestSidebar.vue.txt) | 移动版测卡侧栏的**旧快照**（仅作布局参考，`.txt` 后缀不参与构建） |
-| [`docs/screenshots/`](../screenshots/) | 移动版测试截图证据（`2026-09-12-测试/`） |
+| [`docs/screenshots/`](../screenshots/) | **产品界面预览截图**（被仓库根 README 引用；移动版测试截图未提交进仓库） |
 
 ---
 

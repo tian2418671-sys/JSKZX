@@ -31,12 +31,22 @@
 
 ## 四、探针与工具脚本速查（`scripts/`）
 
+### 发版与文档卫生
+
+| 脚本 | 用途 |
+|---|---|
+| `release-check.mjs` | **发版前置自查**（语法 + 单测 + 构建 + 文档一致性 + git 状态），`--e2e dev/prod` 加跑端到端 |
+| `check-doc-links.mjs` | 校验全仓库 markdown 的相对链接能否解析（当前 61 文件 / 106 条全有效） |
+| `dev-run.ps1` | dev 启动（含终端编码修正） |
+
 ### 压测与容量
 
 | 脚本 | 用途 |
 |---|---|
 | `capacity-check.ps1` | **一键压测**：自动挑最大库 → robocopy 造副本 → 写隔离 profile → 启 Vite+Electron → 轮询采样 → 汇总。`-Copies N` 造副本、`-ReplicaDir` 复用已有副本（⚠️ 不能写成 `-Replica`）、`-Keep -Hold` 保留现场 |
 | `library-dup-search-refresh.mjs` | 搜索→刷新→未等防抖→清空→连点 6 次，逐段查「库层 + 列表层」重复并记录堆占用 |
+| `library-dup-refresh10.mjs` | 大库「刷新 ×10」重复卡复现（打用户截图里的 `(478)` 中间态那条路径） |
+| `library-dup-timeline.mjs` | 加载**过程中**高频轮询，抓库长度时间线与每步 path 重复情况 |
 | `library-dup-race.mjs` / `library-dup-stress.mjs` / `library-dup-probe.mjs` | 并发/连点/互斥验证；刷新 ×N + 搜索 ×N（搜索段偏慢）；早期小库探针 |
 | `measure-startup.mjs` | 启动分项测量（临时 profile、生产模式），`--label` 打标签、`--library` 指定库、`--timeout` 调超时 |
 | `png-head-io-probe.mjs` | PNG 头**读取量**探针（复刻主进程窗口逻辑，量化冷启动 I/O） |
@@ -49,17 +59,30 @@
 | `_cdp-mem.mjs` | 堆 / 索引 / 内存守门员（`--refresh` 顺便跑刷新，`--gc` 仅最终取样时 GC） |
 | `_cdp-text.mjs` | 应用自身进度与卡片数 |
 | `_heap-audit.mjs` | 堆构成审计（按字段拆「文本 vs 对象开销」） |
-| `_probe-index.mjs` / `_probe-index2.mjs` | 索引诊断（包装 `__jskDiag.idx` 的 clear / buildAsync，抓 console） |
+| `_probe-index.mjs` / `_probe-index2.mjs` | 索引诊断（包装 `__jskDiag.idx` 的 clear / buildAsync；第二个抓运行期 console 看重建是否被合并） |
 | `_probe-regex-ui.mjs` | 正则/状态栏增删 UI 端到端（含原生确认框应答） |
 
-### 端到端
+### 端到端 / 热测试
 
 | 脚本 | 用途 |
 |---|---|
-| `release-check.mjs` | **发版前置自查**（语法 + 单测 + 构建 + 文档一致性 + git 状态），`--e2e dev/prod` 加跑端到端 |
 | `chat-sidebar-test.mjs` | 测卡侧栏 7 分区（生产 `app://` 构建） |
 | `chat-engine-test.mjs` | 测卡引擎管线（宏 / 世界书 / EJS / payload / 分段渲染 / swipe） |
-| `dev-run.ps1` | dev 启动（含终端编码修正） |
+| `builtin-cat-test.mjs` | 内置大分类定制：改名 / 隐藏 / 恢复 / 清理还原（**结束时还原，不破坏用户数据**） |
+| `ai-category-modal-smoke.mjs` | AI 归类「自动建类」UI 冒烟（🆕 新建徽标与 optgroup 渲染） |
+| `sanitize-live.mjs` | `sanitizeImportedTags` 开关的**真实导入**热测试（`probe` / `set` / `import` / `check` 四步） |
+| `live-vector-test.cjs` | 在真实 Electron 主进程里验 `vectorManager`（标签展开 + 0.35 阈值）：`npx electron scripts/live-vector-test.cjs` |
+
+### 数据分析（多为一次性，保留备查）
+
+| 脚本 | 用途 |
+|---|---|
+| `extract-all-tags.cjs` | 扫描卡库提取全部标签（PNG `tEXt` chara 块 + JSON），统计大分类覆盖 |
+| `analyze-tags.cjs` | 提取 `app_config.json` 全部标签，跑分类，统计覆盖 |
+| `vector-model-test.cjs` | 向量模型效果验证（正例命中率 / 负例误报率 / 分数分布，检验 0.65 阈值是否合理） |
+| `scan-rejected-cards.cjs` | 在万卡库里找出「像角色卡但被血统鉴定拒绝」的 JSON |
+| `scan-theme-accent.cjs` | 扫描浅色主题下可能看不清的强调色文字类（-200/-300/-400）与未覆盖的深色类 |
+| `scan-theme-gaps.cjs` | 精确扫描：使用中但 `[data-theme="light"]` 未覆盖的深色类（含透明度变体） |
 
 > ⚠️ **探针铁律**：读应用单例状态**必须**走 `window.__jskDiag.*`（应用真正使用的那份），
 > 自己 `import('/js/utils/xxx.js')` 会因 Vite 的 `?t=` 查询参数拿到**另一个模块实例**，读数全错。
