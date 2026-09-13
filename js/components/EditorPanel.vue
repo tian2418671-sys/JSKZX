@@ -1,7 +1,7 @@
 <!--
   EditorPanel 右侧编辑器面板（角色卡编辑工作区 + 世界书 Entry IDE + 全局终端控制台）（子组件）
   ⚠️ 所有状态/方法经 provide/inject 从 App.vue 共享（inject('appCtx') 后按名解构）；
-      ref="chatContainer" 写回父级 ref（sendMessage 滚动依赖）
+      ref="chatContainer" 由本组件自持（滚动到底部用），不再写回父级
 -->
 <template>
     <main v-show="appMode !== 'plugins'" class="flex-1 flex flex-col bg-zinc-950 overflow-hidden relative">
@@ -636,55 +636,103 @@
                     </div>
                 </div>
 
-                <!-- 3. 聊天测卡 (Chat) -->
-                <div v-if="currentTab === 'chat'" class="flex flex-col h-full max-w-4xl mx-auto border border-zinc-700 rounded">
-                    <div class="bg-zinc-900 p-2 text-xs flex items-center justify-between border-b border-zinc-800 flex-wrap gap-2">
-                        <div class="flex items-center gap-2 flex-1 flex-wrap">
-                            <span class="font-bold text-zinc-400">API:</span>
-                            <input v-model="apiEndpoint" type="text" class="px-2 py-1 bg-zinc-800 border border-zinc-700 rounded w-64 outline-none text-zinc-200 placeholder-zinc-500 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/50" placeholder="http://127.0.0.1:1234/v1/chat/completions">
-                            <span class="font-bold text-zinc-400 shrink-0">Key:</span>
-                            <input v-model="apiKey" type="password" placeholder="留空则使用 test-key" title="远端 API 的鉴权密钥，本地 API 可留空" class="px-2 py-1 bg-zinc-800 border border-zinc-700 rounded w-24 outline-none text-zinc-200 placeholder-zinc-500 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/50">
-                            <span class="font-bold text-zinc-400 shrink-0">Model:</span>
-                            <select v-if="availableModels.length > 0" v-model="apiModel" class="px-2 py-1 bg-zinc-800 border border-indigo-500/80 rounded outline-none text-zinc-200 text-xs max-w-[11rem]">
-                                <option v-for="m in availableModels" :key="m" :value="m">{{ m }}</option>
-                            </select>
-                            <input v-else v-model="apiModel" list="model-suggestions" type="text" placeholder="local-model 或模型 ID" title="OpenAI 兼容接口的模型名称，本地 API 可留空" class="px-2 py-1 bg-zinc-800 border border-zinc-700 rounded w-28 outline-none text-zinc-200 placeholder-zinc-500 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/50">
-                            <button @click="fetchAvailableModels" :disabled="isFetchingModels" class="px-2 py-1 bg-indigo-600 hover:bg-indigo-500 disabled:bg-zinc-700 disabled:text-zinc-500 text-white text-[11px] font-medium rounded shadow flex items-center gap-1 transition" title="拉取服务端可用模型列表">
-                                <span v-if="isFetchingModels" class="animate-spin">🌀</span>
-                                <span v-else>🔄</span> 拉取模型
-                            </button>
-                            <span v-if="fetchModelStatus" class="text-[10px] shrink-0" :class="fetchModelStatus.includes('❌') ? 'text-red-400' : 'text-emerald-400'">{{ fetchModelStatus }}</span>
-                        </div>
+                <!-- 3. 聊天测卡 (Chat)：左侧对话区 + 右侧测卡工作区侧边栏（可折叠抽屉） -->
+                <div v-if="currentTab === 'chat'" class="flex h-full min-h-0 w-full">
+                  <div class="flex-1 min-w-0 flex flex-col border border-zinc-700 rounded">
+                    <div class="bg-zinc-900 p-1.5 text-xs flex items-center justify-between border-b border-zinc-800 gap-2">
+                        <span class="text-[10px] text-zinc-500 truncate" :title="apiEndpoint">
+                            🔌 {{ apiModel || '未设置模型' }} <span class="text-zinc-600">·</span> {{ apiType === 'anthropic' ? 'Anthropic' : 'OpenAI 兼容' }}
+                            <span v-if="apiEndpoint" class="text-zinc-600">· {{ apiEndpoint }}</span>
+                            <span v-else class="text-amber-500">· 未配置端点（右侧「设置」）</span>
+                        </span>
                         <div class="flex items-center shrink-0">
-                            <button @click="isChatRenderMode = !isChatRenderMode"
-                                    :class="isChatRenderMode ? 'text-indigo-400' : 'text-zinc-400'"
-                                    class="font-bold mr-4 hover:opacity-80 transition-opacity">
-                                {{ isChatRenderMode ? '👁️ 渲染模式' : '💻 代码模式' }}
+                            <button @click="toggleChatSeg"
+                                    :class="chatSegEnabled ? 'text-indigo-400' : 'text-zinc-400'"
+                                    class="font-bold mr-4 hover:opacity-80 transition-opacity"
+                                    :title="chatSegEnabled ? '分段渲染已开：HTML 面板走沙箱 iframe，文本段走 Markdown' : '分段渲染已关：全部按纯文本显示'">
+                                {{ chatSegEnabled ? '🧩 分段渲染' : '📄 纯文本' }}
                             </button>
-                            <button @click="clearChat" class="text-red-400 hover:text-red-300 font-bold">清空记录</button>
+                            <button @click="ctx.chatClear" class="text-red-400 hover:text-red-300 font-bold" title="清空当前会话并重载开场白">清空记录</button>
                         </div>
                     </div>
                     <div ref="chatContainer" class="flex-1 overflow-y-auto p-4 space-y-4 bg-zinc-950 custom-scrollbar">
-                        <template v-for="(msg, idx) in chatHistory" :key="idx">
+                        <template v-for="(msg, idx) in chatMessages" :key="idx">
                             <div v-if="msg.role !== 'system'" class="flex gap-3" :class="msg.role === 'user' ? 'flex-row-reverse' : ''">
                                 <div class="w-8 h-8 rounded shrink-0 shadow-sm border border-zinc-700 overflow-hidden" :class="msg.role === 'user' ? 'bg-blue-600' : 'bg-zinc-700'">
                                     <img v-if="msg.role === 'assistant' && imgUrl" :src="imgUrl" class="w-full h-full object-cover">
                                 </div>
-                                <div class="max-w-[75%]">
-                                    <div class="text-[10px] text-zinc-400 mb-0.5" :class="msg.role === 'user' ? 'text-right' : ''">{{ msg.name }}</div>
+                                <div class="max-w-[75%] min-w-0">
+                                    <div class="text-[10px] text-zinc-400 mb-0.5" :class="msg.role === 'user' ? 'text-right' : ''">
+                                        {{ msg.role === 'user' ? '你' : (cardName || 'AI') }}
+                                        <span v-if="msg.role === 'assistant' && (msg.swipes || []).length > 1" class="ml-1 text-zinc-500">({{ (msg.index || 0) + 1 }}/{{ (msg.swipes || []).length }})</span>
+                                    </div>
                                     <div :class="msg.role === 'user' ? 'bg-blue-600 text-white' : 'bg-zinc-800 border border-zinc-700 text-zinc-200'" class="p-2.5 rounded shadow-sm leading-relaxed text-[12px]">
-                                        <div v-if="!isChatRenderMode" v-html="renderHTML(cleanMarkdownFences(msg.content))"></div>
-                                        <div v-else v-html="renderSafeHTML(cleanMarkdownFences(msg.content))"></div>
+                                        <!-- 🧩 分段渲染：文本段 Markdown+清洗；HTML 段沙箱 iframe（高度自适应） -->
+                                        <chat-panel-seg
+                                            :segments="segmentsOfMsg(msg)"
+                                            :vars-json="chatVarsJsonSafe"
+                                            :render-text="renderChatHtml"
+                                        />
+                                    </div>
+                                    <!-- 🔄 swipe 工具条（仅 assistant 且有候选时显示） -->
+                                    <div v-if="msg.role === 'assistant'" class="mt-1 flex items-center gap-1.5 text-[10px] text-zinc-500">
+                                        <button v-if="(msg.swipes || []).length > 1" @click="ctx.chatNextSwipe(idx)" class="hover:text-cyan-400" title="上一个候选">◀</button>
+                                        <span v-if="(msg.swipes || []).length > 1">{{ (msg.index || 0) + 1 }}/{{ (msg.swipes || []).length }}</span>
+                                        <button v-if="(msg.swipes || []).length > 1" @click="ctx.chatNextSwipe(idx)" class="hover:text-cyan-400" title="下一个候选">▶</button>
+                                        <button @click="onChatMoreSwipe(idx)" :disabled="chatSending" class="hover:text-emerald-400 disabled:opacity-40" title="再生成一个候选">＋</button>
+                                        <button @click="onChatRegenerate(idx)" :disabled="chatSending" class="hover:text-amber-400 disabled:opacity-40" title="整组重新生成">↻</button>
+                                        <button @click="onChatContinue(idx)" :disabled="chatSending" class="hover:text-indigo-400 disabled:opacity-40" title="以此为起点续写">↳续</button>
                                     </div>
                                 </div>
                             </div>
                         </template>
-                        <div v-if="isChatting" class="text-xs text-zinc-500 italic">对方正在输入...</div>
+                        <div v-if="chatSending" class="text-xs text-zinc-500 italic">对方正在输入...</div>
                     </div>
                     <div class="p-2 bg-zinc-900 border-t border-zinc-800 flex gap-2">
-                        <textarea v-model="chatInput" @keydown.enter.exact.prevent="sendMessage" rows="2" class="flex-1 bg-zinc-800 border border-zinc-700 rounded py-1.5 px-2 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/50 resize-none text-[12px] text-zinc-200 placeholder-zinc-500 custom-scrollbar" placeholder="输入对话... (Enter 发送)"></textarea>
-                        <button @click="sendMessage" :disabled="isChatting || chatInput.trim() === ''" class="px-4 bg-blue-600 text-white rounded font-bold disabled:bg-zinc-700 disabled:text-zinc-500">发送</button>
+                        <textarea v-model="chatDraft" @keydown.enter.exact.prevent="onChatSend" rows="2" class="flex-1 bg-zinc-800 border border-zinc-700 rounded py-1.5 px-2 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/50 resize-none text-[12px] text-zinc-200 placeholder-zinc-500 custom-scrollbar" placeholder="输入对话... (Enter 发送)"></textarea>
+                        <button @click="onChatSend" :disabled="chatSending || !chatDraft.trim()" class="px-4 bg-blue-600 text-white rounded font-bold disabled:bg-zinc-700 disabled:text-zinc-500">发送</button>
                     </div>
+                  </div>
+
+                  <!-- ⚙ 测卡工作区侧边栏（可折叠抽屉，7 分区） -->
+                  <chat-test-sidebar
+                      v-model:visible="sidebarVisible"
+                      :width="sidebarWidth"
+                      :card-path="chatCardPath"
+                      :card-name="chatCardName"
+                      :preset-options="chatPresetOptions"
+                      :regex-list="chatRegexList"
+                      :wb-list="chatWbList"
+                      :vars-tree="chatVarsTree"
+                      :vars-log="chatVarsLog"
+                      :vars-stats="chatVarsStats"
+                      :sessions="chatSessions"
+                      :active-session-id="chatActiveSessionId"
+                      :chat-message-count="chatMessages.length"
+                      :storage-ready="chatStorageReady"
+                      :api-endpoint="apiEndpoint"
+                      :api-key="apiKey"
+                      :api-model="apiModel"
+                      :api-type="apiType"
+                      @toggle-regex="onSidebarToggleRegex"
+                      @toggle-wb="onSidebarToggleWb"
+                      @set-wb-position="onSidebarSetWbPosition"
+                      @set-wb-order="onSidebarSetWbOrder"
+                      @params-changed="onSidebarParamsChanged"
+                      @new-session="onSidebarNewSession"
+                      @switch-session="onSidebarSwitchSession"
+                      @rename-session="onSidebarRenameSession"
+                      @remove-session="onSidebarRemoveSession"
+                      @remove-plugin="onSidebarRemovePlugin"
+                      @reset-vars="onSidebarResetVars"
+                      @undo-var="onSidebarUndoVar"
+                      @set-var="onSidebarSetVar"
+                      @set-flag="onSidebarSetFlag"
+                      @set-api-endpoint="apiEndpoint = $event"
+                      @set-api-key="apiKey = $event"
+                      @set-api-model="apiModel = $event"
+                      @set-api-type="apiType = $event"
+                  />
                 </div>
 
                 <!-- 4. 原始代码 (Raw JSON)：CodeMirror JSON 高亮编辑器（行号/折叠/搜索/格式化/编辑回写） -->
@@ -1208,16 +1256,25 @@
 
 <script>
 import { inject, ref, computed, watch } from 'vue';
+import Showdown from 'showdown'; // 📝 测卡消息 Markdown 渲染（与插件宿主桩同配置）
 import { estimateTokens } from '../utils/tokenEstimate.js';
 import { groupTagsByCategory } from '../utils/tagCategories.js';
 import TagCategoryModal from './TagCategoryModal.vue';
 import CodeEditor from './CodeEditor.vue'; // 💻 轻量代码编辑器（CodeMirror：语法高亮/行号/搜索/折叠）
+import ChatPanelSeg from '../composables/chat/ChatPanelSeg.vue'; // 🧩 测卡消息分段渲染（文本段 Markdown + HTML 段沙箱 iframe）
+import { sanitizeStatusHtml } from '../composables/useStatusbarPreview.js'; // 🛡️ 文本段 DOMPurify 白名单清洗
+import { messageText as chatMessageText } from '../composables/chat/useChatSwipe.js';
+import ChatTestSidebar from './ChatTestSidebar.vue'; // ⚙ 测卡工作区侧边栏（7 分区：配置/正则/世界书/变量/聊天/设置/插件）
+// ⚙ 测卡侧边栏所需的引擎能力（纯函数 / 适配层，均已是桌面版落地件）
+import { chatStorage, getChatFlag, setChatFlag } from '../composables/chat/chatStorage.js';
+import { loadActivePreset, extractRegexFromPreset } from '../composables/chat/useChatPresets.js';
+import { loadPlugins, savePlugins, removePlugin, collectPluginRegex } from '../composables/chat/useChatPlugins.js';
 
 export default {
     name: 'EditorPanel',
     // ⚠️ Options API 组件注册：模板里 <TagCategoryModal> 首字母大写走 resolveComponent 查组件注册表，
     //    setup() return 的组件变量不会进入注册表（会被当成未知原生元素空渲染）→ 必须在此显式注册。
-    components: { TagCategoryModal, CodeEditor },
+    components: { TagCategoryModal, CodeEditor, ChatTestSidebar, ChatPanelSeg },
     setup() {
         const ctx = inject('appCtx');
 
@@ -1647,7 +1704,248 @@ export default {
             presetScriptPreviews.value = {};
             presetScriptCollapsed.value = {};
         });
+
+        // ================= [ ⚙ 测卡工作区侧边栏（7 分区：配置/正则/世界书/变量/聊天/设置/插件） ] =================
+        // 📝 测卡消息 Markdown → HTML（配置与 js/plugins/hostStub.js 的 __jskMarkdown 保持一致，
+        //    避免「插件预览里的 Markdown」与「测卡气泡里的 Markdown」两种观感）
+        const mdConverter = (() => {
+            try {
+                return new Showdown.Converter({
+                    tables: true, strikethrough: true, tasklists: true, emoji: true,
+                    openLinksInNewWindow: true, simplifiedAutoLink: true
+                });
+            } catch (e) { console.warn('[chat] Showdown 初始化失败，退回纯文本渲染', e); return null; }
+        })();
+        // 🚀 渲染缓存：同一条消息反复重渲染（输入/发送/变量变更）是卡顿大头
+        const mdCache = new Map();
+        /** 文本段 → 安全 HTML（Markdown 子集 + DOMPurify 白名单） */
+        const renderChatHtml = (text) => {
+            const key = String(text == null ? '' : text);
+            const hit = mdCache.get(key);
+            if (hit !== undefined) return hit;
+            let s = key;
+            if (mdConverter) {
+                try { s = mdConverter.makeHtml(s); } catch (e) { /* 退回原文本 */ }
+            }
+            const out = sanitizeStatusHtml(s);
+            if (mdCache.size > 300) { const first = mdCache.keys().next().value; mdCache.delete(first); }
+            mdCache.set(key, out);
+            return out;
+        };
+        /** 消息 → 分段数组（引擎负责分段策略；分段渲染关闭时退化为单文本段） */
+        const segmentsOfMsg = (msg) => {
+            const fn = ctx.chatSegmentsOf;
+            if (typeof fn === 'function') return fn(msg);
+            return [{ type: 'text', content: chatMessageText(msg) }];
+        };
+        const chatVarsJsonSafe = computed(() => {
+            const v = ctx.chatVarsJson && ctx.chatVarsJson.value;
+            return typeof v === 'string' && v ? v : '{"stat_data":{}}';
+        });
+
+        // ================= [ ⚙ 测卡工作区侧边栏 ] =================
+        const sidebarVisible = ref(true);
+        const sidebarWidth = ref(300);
+        const chatStorageReady = ref(chatStorage.isHydrated());
+        // 启动时恢复测卡数据（会话/变量树/设置）。不 await：不阻塞首屏，
+        // 恢复完成后翻 chatStorageReady → 侧栏 watch 到它再重读设置（见 ChatTestSidebar.storageReady）。
+        chatStorage.hydrate().then(() => { chatStorageReady.value = true; });
+
+        /** 卡片物理路径：会话与变量树按它隔离（cardData 本身不带 path） */
+        const chatCardPath = computed(() => {
+            const item = ctx.currentOpenCardItem && ctx.currentOpenCardItem.value;
+            return (item && item.path) || '';
+        });
+        const chatCardName = computed(() => {
+            const item = ctx.currentOpenCardItem && ctx.currentOpenCardItem.value;
+            return (item && item.name) || (ctx.safeData && ctx.safeData.value && ctx.safeData.value.name) || '';
+        });
+        /** 可选预设：来自桌面预设库（ctx.presets），key 用路径保证唯一 */
+        const chatPresetOptions = computed(() => {
+            const list = (ctx.presets && ctx.presets.value) || [];
+            return list.map((p) => ({
+                key: p.path || p.name || '',
+                name: (p.data && p.data.name) || p.name || '未命名预设',
+                data: p.data || {}
+            })).filter((p) => p.key);
+        });
+        /** 正则合并列表：卡内 + 预设内嵌 + 插件（打 _source 标记供侧栏分组显示） */
+        const chatRegexList = computed(() => {
+            const out = [];
+            const cardScripts = (ctx.regexScripts && ctx.regexScripts.value) || [];
+            for (const s of cardScripts) out.push(Object.assign({ _source: 'card' }, s));
+            const preset = loadActivePreset();
+            if (preset && preset.data) {
+                for (const s of extractRegexFromPreset(preset.data)) out.push(Object.assign({ _source: 'preset' }, s));
+            }
+            try {
+                for (const s of collectPluginRegex(loadPlugins())) out.push(Object.assign({ _source: 'plugin' }, s));
+            } catch (e) { /* 插件正则不可用时忽略 */ }
+            return out;
+        });
+        /** 世界书条目 → 侧栏可见列表（key 用引擎同款稳定 uid，开关回写时按 uid 定位） */
+        const chatWbList = computed(() => {
+            const entries = (ctx.worldbookEntries && ctx.worldbookEntries.value) || [];
+            const uid = ctx.getEntryUid || (() => '');
+            return entries.map((e, i) => ({
+                key: uid(e) || ('wb-' + i),
+                comment: e.comment || e.name || ('条目 ' + (i + 1)),
+                enabled: e.enabled,
+                constant: e.constant,
+                position: e.position,
+                insertion_order: e.insertion_order,
+                order: e.order,
+                keys: e.keys,
+                _raw: e
+            }));
+        });
+        /** MVU 变量树 / 日志 / 统计：来自引擎 ref（未接线时为空树，侧栏显示空态） */
+        const chatVarsTree = computed(() => {
+            void (ctx.chatVarsVersion && ctx.chatVarsVersion.value);
+            const t = ctx.chatVarsTree && ctx.chatVarsTree.value;
+            return (t && typeof t === 'object') ? t : {};
+        });
+        const chatVarsLog = computed(() => {
+            void (ctx.chatVarsVersion && ctx.chatVarsVersion.value);
+            return (ctx.chatVarsLog && ctx.chatVarsLog.value) || [];
+        });
+        const chatVarsStats = computed(() => {
+            void (ctx.chatVarsVersion && ctx.chatVarsVersion.value);
+            return (ctx.chatVarsStats && ctx.chatVarsStats.value) || { leaves: 0, ops: 0, aiCount: 0 };
+        });
+        const chatSessions = computed(() => {
+            void (ctx.chatSessionsVersion && ctx.chatSessionsVersion.value);
+            return (ctx.chatSessions && ctx.chatSessions.value) || [];
+        });
+        const chatActiveSessionId = computed(() => (ctx.chatActiveSessionId && ctx.chatActiveSessionId.value) || '');
+
+        const onSidebarToggleRegex = ({ script, enabled }) => {
+            const raw = script && script._raw;
+            if (!raw) return; // 预设/插件来源的正则由其来源处管理，侧栏只读
+            raw.disabled = !enabled;
+            if (raw.disabled) raw.enabled = false; else delete raw.enabled;
+            if (ctx.refreshCardData) ctx.refreshCardData();
+        };
+        const onSidebarToggleWb = ({ key, enabled }) => {
+            const e = findWbByUid(key);
+            if (!e) return;
+            e.enabled = !!enabled;
+            if (ctx.refreshCardData) ctx.refreshCardData();
+        };
+        const onSidebarSetWbPosition = ({ key, position }) => {
+            const e = findWbByUid(key);
+            if (!e) return;
+            e.position = Number(position);
+            if (ctx.refreshCardData) ctx.refreshCardData();
+        };
+        const onSidebarSetWbOrder = ({ key, order }) => {
+            const e = findWbByUid(key);
+            if (!e) return;
+            e.insertion_order = Number(order);
+            if (ctx.refreshCardData) ctx.refreshCardData();
+        };
+        /** 侧栏传回的是稳定 uid，这里按同一 uid 反查原条目对象 */
+        function findWbByUid(key) {
+            const entries = (ctx.worldbookEntries && ctx.worldbookEntries.value) || [];
+            const uid = ctx.getEntryUid || (() => '');
+            for (let i = 0; i < entries.length; i++) {
+                if ((uid(entries[i]) || ('wb-' + i)) === key) return entries[i];
+            }
+            return null;
+        }
+        const onSidebarParamsChanged = (overrides) => { sidebarParamOverrides.value = overrides || {}; };
+        const sidebarParamOverrides = ref({});
+        const onSidebarNewSession = () => { if (ctx.chatNewSession) ctx.chatNewSession(); };
+        const onSidebarSwitchSession = (id) => { if (ctx.chatSwitchSession) ctx.chatSwitchSession(id); };
+        const onSidebarRenameSession = async (s) => {
+            // ⚠️ Electron 下 window.prompt 静默返回 null，必须走 ctx.appPrompt（自建 Vue 弹窗）
+            if (!ctx.appPrompt) return;
+            const next = await ctx.appPrompt('重命名会话', s.name || '');
+            if (next == null) return;
+            const name = String(next).trim();
+            if (!name) return;
+            if (ctx.chatRenameSession) ctx.chatRenameSession(s.id, name);
+        };
+        const onSidebarRemoveSession = async (s) => {
+            if (!ctx.confirmDialog) return;
+            const ok = await ctx.confirmDialog(`删除会话「${s.name}」？\n该会话的聊天记录将一并删除。`);
+            if (!ok) return;
+            if (ctx.chatRemoveSession) ctx.chatRemoveSession(s.id);
+        };
+        const onSidebarRemovePlugin = async (p) => {
+            if (!p) return;
+            if (ctx.confirmDialog) {
+                const ok = await ctx.confirmDialog(`删除插件「${p.name}」？`);
+                if (!ok) return;
+            }
+            savePlugins(removePlugin(loadPlugins(), p.name));
+        };
+        const onSidebarResetVars = async () => {
+            if (ctx.confirmDialog) {
+                const ok = await ctx.confirmDialog('重置当前会话的变量树？\n（MVU 变量将全部清空，操作不可撤销）');
+                if (!ok) return;
+            }
+            if (ctx.chatResetVars) ctx.chatResetVars();
+        };
+        const onSidebarUndoVar = () => { if (ctx.chatUndoVar) ctx.chatUndoVar(); };
+        const onSidebarSetVar = ({ path, value }) => { if (ctx.chatSetVar) ctx.chatSetVar(path, value); };
+        const onSidebarSetFlag = ({ key, value }) => { if (ctx.chatSetFlag) ctx.chatSetFlag(key, value); };
+
+        // ⚙ 测卡消息区（对接新编排引擎）
+        const chatMessages = computed(() => (ctx.chatMessages && ctx.chatMessages.value) || []);
+        const chatDraft = ctx.chatDraft || ref('');
+        const chatSending = computed(() => !!(ctx.chatSending && ctx.chatSending.value));
+        const cardName = computed(() => ((ctx.safeData && ctx.safeData.value) || {}).name || '');
+        // ⚠️ 模板里的 ref="chatContainer" 绑的是**本组件自己的** setter（Options API 那个
+        //    chatContainer 曾把 ctx.chatContainer 塞进来，导致这里永远拿到 null、滚动失效）。
+        //    改为组件自持一个 ref，模板直接绑它。
+        const chatContainer = ref(null);
+        const scrollChatToBottom = () => {
+            setTimeout(() => {
+                const el = chatContainer.value;
+                if (el) el.scrollTop = el.scrollHeight;
+            }, 80);
+        };
+        const onChatSend = async () => {
+            if (chatSending.value || !String(chatDraft.value || '').trim()) return;
+            scrollChatToBottom();
+            await (ctx.chatSend ? ctx.chatSend(sidebarParamOverrides.value) : Promise.resolve());
+            scrollChatToBottom();
+        };
+        const onChatMoreSwipe = async (i) => {
+            await (ctx.chatMoreSwipe ? ctx.chatMoreSwipe(i, sidebarParamOverrides.value) : Promise.resolve());
+            scrollChatToBottom();
+        };
+        const onChatRegenerate = async (i) => {
+            await (ctx.chatRegenerateSwipe ? ctx.chatRegenerateSwipe(i, sidebarParamOverrides.value) : Promise.resolve());
+            scrollChatToBottom();
+        };
+        const onChatContinue = async (i) => {
+            await (ctx.chatContinueSwipe ? ctx.chatContinueSwipe(i, sidebarParamOverrides.value) : Promise.resolve());
+            scrollChatToBottom();
+        };
+        /** 分段渲染开关状态（「渲染/代码」按钮改为显示该开关，点击切换并落 chatStorage） */
+        const chatSegEnabled = ref(getChatFlag('seg'));
+        const toggleChatSeg = () => {
+            chatSegEnabled.value = !chatSegEnabled.value;
+            setChatFlag('seg', chatSegEnabled.value);
+        };
+
         return {
+            // ⚙ 测卡消息区（新编排引擎）
+            chatMessages, chatDraft, chatSending, cardName,
+            segmentsOfMsg, renderChatHtml, chatVarsJsonSafe, chatContainer,
+            onChatSend, onChatMoreSwipe, onChatRegenerate, onChatContinue,
+            scrollChatToBottom, chatSegEnabled, toggleChatSeg,
+            // ⚙ 测卡工作区侧边栏（7 分区）
+            sidebarVisible, sidebarWidth, chatStorageReady,
+            chatCardPath, chatCardName, chatPresetOptions, chatRegexList, chatWbList,
+            chatVarsTree, chatVarsLog, chatVarsStats, chatSessions, chatActiveSessionId,
+            sidebarParamOverrides,
+            onSidebarToggleRegex, onSidebarToggleWb, onSidebarSetWbPosition, onSidebarSetWbOrder,
+            onSidebarParamsChanged, onSidebarNewSession, onSidebarSwitchSession,
+            onSidebarRenameSession, onSidebarRemoveSession, onSidebarRemovePlugin,
+            onSidebarResetVars, onSidebarUndoVar, onSidebarSetVar, onSidebarSetFlag,
             // ✅ [状态栏预览] 模板库合并：📚 渲染模板 / 📜 世界书指令 双选项卡 + 整体折叠
             statusLibTab: ref('render'),
             statusLibCollapsed: ref(false),
@@ -1840,23 +2138,13 @@ export default {
             loaderUrls: ctx.loaderUrls,
             injectStatusbarTemplate: ctx.injectStatusbarTemplate,
             injectStatusbarPrompt: ctx.injectStatusbarPrompt,
+            // ⚙ 测卡头部状态条：API 配置已由右侧抽屉「设置」分区承担，此处只读展示摘要
+            //    （原 API: / Key: / Model: / 拉取模型 一整条已移除）
             apiEndpoint: ctx.apiEndpoint,
             apiKey: ctx.apiKey,
             apiModel: ctx.apiModel,
-            availableModels: ctx.availableModels,
-            isFetchingModels: ctx.isFetchingModels,
-            fetchAvailableModels: ctx.fetchAvailableModels,
-            fetchModelStatus: ctx.fetchModelStatus,
-            isChatRenderMode: ctx.isChatRenderMode,
-            clearChat: ctx.clearChat,
-            chatContainer: ctx.chatContainer,
-            chatHistory: ctx.chatHistory,
+            apiType: ctx.apiType,
             renderHTML: ctx.renderHTML,
-            renderSafeHTML: ctx.renderSafeHTML,
-            cleanMarkdownFences: ctx.cleanMarkdownFences,
-            isChatting: ctx.isChatting,
-            chatInput: ctx.chatInput,
-            sendMessage: ctx.sendMessage,
             formattedJson: ctx.formattedJson,
             rawJsonDraft: ctx.rawJsonDraft,
             applyRawJson: ctx.applyRawJson,

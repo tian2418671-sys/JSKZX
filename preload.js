@@ -102,6 +102,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     downloadCardFromUrl: (data) => ipcRenderer.invoke('card:downloadFromUrl', data),
     encryptSecret: (plain) => ipcRenderer.invoke('secret:encrypt', plain),
     decryptSecret: (cipher) => ipcRenderer.invoke('secret:decrypt', cipher),
+    // 💬 测卡数据专属落盘（会话/变量树/聊天设置）：独立 chat_store.json，原子写入。
+    //    ⚠️ 刻意不走 sys:saveConfig —— 后者是「整份 app_config.json 全量替换」，
+    //    而 app_config.json 的权威 payload 由渲染层 useConfigPersistence 全量生成，
+    //    任何第三方部分写入都会被下一次 syncConfigToDisk 覆盖，并反过来覆盖掉别人的字段。
+    loadChatStore: () => ipcRenderer.invoke('chatStore:load'),
+    saveChatStore: (data) => ipcRenderer.invoke('chatStore:save', data),
     // 🌍 世界书专属通道：新建世界书文件（网址导入落盘）
     createWorldbook: (params) => ipcRenderer.invoke('wb:create', params),
     // 🌍 世界书专属通道：重命名世界书物理文件

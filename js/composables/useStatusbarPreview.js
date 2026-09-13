@@ -25,7 +25,8 @@ import { STATUSBAR_PROMPT_TEMPLATES, STATUSBAR_PROMPT_META, findStatusbarPrompt 
 // 解析脚本里的正则字符串 → RegExp；兼容 '/pattern/flags' 与裸 'pattern' 两种写法
 // 返回 null 表示非法正则（调用方跳过该脚本，绝不抛错卡死预览）
 // 🔒 安全加固：杜绝「模块片段 / 半截正则」被无脑当作有效正则导入
-function parseRegexPattern(str) {
+// ⚠️ 本函数经 export 供测卡渲染链路复用（移动版同名模块亦为导出，两端保持同签名）
+export function parseRegexPattern(str) {
     const raw = String(str || '').trim();
     if (!raw) return null;
 
@@ -64,6 +65,60 @@ function unescapeHtmlEntities(str) {
             .replace(/&#39;/g, "'").replace(/&apos;/g, "'").replace(/&amp;/g, '&');
 }
 
+// 🚀 对齐酒馆 addDOMPurifyHooks：链接强制新窗口打开，防点击链接把页面整体导航走
+let sanitizeHooksInstalled = false;
+function installSanitizeHooks() {
+    if (sanitizeHooksInstalled) return;
+    sanitizeHooksInstalled = true;
+    try {
+        DOMPurify.addHook('afterSanitizeAttributes', (node) => {
+            if (node.tagName === 'A') {
+                node.setAttribute('target', '_blank');
+                node.setAttribute('rel', 'noopener noreferrer');
+            }
+        });
+    } catch (e) { /* 钩子失败不影响主流程 */ }
+}
+
+/**
+ * DOMPurify 白名单清洗（测卡消息文本段渲染用；与移动版 `composables/useStatusbarPreview.js`
+ * 的同名导出逐行对齐，保证两端渲染行为一致）
+ *  - 剥离 Markdown 代码块围栏 / loader 直链块，禁止事件属性与外联追踪
+ *  - 放行 <a href>（http/https/mailto/tel）+ 新窗口钩子，使标题/列表/表格等 Markdown 全量生效
+ *
+ * ⚠️ 与下方 useStatusbarPreview 内部的 `sanitizePreviewHtml` 是两条独立管线：
+ *    后者是状态栏预览既有实现（不放开 <a>/href），本次刻意不改动以免影响既有预览行为；
+ *    两者策略接近但白名单不同，后续如需合并请先回归状态栏预览。
+ */
+export function sanitizeStatusHtml(text) {
+    if (!text) return '';
+    installSanitizeHooks();
+    let t = String(text);
+    // 🧹 剥离 Markdown 代码块围栏（```html ```json 等）
+    t = t.replace(/```[a-zA-Z]*\n?/gi, '').replace(/```/g, '');
+    // loader/script 直链块交给 iframe 渲染，清洗前先剥离（DOMPurify 必删 <script>，留着会出现空壳）
+    const textWithoutLoader = extractLoaderUrls(t).length > 0
+        ? t.replace(/\$\(\s*['"]body['"]\s*\)\s*\.\s*load\s*\(\s*['"][^'"]+['"]\s*\)\s*;?/gi, '')
+             .replace(/<script[^>]*>\s*\$\(\s*['"]body['"][\s\S]*?<\/script>/gi, '')
+             .replace(/<(?:script|iframe)[^>]+src\s*=\s*['"]https?:\/\/[^'"]+['"][^>]*>(?:[\s\S]*?<\/script>)?/gi, '')
+        : t;
+    return DOMPurify.sanitize(textWithoutLoader, {
+        ALLOWED_TAGS: [
+            'b', 'i', 'em', 'strong', 'u', 's', 'br', 'p', 'div', 'span', 'a',
+            'ul', 'ol', 'li', 'blockquote', 'code', 'pre', 'img', 'hr',
+            'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+            'table', 'thead', 'tbody', 'tr', 'td', 'th',
+            'progress', 'details', 'summary', 'font', 'center', 'small', 'sub', 'sup'
+        ],
+        ALLOWED_ATTR: ['class', 'style', 'src', 'alt', 'title', 'width', 'height', 'href',
+            'align', 'valign', 'colspan', 'rowspan', 'bgcolor', 'color', 'max', 'value'],
+        ALLOW_DATA_ATTR: false,
+        FORBID_ATTR: ['onerror', 'onload', 'onclick', 'onmouseover', 'onfocus', 'onblur', 'onchange', 'oninput', 'onanimationstart', 'onanimationend', 'onpointerdown', 'onpointerup', 'onpointermove', 'ondragstart', 'ondrop'],
+        // 🚀 放行 http(s)/mailto/tel 链接与内嵌 base64 图；事件属性已被 FORBID_ATTR 全量拦截
+        ALLOWED_URI_REGEXP: /^(?:https?:|mailto:|tel:|data:image\/|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i
+    });
+}
+
 // =========================================================
 // 🧭 模板分类器：把脚本 replaceString 分为五类（杜绝「片段冒充模板」「代码形态漏检」）
 //   loader   — 外链 GUI：$('body').load('URL')（宽松：不要求 <body> 包裹）或 <iframe> src 直链
@@ -72,7 +127,7 @@ function unescapeHtmlEntities(str) {
 //   fragment — 片段级：单个简单标签的小修饰（<br>、<b>$1</b> 等），不构成完整模板，排除
 //   none     — 纯文本替换，与渲染无关
 // =========================================================
-function classifyTemplate(repStr) {
+export function classifyTemplate(repStr) {
     const raw = String(repStr || '');
     // 转义态识别：反转义后出现标签而原文没有 → 存储时被转义了，用反转义版本
     const unescaped = unescapeHtmlEntities(raw);
@@ -127,7 +182,7 @@ function classifyTemplate(repStr) {
 
 // 从文本中提取全部外链 GUI 的 URL（仅 http/https 直链；输入可能是 AI 原文或脚本替换后的结果）
 // 宽松策略：$('body').load('URL') 不要求 <body> 包裹；兼容 <script>/<iframe> src 直链
-function extractLoaderUrls(text) {
+export function extractLoaderUrls(text) {
     if (!text) return [];
     // 剥离 ``` 围栏（AI 输出常把 loader 块包在代码块里，酒馆渲染时围栏会被正则一并吃掉）
     const cleaned = String(text).replace(/```[a-zA-Z]*\n?/gi, '').replace(/```/g, '');
