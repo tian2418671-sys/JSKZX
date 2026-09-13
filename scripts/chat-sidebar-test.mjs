@@ -11,6 +11,7 @@
  *   C 每个分区点击后内容真的渲染（分区特征词命中）且侧边栏不被卸载
  *   D 预设下拉读取桌面预设库
  *   E chatStore IPC 往返可用（真实 preload 通道）
+ *   H 长期记忆 memory:* 通道往返可用（add / stats / list / search / remove，探针用完即删）
  *   F 底部状态条显示「已恢复」（证明 hydrate 成功）
  *   G 全程无渲染层报错
  *
@@ -90,7 +91,10 @@ const ENTER_CHAT = `(async () => {
     const has = () => !!(${DRAWER});
     if (has()) return JSON.stringify({ ok: true, already: true });
     if (!leaf('💬 聊天测试')) {
-        const card = [...document.querySelectorAll('div.cursor-pointer')].find(d => (d.textContent || '').includes('🌍'));
+        // 优先「有世界书」的卡（列表项带 🌍 徽标）；本库一张都没有时兜底为任意带封面的卡
+        // （2026-09-13 实测：E:\AI\酒馆工具\角色卡 75 张小库无 🌍 徽标 → 旧写法卡在 no-card-row）
+        const card = [...document.querySelectorAll('div.cursor-pointer')].find(d => (d.textContent || '').includes('🌍'))
+            || [...document.querySelectorAll('div.cursor-pointer')].find(d => d.querySelector('img'));
         if (!card) return JSON.stringify({ ok: false, step: 'no-card-row' });
         card.click();
         await new Promise(r => setTimeout(r, 3000));
@@ -209,6 +213,35 @@ const STORAGE_ROUNDTRIP = `(async () => {
     });
 })()`;
 
+const MEMORY_ROUNDTRIP = `(async () => {
+    const api = window.electronAPI;
+    if (!api || typeof api.memoryAdd !== 'function')
+        return JSON.stringify({ ok: false, reason: 'memory:* 通道未暴露' });
+    const probe = '探针记忆' + Date.now();
+    const before = await api.memoryStats();
+    const add = await api.memoryAdd({ type: 'fact', key: '探针键', content: probe });
+    const afterAdd = await api.memoryStats();
+    const list = await api.memoryList({ type: 'fact', limit: 50 });
+    const listed = ((list && list.items) || []).some((it) => it.content === probe);
+    const search = await api.memorySearch({ query: probe, limit: 5 });
+    const found = ((search && search.items) || []).some((it) => it.content === probe);
+    // 去重：同内容再写一次不应增加条数（合并更新时间戳）
+    const dup = await api.memoryAdd({ type: 'fact', key: '探针键', content: probe });
+    const afterDup = await api.memoryStats();
+    const merged = !!(dup && dup.merged) && afterDup.total === afterAdd.total;
+    await api.memoryRemove(add.id);
+    const cleaned = await api.memoryStats();
+    return JSON.stringify({
+        ok: !!(add && add.success) && listed && found && merged,
+        addSuccess: !!(add && add.success),
+        listed, found, merged,
+        totalBefore: before && before.total,
+        totalAfterAdd: afterAdd && afterAdd.total,
+        cleanedUp: (cleaned && cleaned.total) === (before && before.total),
+        byType: afterAdd && afterAdd.byType
+    });
+})()`;
+
 async function main() {
     await connect(await getWs());
     await send('Runtime.enable');
@@ -239,6 +272,7 @@ async function main() {
     await run(clickSection('🎛 设置'));
     out.steps.drawerSettings = await run(READ_DRAWER_SETTINGS);
     out.steps.storage = await run(STORAGE_ROUNDTRIP);
+    out.steps.memory = await run(MEMORY_ROUNDTRIP);
 
     out.tabs = [];
     for (const label of SECTIONS) {
@@ -262,6 +296,7 @@ async function main() {
         && out.steps.presetSelect.found && out.steps.presetSelect.optionCount > 1
         && headerOk
         && out.steps.storage.ok && out.steps.storage.cleanedUp
+        && out.steps.memory.ok && out.steps.memory.cleanedUp
         && tabsOk
         && out.steps.footer.drawerAlive && out.steps.footer.hasRecovered
         && out.errors.length === 0;

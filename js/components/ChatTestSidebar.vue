@@ -319,9 +319,22 @@
                     <input type="number" min="1" max="200" :value="memLimit" @change="onMemLimit($event.target.value)"
                            class="w-16 bg-zinc-800 border border-zinc-700 rounded px-1.5 py-0.5 text-[10px] text-zinc-200 outline-none">
                 </div>
-                <p class="text-[9px] text-amber-500/90 leading-relaxed bg-amber-500/5 border border-amber-500/20 rounded p-1.5">
-                    ⚠️ 桌面版尚未实现记忆存储通道（主进程无 <code>memory:*</code> IPC）。当前开关可保存，但检索结果恒为空 —— 需二期补 <code>main.js</code> + <code>preload.js</code>。
-                </p>
+                <!-- 记忆库状态（桌面版 memory:* 通道已实现：memory_store.json） -->
+                <div class="text-[9px] text-zinc-400 bg-zinc-800/60 border border-zinc-700/70 rounded p-1.5 space-y-1">
+                    <div class="flex items-center justify-between gap-2">
+                        <span>已存 <b class="text-cyan-300">{{ memStats.total }}</b> 条
+                            <span class="text-zinc-500">（事实 {{ memStats.byType.fact || 0 }} · 摘要 {{ memStats.byType.summary || 0 }} · 消息 {{ memStats.byType.message || 0 }}）</span>
+                        </span>
+                        <button @click="refreshMemStats" class="text-cyan-400 hover:text-cyan-300 shrink-0">刷新</button>
+                    </div>
+                    <div class="flex items-center justify-between gap-2">
+                        <span class="text-zinc-600">存于 memory_store.json，与卡片配置互相独立</span>
+                        <button v-if="!memClearArmed" @click="armMemClear"
+                                class="text-rose-400 hover:text-rose-300 shrink-0">清空</button>
+                        <button v-else @click="doMemClear"
+                                class="text-white bg-rose-600 hover:bg-rose-500 rounded px-1.5 shrink-0">确认清空？</button>
+                    </div>
+                </div>
             </template>
 
             <!-- ============ 7. 插件 ============ -->
@@ -383,7 +396,7 @@ import {
     getReplyCount, setReplyCount, getUserName, setUserName, getUserPersona, setUserPersona, getMaxFloors, setMaxFloors
 } from '../composables/chat/useChatSettings.js';
 import {
-    isMemoryEnabled, setMemoryEnabled, getMemoryLimit, setMemoryLimit
+    isMemoryEnabled, setMemoryEnabled, getMemoryLimit, setMemoryLimit, getMemoryStats, clearMemory
 } from '../composables/chat/useChatMemory.js';
 import {
     loadSessions, setLastSessionId
@@ -481,6 +494,9 @@ export default {
             userPersona: '',
             memEnabled: true,
             memLimit: 20,
+            // 长期记忆库统计（memory:stats）：条数 + 分类；清空按钮两段式二次确认
+            memStats: { total: 0, byType: {} },
+            memClearArmed: false,
             // 变量树展开态（路径集合）
             expandedVarPaths: {},
             _unwatch: null
@@ -538,7 +554,7 @@ export default {
         }
     },
     watch: {
-        activeTab(t) { if (t === 'chat' || t === 'plugins') this.refreshLocal(); },
+        activeTab(t) { if (t === 'chat' || t === 'plugins' || t === 'settings') this.refreshLocal(); },
         // chatStorage.hydrate() 完成后重读一次：否则侧栏显示的是「首次运行的默认值」，
         // 而磁盘里其实有上次退出时保存的回复数/用户名/人设。
         storageReady(v) { if (v) this.refreshLocal(); },
@@ -562,6 +578,7 @@ export default {
             this.userPersona = getUserPersona();
             this.memEnabled = isMemoryEnabled();
             this.memLimit = getMemoryLimit();
+            this.refreshMemStats();   // 切到「设置」/挂载时刷新记忆条数（异步，失败退化为 0）
         },
         ppKey(p, i) { return (p && p.identifier) ? p.identifier : ('idx' + i); },
         /** 数组兜底：任何来源的列表（props / 引擎 / 预设 JSON）都可能缺失或非数组，
@@ -695,8 +712,19 @@ export default {
         setMaxFloors(v) { setMaxFloors(v); this.maxFloors = getMaxFloors(); },
         onMemToggle(v) { setMemoryEnabled(v); this.memEnabled = isMemoryEnabled(); },
         onMemLimit(v) { setMemoryLimit(v); this.memLimit = getMemoryLimit(); },
-
-        // ---------------- 7. 插件 ----------------
+    /** 读取记忆库统计（memory:stats → 条数/分类）；失败则退化为 0 条，不影响 UI */
+    async refreshMemStats() {
+        const s = await getMemoryStats();
+        this.memStats = s;
+        this.memClearArmed = false;
+    },
+    armMemClear() { this.memClearArmed = true; this.$emit('log', '⚠️ 再次点击「确认清空？」才会删除长期记忆'); },
+    async doMemClear() {
+        const before = this.memStats.total;
+        const res = await clearMemory('');
+        await this.refreshMemStats();
+        this.$emit('log', res && res.success ? `🧹 已清空长期记忆（${before} 条）` : '⚠️ 清空长期记忆失败');
+    },
         importPlugin() {
             this.pluginImportError = '';
             const raw = String(this.pluginImportText || '').trim();

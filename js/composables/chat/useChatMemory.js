@@ -118,6 +118,22 @@ export async function listMemory(type, limit) {
     }
 }
 
+/**
+ * 记忆库统计（条数 + 分类），供侧栏「设置」分区显示。
+ * 桌面版 memory:* 通道已实现（main/memoryStore.js + memory_store.json）；
+ * 非 Electron 环境下 chatBridge 会给出失败桩 → 这里退化为 0 条，不报错。
+ */
+export async function getMemoryStats() {
+    try {
+        if (typeof api.memoryStats !== 'function') return { total: 0, byType: {} };
+        const res = await api.memoryStats();
+        if (!res || !res.success) return { total: 0, byType: {} };
+        return { total: Number(res.total) || 0, byType: (res.byType && typeof res.byType === 'object') ? res.byType : {} };
+    } catch (e) {
+        return { total: 0, byType: {} };
+    }
+}
+
 export async function removeMemory(id) {
     try { return await api.memoryRemove(id); } catch (e) { return { success: false }; }
 }

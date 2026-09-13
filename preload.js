@@ -108,6 +108,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
     //    任何第三方部分写入都会被下一次 syncConfigToDisk 覆盖，并反过来覆盖掉别人的字段。
     loadChatStore: () => ipcRenderer.invoke('chatStore:load'),
     saveChatStore: (data) => ipcRenderer.invoke('chatStore:save', data),
+    // 🧠 测卡·长期记忆通道（独立 memory_store.json，原子写入；契约与移动版 api.memory* 一致）
+    //    桌面版过去只有 chatBridge 的失败桩（记忆检索恒为空），2026-09-13 补齐：
+    //    发送前 buildMemoryContext 检索注入 system，发送后 recordMessage/recordFact 写入。
+    memoryAdd: (payload) => ipcRenderer.invoke('memory:add', payload),
+    memoryUpdate: (id, patch) => ipcRenderer.invoke('memory:update', { id, patch }),
+    memoryRemove: (id) => ipcRenderer.invoke('memory:remove', id),
+    memoryClear: (type) => ipcRenderer.invoke('memory:clear', type),
+    memoryList: (payload) => ipcRenderer.invoke('memory:list', payload),
+    memorySearch: (payload) => ipcRenderer.invoke('memory:search', payload),
+    memoryStats: () => ipcRenderer.invoke('memory:stats'),
     // 🌍 世界书专属通道：新建世界书文件（网址导入落盘）
     createWorldbook: (params) => ipcRenderer.invoke('wb:create', params),
     // 🌍 世界书专属通道：重命名世界书物理文件

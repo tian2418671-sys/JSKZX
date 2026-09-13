@@ -15,6 +15,7 @@ const fsp = require('fs/promises'); // 🚀 v1.8.5 异步文件 IO（库目录�
 const os = require('os');
 const { pathToFileURL } = require('url');
 const crypto = require('crypto'); // 📸 快照内容去重（SHA-256）
+const { createMemoryStore } = require('./main/memoryStore.js'); // 🧠 长期记忆存储（测卡二期）
 
 // 📸 换卡图：非 PNG 新图转 PNG（可选依赖；未安装/加载失败时 PNG→PNG 换图仍可用）
 let sharp = null;
@@ -558,6 +559,10 @@ const APP_CONFIG_PATH = path.join(app.getPath('userData'), 'app_config.json');
 //    全量生成 payload 后原子覆盖），若把聊天记录混进去，任何部分写入都会被下一次
 //    syncConfigToDisk 覆盖，且反过来会覆盖掉别人的字段。独立文件互不干扰。
 const CHAT_STORE_PATH = path.join(app.getPath('userData'), 'chat_store.json');
+// 🧠 【长期记忆独立落盘】测卡长期记忆（L1 消息 / L2 摘要 / L3 事实）。
+//    移动版走 Android 原生 MemoryPlugin（SQLite），桌面版用单文件 JSON + 原子写补齐同套契约，
+//    存储层与单测见 main/memoryStore.js、test/memoryStore.test.mjs。
+const MEMORY_STORE_PATH = path.join(app.getPath('userData'), 'memory_store.json');
 
 // 原子写 JSON 配置文件（写临时文件 + rename 原子替换，绝不在原文件上直接覆盖）
 // 🚀 v1.8.5 性能修复：同步 writeFileSync/renameSync 改 fs/promises 异步版 ——
@@ -1271,6 +1276,43 @@ app.whenReady().then(() => {
       });
     return chatStoreWriteChain;
   });
+
+  // ==========================================
+  // 🧠 测卡·长期记忆通道（memory_store.json）
+  // 补齐移动版 `api.memory*` 契约（移动版走 Android 原生 MemoryPlugin/SQLite，桌面版过去只有失败桩）:
+  //   useChatMemory.buildMemoryContext() 发送前检索 → 注入 system「记忆表格」；
+  //   recordMessage/recordFact 发送后写入。存储层逻辑与单测见 main/memoryStore.js、test/memoryStore.test.mjs。
+  // 设计：懒加载单例（首次调用才读盘）+ 原子写（atomicWriteJson） + 存储层内部串行化落盘。
+  // ==========================================
+  let memoryStore = null;
+  const getMemoryStore = () => {
+    if (memoryStore) return memoryStore;
+    memoryStore = createMemoryStore({
+      load: async () => {
+        if (!fs.existsSync(MEMORY_STORE_PATH)) return null;
+        const raw = await fsp.readFile(MEMORY_STORE_PATH, 'utf-8');
+        return JSON.parse(raw);
+      },
+      save: (payload) => atomicWriteJson(MEMORY_STORE_PATH, payload)
+    });
+    return memoryStore;
+  };
+  /** 统一包装：存储层永不抛错，但 IPC 边界再加一层（防止意外的 同步异常 打到渲染层） */
+  const memoryHandler = (fn) => async (event, payload) => {
+    try {
+      return await fn(getMemoryStore(), payload);
+    } catch (e) {
+      console.error('[memory] IPC 失败:', e);
+      return { success: false, error: e.message };
+    }
+  };
+  ipcMain.handle('memory:add', memoryHandler((s, p) => s.add(p)));
+  ipcMain.handle('memory:update', memoryHandler((s, p) => s.update(p && p.id, p && p.patch)));
+  ipcMain.handle('memory:remove', memoryHandler((s, id) => s.remove(id)));
+  ipcMain.handle('memory:clear', memoryHandler((s, type) => s.clear(type)));
+  ipcMain.handle('memory:list', memoryHandler((s, p) => s.list(p)));
+  ipcMain.handle('memory:search', memoryHandler((s, p) => s.search(p)));
+  ipcMain.handle('memory:stats', memoryHandler((s) => ({ success: true, ...s.stats() })));
 
   // ==========================================
   // 🛡️ 统一持久化中枢（app_config.json 最高权威）

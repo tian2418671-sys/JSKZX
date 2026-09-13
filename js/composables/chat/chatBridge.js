@@ -18,7 +18,7 @@ if (typeof window !== 'undefined' && !real) {
 const stub = (name) => async () => ({ success: false, error: `[chatBridge] ${name} 在非 Electron 环境不可用` });
 
 /** 记忆通道：preload 未暴露时用桩兜底，避免直接抛 undefined is not a function */
-const MEMORY_METHODS = ['memoryAdd', 'memoryUpdate', 'memoryRemove', 'memoryClear', 'memoryList', 'memorySearch'];
+const MEMORY_METHODS = ['memoryAdd', 'memoryUpdate', 'memoryRemove', 'memoryClear', 'memoryList', 'memorySearch', 'memoryStats'];
 
 const FALLBACK = {
     encryptSecret: async (v) => ({ success: true, value: v }),   // 无加密环境回退明文

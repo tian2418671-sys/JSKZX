@@ -93,6 +93,27 @@ const BOOT = `(async () => {
     });
 })()`;
 
+const T_MEMORY = `(async () => {
+    const api = window.electronAPI;
+    if (!api || typeof api.memoryAdd !== 'function') return JSON.stringify({ available: false });
+    // 用真实模块实例构建记忆上下文（与引擎同一份契约；不 import 引擎本体以免双实例陷阱）
+    const mem = await import('/js/composables/chat/useChatMemory.js');
+    mem.setMemoryEnabled(true);
+    const probe = '记忆注入探针' + Date.now();
+    const add = await api.memoryAdd({ type: 'fact', key: '探针键', content: probe });
+    const ctx = await mem.buildMemoryContext(probe);
+    const injected = typeof ctx === 'string' && ctx.includes('记忆表格') && ctx.includes(probe);
+    await api.memoryRemove(add && add.id);
+    const after = await mem.buildMemoryContext(probe);
+    return JSON.stringify({
+        available: true,
+        added: !!(add && add.success),
+        injected,
+        ctxLen: (ctx || '').length,
+        removedFromContext: !String(after || '').includes(probe)
+    });
+})()`;
+
 const T_MACROS = `(() => {
     const m = window.__jskChatEngine.macros();
     return JSON.stringify({
@@ -275,6 +296,7 @@ async function main() {
     out.payloadWithPreset = await run(T_PAYLOAD_WITH_PRESET);
     out.segments = await run(T_SEGMENTS);
     out.sessionSwipe = await run(T_SESSION_SWIPE);
+    out.memory = await run(T_MEMORY);
     out.errors = errors.slice(0, 8);
 
     const wbSkipped = out.boot.wbCard === false;
@@ -290,6 +312,7 @@ async function main() {
         && out.payloadWithPreset.hasHistoryInjected && out.payloadWithPreset.anthropicHasSystemField && out.payloadWithPreset.anthropicNoSystemRole
         && out.segments.textHasTextSeg && out.segments.htmlHasHtmlSeg
         && out.sessionSwipe.sessionIdPresent && out.sessionSwipe.swipeWorks
+        && out.memory.available && out.memory.added && out.memory.injected && out.memory.removedFromContext
         && out.errors.length === 0;
 
     console.log(JSON.stringify(out, null, 2));

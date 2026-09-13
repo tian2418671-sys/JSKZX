@@ -113,6 +113,25 @@
 
 ---
 
+## 🚀 v2.2.7（四）测卡工作区补齐长期记忆通道（2026-09-13 晚）
+
+移动版长期记忆走 Android 原生 SQLite，桌面版过去只有失败桩（开关能存、检索恒为空，UI 明确标注「二期补」）。本次按同套契约补齐：
+
+- 新增 `main/memoryStore.js`（可单测的存储层）+ `memory:*` 七个 IPC + `userData/memory_store.json`（原子写 + 写入串行化）
+- `preload` 暴露 6 个方法；侧栏「设置」分区新增记忆库面板（总条数与事实/摘要/消息分类、刷新、**两段式二次确认清空**），移除「暂不可用」占位提示
+- 语义与移动版对齐：同 `(type/key/content/cardName)` **去重合并**、每类保留最新 500 条、content 4KB 上限；
+  检索为中文 2-gram + 英文词切分，按「命中率 × 类型权重（fact > summary > message）+ 时间新鲜度」排序
+- `ChatTestSidebar` 三处未定义的 `chatMvuEnabled/chatEjsEnabled/chatSegRenderEnabled` 死 prop 与其绑定已清理
+  （每次渲染刷 3 条 Vue 告警 → 实测告警数 0）
+- 两个端到端脚本的卡片选择兼容「库里没有带世界书徽标的卡」的场景（不再卡在 `no-card-row`）
+
+**验证**：`npm test` **187/187**（新增 `test/memoryStore.test.mjs` 9 例）；侧栏端到端新增断言 H（记忆往返 +
+去重合并 + 清理干净）；引擎端到端新增断言：写入事实后 `buildMemoryContext()` 产出含「记忆表格」的 system 片段，删除后即消失。
+
+> 同时整理了文档：新增 [`docs/README.md`](docs/README.md) 索引，移动版侧栏参考稿归位 `docs/reference/`。
+
+---
+
 ## ✨ v2.2.6 —— 预设缝合中心 + 四处条目批量操作
 
 > 背景：预设之间搬运提示词条目此前只能「复制整份预设再手改」。新增 **缝合中心**：把 1~N 本源预设的条目 + 手写自定义条目，缝进任意目标预设，支持 **新建 / 覆盖 / 写回当前** 三种输出。
