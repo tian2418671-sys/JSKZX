@@ -21,6 +21,18 @@
  *  避免一张卡就把倒排表撑成千万级条目。超限部分不影响常规检索体验。 */
 const MAX_INDEX_TEXT = 200000;
 
+/**
+ * 跨代沿用用的「卡片身份键」：与 `refreshLibrary` 的复用规则（path + mtime）保持一致。
+ * 键里带 size 是为了防止「同一 mtime 内容被替换」的极端情形。
+ * 无 path 的卡（尚未落盘）返回 ''，不参与沿用，老实重算。
+ */
+const keyOfCard = (card) => {
+    if (!card || typeof card !== 'object') return '';
+    const p = card.path || card.filePath || '';
+    if (!p) return '';
+    return `${p}|${card._mtime || 0}|${card._size || 0}`;
+};
+
 const clampText = (raw) => {
     const s = String(raw == null ? '' : raw);
     return (s.length > MAX_INDEX_TEXT ? s.slice(0, MAX_INDEX_TEXT) : s).toLowerCase();
@@ -100,11 +112,18 @@ class SearchIndex {
         this.pendingCards = 0;
         // 代次号：clear() 与每次新构建都递增
         this.generation = 0;
+        // 🔁 跨代沿用（P2）：key → 该卡 token 列表。token 都是上一代索引 Map 的 **key 对象**
+        //    （interned，字符串共享）→ 22k 卡约 +70MB，换来的是「未变动卡不再重新分词」
+        //    （它的价值在于：P1 把正文砍掉后，刷新仍然能重建索引）。
+        this.carry = new Map();
+        this._carryExtractText = null;
+        /** 本次构建中「沿用上一代 token」的卡数（压测/自检用：全量应为 0，刷新应接近全库） */
+        this.reusedCards = 0;
     }
 
     /** 申请一份空缓冲（与活跃表同构，供暂存构建使用） */
     _blankBuffer() {
-        return { index: new Map(), cards: new Set(), cardTags: new WeakMap(), cardCount: 0 };
+        return { index: new Map(), cards: new Set(), cardTags: new WeakMap(), cardCount: 0, carry: new Map(), reused: 0 };
     }
 
     /** 一次性切换活跃表（双缓冲的「换缓冲」动作，同步、无中间态） */
@@ -113,21 +132,25 @@ class SearchIndex {
         this.cards = buf.cards;
         this.cardTags = buf.cardTags;
         this.cardCount = buf.cards.size;
+        this.carry = buf.carry || new Map();
+        this.reusedCards = buf.reused || 0;
     }
 
     /** 同步构建（小库/一次性场景）：直接换缓冲，不暴露半成品 */
-    build(library, extractText, extractTags) {
+    build(library, extractText, extractTags, opts = {}) {
         this.generation++;
         if (extractText) this._extractText = extractText;
         if (extractTags) this._extractTags = extractTags;
         const gen = this.generation;
         const buf = this._blankBuffer();
+        const prevCarry = (opts.reuse && this._carryExtractText === extractText) ? this.carry : null;
         for (const card of library || []) {
             if (gen !== this.generation) return this.stats(); // 已被更新的构建取代
-            this._indexCardInto(buf, card, extractText, extractTags);
+            this._indexCardInto(buf, card, extractText, extractTags, keyOfCard(card), prevCarry);
         }
         if (gen !== this.generation) return this.stats();
         this._swap(buf);
+        this._carryExtractText = extractText;
         this.buildTime = Date.now();
         return this.stats();
     }
@@ -136,13 +159,16 @@ class SearchIndex {
      * 异步分片构建索引：把大批量卡片拆成小块，块间让出主线程（idle 与定时器竞速），
      * 完成后一次性切换到新缓冲。
      */
-    async buildAsync(library, extractText, extractTags, chunkSize = 50) {
+    async buildAsync(library, extractText, extractTags, chunkSize = 50, opts = {}) {
         this.generation++;
         if (extractText) this._extractText = extractText;
         if (extractTags) this._extractTags = extractTags;
         const gen = this.generation; // 🛡️ 本次构建的代次
         const buf = this._blankBuffer();
         const cards = library || [];
+        // 🔁 沿用开关：仅当调用方明确 reuse、且抽取函数与上一代同一份时才启用
+        //    （抽取函数换了可能代表语义变了 → 必须重算，不能沿用）
+        const prevCarry = (opts.reuse && this._carryExtractText === extractText && this.carry.size) ? this.carry : null;
         this.building = true;
         this.pendingCards = cards.length;
         try {
@@ -150,7 +176,7 @@ class SearchIndex {
                 // 🛡️ 分片前先自检：已被更新的重建取代 → 立即退出，不再写入
                 if (gen !== this.generation) return this.stats();
                 const chunk = cards.slice(i, i + chunkSize);
-                for (const card of chunk) this._indexCardInto(buf, card, extractText, extractTags);
+                for (const card of chunk) this._indexCardInto(buf, card, extractText, extractTags, keyOfCard(card), prevCarry);
                 // 每处理一个 chunk 后 yield 给主线程
                 if (i + chunkSize < cards.length) {
                     // 🚦 让步：前台优先 idle（不抢渲染），后台/繁忙时走不受节流的通道；
@@ -160,6 +186,7 @@ class SearchIndex {
             }
             if (gen !== this.generation) return this.stats();
             this._swap(buf); // 🎯 双缓冲切换（此前查询一直用的是上一代完整索引）
+            this._carryExtractText = extractText;
             this.buildTime = Date.now();
             return this.stats();
         } finally {
@@ -175,20 +202,25 @@ class SearchIndex {
         if (extractText) this._extractText = extractText;
         if (extractTags) this._extractTags = extractTags;
         this.remove(card);
-        this._indexCardInto(this, card, this._extractText, this._extractTags);
+        this._indexCardInto(this, card, this._extractText, this._extractTags, keyOfCard(card), null);
+        this._carryExtractText = this._extractText;
     }
 
     remove(card) {
         if (!this.cards.has(card)) return;
-        // 💾 不依赖缓存文本：用构建时的抽取函数复算（避免万卡库常驻 ~531MB 文本副本）
-        const text = this._extractText ? clampText(this._extractText(card)) : '';
-        for (const word of this._tokenize(text)) {
+        // 💾 不依赖缓存文本：优先用沿用的 token 列表（P2 起），否则用构建时的抽取函数复算
+        //    （避免万卡库常驻 ~531MB 文本副本）。P1 砍正文后，这里也因为有 token 可查而不需正文。
+        const key = keyOfCard(card);
+        let tokens = key && this.carry.get(key);
+        if (!tokens) tokens = this._tokenize(this._extractText ? clampText(this._extractText(card)) : '');
+        for (const word of tokens) {
             const cards = this.index.get(word);
             if (!cards) continue;
             const next = cards.filter(item => item !== card);
             if (next.length) this.index.set(word, next);
             else this.index.delete(word);
         }
+        if (key) this.carry.delete(key);
         this.cards.delete(card);
         this.cardCount = this.cards.size;
     }
@@ -242,15 +274,20 @@ class SearchIndex {
      *    重叠构建时旧写法会让同一张卡在同一个倒排桶里出现两次，
      *    而中文单字搜索（精确 token 直通）会原样返回该桶 → 列表里同一张卡重复出现。
      */
-    _indexCardInto(buf, card, extractText, extractTags) {
+    _indexCardInto(buf, card, extractText, extractTags, key, prevCarry) {
         if (!card || typeof card !== 'object') return;
         if (typeof extractText !== 'function' || typeof extractTags !== 'function') return;
         if (buf.cards.has(card)) return;
-        const text = clampText(extractText(card));
         const tags = (extractTags(card) || []).map(tag => String(tag).toLowerCase());
         buf.cardTags.set(card, tags);
         buf.cards.add(card);
-        for (const word of this._tokenize(text)) {
+        // 🔁 未变动的卡：直接沿用上一代的 token（**不读正文**）——这是 P1 能把正文砍掉的前提
+        let tokens = (key && prevCarry && prevCarry.get(key)) || null;
+        if (tokens) buf.reused = (buf.reused || 0) + 1;
+        else tokens = this._tokenize(clampText(extractText(card)));
+        if (!buf.carry) buf.carry = new Map();
+        if (key) buf.carry.set(key, tokens);
+        for (const word of tokens) {
             const cards = buf.index.get(word) || [];
             cards.push(card);
             buf.index.set(word, cards);
@@ -259,17 +296,24 @@ class SearchIndex {
     }
 
     _tokenize(text) {
+        // ⚡ 性能关键路径（2026-09-13 实测）：万卡大库的索引全文可达 GB 级
+        //    （22k 卡实测待索引文本 ≈1.16GB，其中 80% 是世界书正文），
+        //    旧写法对每个字符跑两次正则（`/[\u4e00-\u9fff]/.test(char)`）→
+        //    十亿级正则调用，索引在 22k 卡上「建了十分钟还没完」（building 永真）。
+        //    改成 charCodeAt 区间比较：同样语义，快一个量级。
+        const s = String(text);
         const tokens = [];
         let word = '';
-        for (const char of String(text)) {
-            if (/[\u4e00-\u9fff]/.test(char)) {
-                if (word) tokens.push(word);
-                word = '';
-                tokens.push(char);
-            } else if (/[A-Za-z0-9_]/.test(char)) {
-                word += char;
-            } else {
-                if (word) tokens.push(word);
+        for (let i = 0; i < s.length; i++) {
+            const c = s.charCodeAt(i);
+            // CJK 统一表意文字（基本区 4E00-9FFF + 扩展 A 3400-4DBF）：按单字成 token
+            if ((c >= 0x4e00 && c <= 0x9fff) || (c >= 0x3400 && c <= 0x4dbf)) {
+                if (word) { tokens.push(word); word = ''; }
+                tokens.push(s[i]);
+            } else if ((c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 95) {
+                word += s[i];
+            } else if (word) {
+                tokens.push(word);
                 word = '';
             }
         }
@@ -297,6 +341,9 @@ class SearchIndex {
         this.buildTime = 0;
         this.building = false;
         this.pendingCards = 0;
+        this.carry = new Map();      // 🔁 沿用数据跟活跃索引同生死（clear 代表「推倒重来」）
+        this._carryExtractText = null;
+        this.reusedCards = 0;
     }
 
     stats() {
@@ -307,7 +354,8 @@ class SearchIndex {
             avgCardsPerWord: this.cardCount ? this.index.size / this.cardCount : 0,
             building: this.building,
             pendingCards: this.pendingCards,
-            generation: this.generation
+            generation: this.generation,
+            reusedCards: this.reusedCards
         };
     }
 }

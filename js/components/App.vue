@@ -560,7 +560,7 @@ import EditorPanel from './EditorPanel.vue'; // 右侧编辑器面板（角色�
 import PluginWorkspace from './PluginWorkspace.vue'; // 🧩 插件工作区（代码/效果双卡 + 沙箱效果预览）
 import SnapshotModal from './SnapshotModal.vue'; // 📸 历史快照列表与一键恢复弹窗
 import PushModal from './PushModal.vue'; // 🚀 推送目标选择与执行对话框
-import { processFile, extractBookEntries, compileAutoTagRules, defaultAutoTagRules } from '../utils/cardLoader.js';
+import { processFile, extractBookEntries, compileAutoTagRules, defaultAutoTagRules, normalizeCardData } from '../utils/cardLoader.js';
 // normalizeCardData / isCharacterCardData / autoTagRules（cardLoader）与 parsePNGChunk / deepScanForJSON（pngParser）
 // 已随导入入库域迁移至 useCardCrud 组合式函数，由其自行 import
 import { estimateTokens } from '../utils/tokenEstimate.js'; // Token 估算（与 TextModal 共享）
@@ -589,6 +589,9 @@ import { useDiskScan } from '../composables/useDiskScan.js'; // 💽 磁盘卡�
 import { useBatch } from '../composables/useBatch.js'; // ✅ 批量操作（多选/批量导出/批量删除/批量打标）组合式函数
 import searchIndex, { waitForIdle } from '../utils/searchIndex.js'; // 🚀 高性能搜索索引引擎
 import tokenCache from '../utils/tokenCache.js'; // 🚀 Token 估算缓存
+import { createMemoryGuard } from '../utils/memoryGuard.js'; // 🧠 内存守门员（OOM → 主动降级）
+import { migrateChatKeys } from '../composables/chat/chatStorage.js'; // 🧭 测卡会话/变量树的键随物理路径迁移
+import { slimCard, ensureCardFull, ensureCardsFull, isSlim, slimStats, SLIM_MIN_LIBRARY } from '../utils/cardSlim.js'; // 🪶 P1a 大库正文懒加载
 
 /** 用户可读的错误提示映射 */
 const ERROR_MESSAGES = {
@@ -1873,6 +1876,26 @@ export default {
 
         // ================= 全局资产中枢 (世界书/正则共享库) =================
         const showGlobalAssetModal = ref(false);
+        // 🪶 P1a：全局资产库/全库词条需要正文。打开时**后台逐批还原**（不阻塞面板弹出，
+        //    条目会边还原边出现），关闭时立即重新压缩把内存交回去。
+        //    ⚠️ 只在用户主动打开时才付这份内存（22k 卡约 1.3GB），不打开就一直省着。
+        let globalAssetExpandToken = 0;
+        watch(showGlobalAssetModal, (open) => {
+            if (!open) {
+                globalAssetExpandToken++;                 // 取消在途还原的进度刷新
+                slimLibraryIfNeeded('asset-modal-closed');
+                return;
+            }
+            const token = ++globalAssetExpandToken;
+            ensureCardsFull(library.value, loadFullCardFromDisk, 8, (done, total) => {
+                if (token !== globalAssetExpandToken) return;
+                try { triggerRef(library); } catch (e) { /* 忽略 */ }
+                if (done === total) console.log(`[slim] 全局资产库：已还原 ${done} 张卡的正文（关闭面板后自动回收）`);
+            }).then((n) => {
+                if (token !== globalAssetExpandToken || !n) return;
+                try { addLog(`🔎 已还原 ${n} 张卡的正文供全局资产库浏览（关闭面板后自动回收）`, 'info'); } catch (e) { /* 忽略 */ }
+            });
+        });
         const globalAssetTab = ref('worldbook'); // 'worldbook' 或 'regex'
 
         // 聚合全库所有卡片的世界书条目 (附带所属卡片名字)
@@ -2596,7 +2619,21 @@ export default {
         };
 
         // 从库中点击打开卡片
-        const openFromLibrary = (item) => {
+        // 🪶 P1a：改成 async —— 大库压缩过的卡要先按 path 把正文读回来（全程保持 item.data 对象身份）
+        let openCardToken = 0;
+        const openFromLibrary = async (item) => {
+            if (!item) return;
+            const token = ++openCardToken;
+            if (isSlim(item)) {
+                const ok = await ensureCardFull(item, loadFullCardFromDisk);
+                if (token !== openCardToken) return;          // 期间又点了别的卡 → 放弃本次
+                if (!ok) {
+                    // ⚠️ 读不到正文时**绝不能**打开：否则编辑器各字段显示为空，用户一保存就把卡写空了
+                    nativeAlert(`读取卡片正文失败：${item.name || item.path}\n（文件可能已被移动/删除，或不是有效角色卡）`, 'error');
+                    return;
+                }
+                try { triggerRef(library); } catch (e) { /* 忽略 */ }
+            }
             // 🧹 切换卡片时释放上一张卡的 blob 预览（仅 blob: 引用需 revoke；local-file 永久路径无需）
             if (imgUrl.value && imgUrl.value.startsWith('blob:') && imgUrl.value !== (item && item.avatar)) {
                 try { URL.revokeObjectURL(imgUrl.value); } catch (e) { /* 忽略 */ }
@@ -3857,7 +3894,30 @@ export default {
         //    卡顿/界面冻结主因。卡片 data 引用在库内稳定，缓存命中率极高；
         //    编辑当前卡时由 refreshCardData 精确失效（WeakMap.delete）。
         const cardTokensCache = new WeakMap();
+
+        // 🧠 内存守门员（P0 容量专项，2026-09-13）
+        //    Chromium 默认老生代上限仅 4.19GB，而 22k 卡实测已用 3.05~3.26GB（73~78%），
+        //    刷新/索引重建的瞬时峰值极易顶穿 → 渲染进程崩溃（用户看到界面突然重来一遍）。
+        //    main.js 已把上限抬到 6GB 并开 --expose-gc；这里在逼近阈值时**主动**释放可重算缓存
+        //    并强制 GC，仍高就提示用户，而不是静默崩掉。
+        //    （真正把内存降下来的是 P1「列表只留元数据 + 正文懒加载」，本守门员是安全网。）
+        const memGuard = createMemoryGuard({
+            // 只丢「可重算」的缓存；索引与库数据是功能不是缓存，绝不在守门员里释放
+            releaseCaches: () => { try { tokenCache.clear(); } catch (e) { /* 忽略 */ } },
+            onWarn: (info) => console.info(`[mem] 水位 ${info.usedMB}MB/${info.limitMB}MB（${(info.ratio * 100).toFixed(0)}%，${info.reason}）→ 释放缓存+强制 GC，回收后 ${info.after.usedMB}MB`),
+            onCritical: (info) => {
+                console.warn(`[mem] 内存紧张 ${info.usedMB}MB/${info.limitMB}MB（${(info.ratio * 100).toFixed(0)}%）`);
+                try {
+                    addLog(`🧠 内存紧张（${(info.usedMB / 1024).toFixed(1)}GB / ${(info.limitMB / 1024).toFixed(1)}GB）：已自动回收缓存；建议用筛选/分类收窄列表，或减少库规模`, 'warning');
+                } catch (e) { /* 日志失败不影响主流程 */ }
+            },
+            intervalMs: 30000
+        });
+        memGuard.start();
+
         const estimateCardTokens = (card) => {
+            // 🪶 P1a：大库压缩后正文不在内存里，token 数已由压缩时存成小字段（扫描期算好的）
+            if (card && typeof card._tokens === 'number' && card._tokens > 0) return card._tokens;
             const dataKey = (card && (card.data || card)) || null;
             if (dataKey && typeof dataKey === 'object') {
                 const cached = cardTokensCache.get(dataKey);
@@ -3877,6 +3937,64 @@ export default {
             });
             if (dataKey && typeof dataKey === 'object') cardTokensCache.set(dataKey, total);
             return total;
+        };
+
+        // =========================================================
+        // 🪶 P1a：大库正文懒加载（压缩 / 按需还原）
+        // ---------------------------------------------------------
+        // 实测：22,372 张卡的库堆 2,891MB，其中**世界书词条正文 1,163MB**（429,144 条词条），
+        // 而列表/排序/索引都不需要它们。压缩后正文只在「打开某张卡」时按 path 读回来。
+        // ⚠️ 只能在**索引建完 + token 预热完之后**压缩（否则索引没正文可索引）；
+        //    刷新时未变动卡靠 P2 的 token 沿用重建索引，所以压缩不会让刷新失效。
+        // =========================================================
+
+        /** 按 path 把卡的完整正文读回（PNG 走主进程内嵌提取，JSON 直接读文本） */
+        const loadFullCardFromDisk = async (path) => {
+            if (!path || !window.electronAPI) return null;
+            try {
+                if (/\.json$/i.test(path)) {
+                    const txt = await window.electronAPI.readText(path);
+                    if (typeof txt !== 'string' || !txt.trim()) return null;
+                    return normalizeCardData(JSON.parse(txt));
+                }
+                if (typeof window.electronAPI.readEmbeddedBatch !== 'function') return null;
+                const res = await window.electronAPI.readEmbeddedBatch([{ path, size: 0, mtime: 0 }]);
+                const row = Array.isArray(res) ? res[0] : null;
+                if (!row || !row.ok || !row.data || typeof row.data !== 'object') return null;
+                return normalizeCardData(row.data);
+            } catch (e) {
+                console.warn('[slim] 读卡正文失败:', path, e && e.message);
+                return null;
+            }
+        };
+
+        /**
+         * 索引建完之后压缩整个库（仅大库；跳过当前打开的卡）
+         * @param {string} reason 日志用触发点
+         * @returns {number} 本次压缩的卡数
+         */
+        const slimLibraryIfNeeded = (reason = 'post-index') => {
+            const lib = library.value;
+            if (!Array.isArray(lib) || lib.length < SLIM_MIN_LIBRARY) return 0;
+            const openCard = cardData.value;
+            let slimmed = 0;
+            for (const item of lib) {
+                if (!item || typeof item !== 'object') continue;
+                if (item.data === openCard) continue;      // ★ 当前编辑的卡保持完整（防丢未保存编辑）
+                if (isSlim(item)) continue;
+                // 先把 token 数固化成小字段（压缩后就靠它排序展示）
+                try {
+                    if (typeof item._tokens !== 'number') item._tokens = estimateCardTokens(item);
+                } catch (e) { /* 算不出就算了 */ }
+                if (slimCard(item)) slimmed++;
+            }
+            if (slimmed) {
+                try { triggerRef(library); } catch (e) { /* 忽略 */ }
+                console.log(`[slim] 已压缩 ${slimmed} 张卡的正文（${reason}，保留字段：名称/标签/token/有无世界书）`);
+                try { addLog(`🪶 大库瘦身：已释放 ${slimmed} 张卡的正文（世界书词条按需加载）`, 'info'); } catch (e) { /* 忽略 */ }
+                memGuard.checkNow('slimmed');
+            }
+            return slimmed;
         };
 
         // 🔍 角色卡查重扫描与清理方法已拆分为组合式函数 useDedupe（见下文 setup 尾部调用）
@@ -4646,7 +4764,10 @@ export default {
                     // 异步分片构建索引（🚀 v2.2 提速：分片 50 → 100，万卡索引构建更快完成）
                     // 🧹 标签索引同样尊重「导入时忽略卡片自带标签」开关：开启时原生 data.tags 不入索引
                     const indexTagsFn = (item) => extractCardTags(item, { ignoreNative: sanitizeImportedTags.value });
-                    const stats = await searchIndex.buildAsync(newLibrary, extractCardSearchableText, indexTagsFn, 100);
+                    // 🔁 { reuse: true }：刷新时未变动的卡**沿用上一代 token**，不再重读正文重新分词
+                    //    （22k 卡实测待索引文本 ≈1.16GB，全量重分词是刷新最贵的一步；
+                    //     这也是 P1 砍掉正文后索引仍能重建的前提）
+                    const stats = await searchIndex.buildAsync(newLibrary, extractCardSearchableText, indexTagsFn, 100, { reuse: true });
                     if (taskId !== buildTaskId) return; // 被新的 watch 触发取消
                     console.log('⚡ 搜索索引构建完成:', stats);
 
@@ -4654,6 +4775,10 @@ export default {
                     await tokenCache.warmupAsync(newLibrary, 100);
                     if (taskId !== buildTaskId) return;
                     console.log('⚡ Token 缓存预热完成:', tokenCache.getStats());
+                    // 🧠 索引 + 预热结束后是高水位时刻，主动采一次样（比定时采样更及时）
+                    memGuard.checkNow('index-built');
+                    // 🪶 P1a：索引与 token 都就绪了，现在才可以把正文换出去（顺序不能反）
+                    slimLibraryIfNeeded('index-built');
                 } catch (e) {
                     console.error('⚠️ 搜索索引构建失败:', e);
                 } finally {
@@ -4732,6 +4857,7 @@ export default {
                 item.fileName = res.newPath.split(/[\\/]/).pop();
                 item.avatar = isImage ? `local-file://img/?path=${encodeURIComponent(res.newPath)}&_=${Date.now()}` : null;
                 migrateOverlayKey(oldPath, res.newPath); // 分组/标签覆盖层跟随新路径
+                migrateChatKeys(oldPath, res.newPath);   // 💬 测卡会话/变量树同样按 path 派生，也得迁移
                 // 若正打开该卡，刷新立绘显示
                 if (cardData.value && item.data === cardData.value) {
                     imgUrl.value = item.avatar;
@@ -4955,6 +5081,8 @@ export default {
                     //    `?t=` 查询参数拿到另一个模块实例，导致读数全错。
                     idx: searchIndex,
                     tokenCache,
+                    mem: memGuard,   // 🧠 内存守门员（容量压测读 stats / 手动 checkNow 用）
+                    slim: () => slimStats(library.value),   // 🪶 P1a 压缩状态（压测前后对比）
                     setSearch: (q) => { searchQueryInput.value = q; },
                     clearSearch: () => { searchQueryInput.value = ''; },
                     setCategory: (k) => { currentCategoryKey.value = k; },

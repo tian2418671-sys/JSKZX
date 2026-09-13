@@ -841,6 +841,8 @@ export default {
                 return t >= 1000 ? (Math.round(t / 100) / 10) + 'k' : Math.round(t);
             },
             hasLorebook: (item) => {
+                // 🪶 P1a：大库压缩后正文已不在内存，直接用压缩时记下的小字段
+                if (item && typeof item._hasBook === 'boolean') return item._hasBook;
                 const d = (item && (item.data?.data || item.data)) || {};
                 const book = d.character_book || (item && item.data && item.data.character_book) || {};
                 // 🛡️ 全形态安全判定：字典形态 entries（SillyTavern 导出）与数组形态 book
@@ -863,7 +865,8 @@ export default {
             },
             // ✅ 常规模式描述片段（截断 40 字）
             cardDesc: (item) => {
-                const d = (item && (item.data?.data || item.data)) || {};
+                // 🪶 P1a：压缩后的卡只留了截断描述（_descShort），少读一层大对象
+                const d = (item && (item._descShort != null ? { description: item._descShort } : (item.data?.data || item.data))) || {};
                 const desc = d.description || '';
                 return desc ? (desc.length > 40 ? desc.slice(0, 40) + '…' : desc) : '';
             },

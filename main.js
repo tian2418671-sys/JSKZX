@@ -21,6 +21,20 @@ const { createMemoryStore } = require('./main/memoryStore.js'); // 🧠 长期�
 let sharp = null;
 try { sharp = require('sharp'); } catch (e) { sharp = null; }
 
+// ================= 🧠 渲染进程 V8 开关（2026-09-13 容量专项） =================
+// 实测（`docs/大库重复卡-压测数据记录.md` §12/§13）：22,372 张卡的库，渲染进程堆 3.0~3.3GB，
+// 而 Chromium 给渲染进程的老生代上限就是 **4.19GB**（`performance.memory.jsHeapSizeLimit`）。
+//
+// 已尝试且**无效**（勿重试）：
+//   · `appendSwitch('js-flags', '--max-old-space-size=6144 …')`
+//   · `webPreferences.additionalArguments: ['--js-flags=--max-old-space-size=6144 …']`
+//     → `window.gc` 确实出现（说明 --expose-gc 生效），但堆到 ~3.3GB 仍 `reason=oom`，
+//       且 jsHeapSizeLimit 恒为 4192MB ⇒ **Chromium 渲染进程不采纳该开关**。
+//
+// ⇒ 真降内存只能靠减少常驻数据（P1「世界书条目/正文懒加载」，见 §13.3）；
+//    本行保留 `--expose-gc` 供内存守门员（js/utils/memoryGuard.js）主动 GC 用。
+app.commandLine.appendSwitch('js-flags', '--max-old-space-size=6144 --expose-gc');
+
 // ================= 兼容 360 主动防御：禁用 GPU 进程沙箱 =================
 // 症状：安装版在装有 360（ZhuDongFangYu 主动防御内核驱动）的机器上启动即闪退，
 // 表现：GPU 子进程以沙箱(降权)方式加载 DLL 被内核驱动拦截 → 0xC0000135 循环崩溃

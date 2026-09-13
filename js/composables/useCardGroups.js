@@ -4,6 +4,7 @@
  * 分组「状态」仍在 App.vue（被多处引用），此处通过依赖注入传入，仅承载「操作」逻辑，保持原有行为不变。
  */
 import { computed } from 'vue';
+import { migrateChatKeys } from './chat/chatStorage.js';
 
 export function useCardGroups({
     // 共享状态
@@ -186,6 +187,9 @@ export function useCardGroups({
                 }
             }
             if (migrated) syncConfigToDisk();
+            // 💬 同理：测卡会话/变量树也是按 path 派生的键（chat_storage 里 jsmobile-chat-<path>:*），
+            //     不迁移则重命名分组后该组卡片的「测卡会话与变量树凭空消失」（键成孤儿）。
+            migrateChatKeys(oldPrefix, newPrefix);
             await refreshLibrary();
         } else {
             nativeAlert(`分组已成功重命名为：「${cleanNewName}」`, 'info');
@@ -271,6 +275,7 @@ export function useCardGroups({
             const isImage = /\.(png|webp)$/i.test(res.newFilePath);
             item.avatar = isImage ? 'local-file://img/?path=' + encodeURIComponent(res.newFilePath) : null;
             migrateOverlayKey(oldPath, res.newFilePath);
+            migrateChatKeys(oldPath, res.newFilePath); // 💬 测卡会话/变量树的键也按 path 派生，跟着走
             persistCardCategory(item);
             return true;
         }

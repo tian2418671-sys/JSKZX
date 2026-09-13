@@ -232,3 +232,42 @@ export function setChatFlag(key, value) {
 }
 
 export default chatStorage;
+
+/**
+ * 🧭 按 path 派生的键迁移（卡片被移动分组 / 分组重命名 / 换卡图后必须调用）
+ *
+ * 背景：测卡会话、变量树、最后会话指针都存在 `chat_store.json` 里，键里**嵌入了完整卡片路径**
+ * （`jsmobile-chat-<path>:sessions`）。卡片物理路径一变，旧键就成了孤儿 —— 数据其实还在，
+ * 但按新路径读不到，用户看到的是「测卡会话/变量树凭空消失」。
+ *
+ * ⚠️ 同类缺陷 2026-09-01 已在「覆盖层 app_config.json」上踩过一次：
+ *    凡「物理路径会变」的操作，都必须同步迁移**所有**按 path 派生的键。
+ *
+ * 实现用**整键子串替换**，不依赖具体键格式（也适用于「目录前缀」式的分组重命名）。
+ *
+ * @param {string} oldPath 旧路径（或旧目录前缀）
+ * @param {string} newPath 新路径（或新目录前缀）
+ * @returns {number} 迁移的键数量
+ */
+export function migrateChatKeys(oldPath, newPath) {
+    if (!oldPath || !newPath || oldPath === newPath) return 0;
+    let moved = 0;
+    for (const key of Object.keys(mirror)) {
+        if (key.indexOf(oldPath) === -1) continue;
+        const next = key.split(oldPath).join(newPath);
+        if (next === key || Object.prototype.hasOwnProperty.call(mirror, next)) continue; // 不覆盖已有
+        const val = mirror[key];
+        mirror[next] = val;
+        delete mirror[key];
+        mem.set(next, val);
+        mem.delete(key);
+        lsSet(next, val);
+        lsRemove(key);
+        moved++;
+    }
+    if (moved) {
+        chatStorageVersion.value++;
+        flushNow();   // 键迁移必须立刻落盘：拖到后面窗口一关就白迁了
+    }
+    return moved;
+}

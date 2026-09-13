@@ -132,6 +132,74 @@
 
 ---
 
+## 🚀 v2.2.7（五）大库容量专项（P1a 正文懒加载 + P2 索引跨代沿用 + 内存守门员）
+
+> 本节为**内部文档**（含文件路径/堆数字/踩坑）；用户可见版本请见 `RELEASE_NOTES.md`。
+
+### 🔴 先否证一条错误结论：渲染进程堆上限抬不上去
+- 实测（22,372 卡）：`app.commandLine.appendSwitch('js-flags', '--max-old-space-size=6144')`
+  与 `webPreferences.additionalArguments` **两条路均无效** —— `window.gc` 确实出现（`--expose-gc` 生效），
+  但堆到 ~3.3GB 仍 `render-process-gone {reason:"oom"}`，且 `performance.memory.jsHeapSizeLimit` 恒为 4192MB。
+- 处理：撤销 `additionalArguments`（注释写明「勿重试」）；`memoryGuard` 回退为按**上报值**判定
+  （`assumedLimitMB` 仅保留为逃生口）；⇒ **真降内存只能靠减少常驻数据**。
+- 顺手修复：内存守门员过去从未真正上场（现 22k 高压下实测 `warns=1 gcCalls=1 releases=1`）。
+
+### 🪶 P1a：世界书正文懒加载（`js/utils/cardSlim.js`，新增）
+- 只丢两类（占全部文本 **88%**）：**世界书词条 `content`（1,163MB）+ `alternate_greetings`（120MB）**；
+  **保留** `description`/`first_mes`/`tags`/`extensions` —— 它们被 AI 打标、查重差异比对、Token 估算使用，
+  砍了会让这些功能静默变差（故「整块正文都砍」的方案被否）。
+- **原地压缩**（不替换 `item.data`）：全项目 ~40 处 `library.find(i => i.data === cardData.value)` 依赖对象身份。
+- **顺序不能反**：只在「索引建完 + token 预热完」之后压缩（`slimLibraryIfNeeded('index-built')`）；
+  刷新时未变动卡靠 P2 的 token 沿用重建索引，所以压缩不会让搜索失效。
+- 打开卡片：`openFromLibrary` 改 async + `ensureCardFull`（按 path 用 `readEmbeddedBatch`/`readText` 读回），
+  **读失败即拒绝打开**（否则编辑器空字段一保存就把卡写空），带连点令牌防竞态。
+- 词条正文是「清空」而非删除 → 还原时按 `comment/name` 配对填回（回退同下标）。
+- 列表脏标/描述改读小字段（`_hasBook`/`_descShort`），排序用固化 `_tokens`。
+- 全局资产库（唯一需全库正文的面板）→ 打开时后台逐批还原、**关闭时重新压缩**。
+- 阈值 `SLIM_MIN_LIBRARY = 3000`（小库不折腾）。
+
+### 🔁 P2：索引跨代沿用（P1 的前置）
+- `searchIndex` 新增 `carry`（`key = path|mtime|size` → 该卡 token 列表，token 复用索引 Map 的 key 对象，
+  字符串共享，22k 卡约 +70MB）；`buildAsync(..., { reuse: true })` 时未变动卡**不读正文、不重新分词**。
+- 为何必须先做：索引构建依赖全库正文；P1 砍掉正文后，刷新时复用卡就没正文可借，
+  全量重建会让这些卡**一条都进不去索引**（刷新即搜索失效）。
+- `remove(card)` 也改为优先用 `carry` 里的 token → 不再需要正文。
+- `_tokenize` 改 `charCodeAt` 区间比较：旧实现逐字符跑两次正则，22k 卡（待索引文本 ≈1.16GB）
+  导致「构建 10 分钟未完」；新实现同语义、快一个量级。
+
+### 💬 修复：测卡键随物理路径迁移
+- 测卡会话/变量树的键里嵌了**卡片完整路径** → 移动分组/重命名分组/换卡图后成孤儿，
+  用户看到「会话与变量树凭空消失」（同类缺陷 2026-09-01 在覆盖层上踩过）。
+- 新增 `migrateChatKeys` 并挂到 3 处路径变化点（`moveCardToGroup` / `renameCurrentCategory` / `replaceCardImage`）。
+
+### 🧰 压测工具链（新增）
+- `scripts/capacity-check.ps1`：造副本 → 隔离 profile → 启动 → 采样 → 刷新压测 → 汇总 → 清理；
+  支持 `-ReplicaDir`（复用副本，免 20GB 复制）/`-Hold`（保留现场供后续探针）/`-Keep`。
+- 探针：`_cdp-mem.mjs`（堆/索引/守门员，`--refresh`/`--gc`）、`_heap-audit.mjs`（堆构成按字段拆）、
+  `_cdp-text.mjs`（应用自身进度/压缩状态）。
+- 踩坑：轮询期强制 GC 会把 22k 首启拖到 >215s；副本泄露会被当源库复制成 44k 卡；
+  PowerShell 里 `$Replica` 与内部 `$replica` 同名被覆盖；CDP 取值是**双重 JSON 编码**（要 parse 两次）。
+
+### 🔬 验证（22,372 卡 / 同副本 / 隔离 profile）
+
+| 指标 | 前 | 后 |
+|---|---|---|
+| 世界书词条正文 | 1,163 MB | **0 MB** |
+| alternate_greetings | 120 MB | **0 MB** |
+| 纯文本合计 | 1,459 MB | **176 MB（-88%）** |
+| 堆（GC 后） | 2,891 MB | **2,053 MB** |
+| 加载 | 232s（含 OOM 重载） | **72s** |
+| 索引 | 建 10 分钟未完 | 22,372 卡 / 349,648 token ✅ |
+| **渲染进程 OOM** | 同位置崩 2 次 | **crash.log 无记录** |
+| 内存守门员 | 从未触发 | `warns=1 gcCalls=1 releases=1` |
+
+- `npm test` **214/214**（新增 `test/cardSlim.test.mjs` 8 例、`test/searchIndexReuse.test.mjs` 7 例、
+  `test/chatKeyMigration.test.mjs` 4 例、`test/memoryGuard.test.mjs` 8 例）；`npm run build:web` ✅。
+- 日志实证：`[slim] 已压缩 19114 张卡的正文（index-built）`；刷新触发第二次扫描（13.6s）在 3.5GB 堆上完成重建未崩。
+- 完整数据：`docs/大库重复卡-压测数据记录.md` §十三；测试记录：`docs/测试日志-2026-09-13.md` §九。
+
+---
+
 ## ✨ v2.2.6 —— 预设缝合中心 + 四处条目批量操作
 
 > 背景：预设之间搬运提示词条目此前只能「复制整份预设再手改」。新增 **缝合中心**：把 1~N 本源预设的条目 + 手写自定义条目，缝进任意目标预设，支持 **新建 / 覆盖 / 写回当前** 三种输出。
