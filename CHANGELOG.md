@@ -1,14 +1,14 @@
-# SillyTavern 角色卡管理器 · v1.6.2 → v2.2.7 更新汇总
+# SillyTavern 角色卡管理器 · v1.0 → v2.2.7 更新汇总
 
-> 更新周期：2026-08-15 ~ 2026-09-13
+> 更新周期：2026-08-09 ~ 2026-09-13
 > 技术栈：Electron + Vue3 + Tailwind + ECharts
 
 ---
 
 > **v2.2.7 专项（2026-09-13）**：大库（万卡 / 10GB 级）稳定性 + 加载性能 —— 修复 9 项缺陷（含用户反馈的
 > 重复卡、刷新丢库、添加正则需切选项卡、删除无提示），加载从 36.9~85.3s 降到 16~31s（同机波动）。
-> 详细数据与验证过程见 `docs/history/大库重复卡-压测数据记录.md`、`docs/history/测试日志-2026-09-13.md`；
-> 汇总技术数据见 `docs/技术支持/技术数据-大库压测与性能.md`。
+> 汇总技术数据（加载分项、堆构成审计、缓存 A/B、容量边界）见 `docs/技术支持/技术数据-大库压测与性能.md`；
+> 缺陷与根因清单见 `docs/bugs/BUG-性能与大库.md`。
 
 ---
 
@@ -197,7 +197,7 @@
 - `npm test` **214/214**（新增 `test/cardSlim.test.mjs` 8 例、`test/searchIndexReuse.test.mjs` 7 例、
   `test/chatKeyMigration.test.mjs` 4 例、`test/memoryGuard.test.mjs` 8 例）；`npm run build:web` ✅。
 - 日志实证：`[slim] 已压缩 19114 张卡的正文（index-built）`；刷新触发第二次扫描（13.6s）在 3.5GB 堆上完成重建未崩。
-- 完整数据：`docs/技术支持/技术数据-大库压测与性能.md`；原始记录：`docs/history/大库重复卡-压测数据记录.md` §十三、`docs/history/测试日志-2026-09-13.md` §九。
+- 完整数据：`docs/技术支持/技术数据-大库压测与性能.md`（含 22k 库前后对比、缓存 A/B、内存审计口径）。
 
 ---
 
@@ -681,6 +681,28 @@
 - 新增 5 个回归单测锁定此陷阱（含数组原型方法陷阱用例）
 
 ---
+
+## 🕰️ 早期版本纪要（v1.0 ~ v1.6.1）
+
+> 本节保留 2026-08-09 ~ 08-14 的开发纪要（**会话 → 版本 → 做了什么**），供追溯「某个功能/修复是什么时候进来的」。
+> 缺陷与坑的完整条目见 `docs/bugs/`（含「历史修复速览」一节）；v1.6.2 起的版本细节见本文档上方各段。
+
+| 日期 | 版本 | 落地内容 |
+|---|---|---|
+| 08-09 | v1.0 | 初版功能测试与打包流程建立；卡片导入/解析/编辑/标签/分组/关系图谱雏形 |
+| 08-10 ~ 08-11 | — | 部分功能暂缓、打包产物归置 |
+| 08-12 | v1.2 ~ v1.3 | 三主题（dark/slate/light）、路径记忆、侧边栏瘦身、词条 IDE 折叠、右键菜单增强（打开文件夹/复制/打标/回收站）、世界书查重引擎、版本更新检测、启动防闪烁、分类持久化、标签中英切换、批量标签弹窗、全局深度搜索、快照与回收站、一键导出整合包、多语言分组、关系图谱多轮升级、Token 估算器、全局资产中心、系统/全局标签库、系统快捷过滤（`has_lorebook`/`has_regex`）、P0 加固（CDN 本地化 `vendor/`、崩溃兜底）、P2 API 鉴权可配置 |
+| 08-13 | v1.3 ~ v1.4 | **世界书双引擎**（`appMode` characters\|worldbooks）、词条级 Entry IDE、智能查重与版本清洗、高分屏 DPI 适配、世界书库文件夹导入/删除/克隆/右键菜单、世界书分组（`wbCategoryMap`）持久化、统一 IPC 落盘拦截器、世界书严格防伪 `isValidWorldbook`、Shift 连选错位修复、卡片高亮改对象引用比较、360 锁 `app.asar` 的 `dist_new` 绕法；「三连 BUG」审查（确认多为误报） |
+| 08-14 | v1.5 | **工程化大升级**：Vite + Vue3(SFC) + Tailwind CLI（`index.html` 模板迁入 `App.vue`，2047 行模板 + 4676 行 setup；vue 需完整版 alias；**勿加 `type:module`**；ECharts npm 化）；SFC 化十步走（拆出 21 个子组件 + 根，全程 `provide/inject` ctx 共享）；列表/网格双视图；全屏拖拽导入遮罩（深度计数器）；防系统打开图片加固（`will-navigate` + `setWindowOpenHandler` + `draggable=false`）；AI 一键汉化/格式升维；全局 Toast；搜索防抖 + 快捷键；图片懒加载 + 拖拽把手；可拖拽分栏 |
+
+**这一时期沉淀下来的关键教训**（已归档为缺陷条目）：
+- Vue 弹窗必须在 `#app` 闭合 `</div>` 之内 → [AR-09](docs/bugs/BUG-架构与渲染.md)
+- `window.prompt/confirm/alert` 在 Electron 静默失败 → [AR-02](docs/bugs/BUG-架构与渲染.md)
+- IPC 不能传响应式 Proxy → [AR-01](docs/bugs/BUG-架构与渲染.md)
+- 组件注册名首字母连续大写无法被 kebab 标签解析 → [AR-10](docs/bugs/BUG-架构与渲染.md)
+- 纯 Options API 组件模板不能用模块级 import 的函数 → [AR-11](docs/bugs/BUG-架构与渲染.md)
+- Win10 21H2 导入不了任何卡片（IPC 白名单 → 改用 File API） → [DF-01~DF-05](docs/bugs/BUG-数据与文件.md)
+
 
 ## ✨ v1.8.3 —— 全库词条搜索 + 世界书库重设计 + 世界书扩展 + 快照管理增强 + 图谱卡顿修复 + 白名单安全加固
 

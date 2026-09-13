@@ -86,3 +86,38 @@
 
 > ⚠️ **探针铁律**：读应用单例状态**必须**走 `window.__jskDiag.*`（应用真正使用的那份），
 > 自己 `import('/js/utils/xxx.js')` 会因 Vite 的 `?t=` 查询参数拿到**另一个模块实例**，读数全错。
+
+---
+
+## 五、userData 与磁盘维护
+
+| 路径（`%APPDATA%\sillytavern-card-manager\`） | 内容 | 处置建议 |
+|---|---|---|
+| `app_config.json` | **配置权威**（全局标签 / 自定义分类 / 覆盖层 `cardOverlays` / api / ui） | 原子写；历史曾因覆盖层膨胀到 3.48MB，后回落 ~28KB（正常量级） |
+| `tavern_manager_config.json` | 上次打开的库路径等 | 压测时用隔离 profile 改写，不碰真实文件 |
+| `snapshot_config.json` | 快照策略 | 原子写 |
+| `chat_store.json` / `memory_store.json` | 测卡会话与变量树 / 长期记忆 | 用过测卡后才有 |
+| `crash.log` | 渲染进程崩溃详情（`render-process-gone` 详情 + 自动 reload 记录） | **排查运行时问题的第一现场**；偶发 EPIPE 记录已容错、无害 |
+| `Crashpad/` | 原生崩溃 `.dmp`（`crashReporter` 写，`uploadToServer:false` 不联网） | 出现 native 崩溃（如 `exitCode -36861`）时看这里 |
+| `hf_cache/Xenova/…` | 本地向量模型缓存 | 见下一节 |
+| `jsTavern_Trash` / `jsTavern_Backups` | 回收站 / 快照备份 | **用户数据，清理前必须问用户** |
+| `*.tmp`（`app_config.json.<pid>.<seq>.tmp` 等） | 原子写残留 | 启动时 `cleanupStaleConfigTmp()` 自动清扫（见 [DF-13](../bugs/BUG-数据与文件.md)） |
+| `Cache/`、`Code Cache/`、`GPUCache/` | Electron 浏览器缓存（可安全删除，重启自动重建） | 历史实测可释放 ~539MB |
+
+**排查用户报「改了代码还是没变化」时**：先确认跑的是**源码版**（`npm start` = `build:web` + `electron .`），
+而不是 `dist` 里的**旧安装包** —— 历史上真出现过「用户跑打包版，误以为修复无效」。
+
+---
+
+## 六、本地向量模型（`Xenova/paraphrase-multilingual-MiniLM-L12-v2`）
+
+| 项 | 值 |
+|---|---|
+| 下载文件 | `config.json` / `tokenizer.json`(17MB) / `tokenizer_config.json` / `onnx/model_quantized.onnx`(113MB) |
+| 缓存位置 | `userData/hf_cache/Xenova/paraphrase-multilingual-MiniLM-L12-v2/` |
+| 下载源顺序 | ① hf-mirror（国内 ~9MB/s）→ ② huggingface 官方 → ③ GitHub 仓库兜底（onnx 分 8 片，断点续传 + `tmp/rename` 原子写 + 120s 超时） |
+| 已知坑 | hf-mirror 会 **RST 掉 transformers.js 的 UA**（需在 require 前包装 `fetch` 注入浏览器 UA）；`raw.githubusercontent.com` 国内极慢（用 gh-proxy / ghfast 加速）；GitHub 单文件 100MB 限制（故分片） |
+| 关键参数 | 相似度阈值默认 **0.35**（三处必须对齐：`useAITools.js` / `AITagModal.vue` / `main/vectorManager.js`）；短标签先按 `LABEL_TEMPLATE` 展开成描述句再嵌入，展开文本同时作为缓存 hash 输入 |
+| 验证脚本 | `scripts/vector-model-test.cjs`（命中率 / 误报基线）、`scripts/live-vector-test.cjs`（真实主进程环境） |
+
+> 完整的现象 / 根因 / 修复 / 防再犯，见 [`../bugs/BUG-AI打标与标签.md`](../bugs/BUG-AI打标与标签.md)（AI-03、AI-04）。

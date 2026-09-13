@@ -87,13 +87,47 @@ scripts/           压测与探针（library-dup-*、capacity-check.ps1、measur
                    release-check.mjs、_cdp-*.mjs 等）
 ```
 
-### 3.2 组件与 ctx 传播（最容易漏的地方）
+### 3.2 模块职责速查
+
+**`js/utils/`（纯逻辑，可单测）**
+
+| 文件 | 职责 |
+|---|---|
+| `cardLoader.js` | 卡片解析 / 规范化 / 血统鉴定（`isCharacterCardData`）/ 自动打标规则表 `defaultAutoTagRules` |
+| `pngParser.js` | PNG 块解析（`tEXt` / `iTXt` 的 `chara` 块），大卡兜底 `deepScanForJSON` |
+| `searchIndex.js` | 搜索索引（**不保留文本**、中文单字倒排、代次号 + 幂等 + 跨代沿用 `carry`） |
+| `tokenCache.js` | Token 估算缓存与预热（`yieldToMain` 让步调度） |
+| `memoryGuard.js` | 内存水位守门员（warn / critical → 释放可重算缓存 + GC） |
+| `cardSlim.js` | 大库正文懒加载（`slimCard` / `ensureCardFull`，>3000 张自动启用） |
+| `tokenEstimate.js` | Token 估算（超长文本防护） |
+
+**`js/composables/`（业务逻辑主体，共 36 个模块，含 `chat/` 16 个）**
+
+| 模块 | 职责 |
+|---|---|
+| `useCardCrud.js` | 卡片 CRUD 域（导入 / 删除 / 持久化 / 自动分类打标 / 导出重命名） |
+| `useConfigPersistence.js` | 配置持久化中枢（`syncConfigToDisk`、API Key 加密、原子落盘、`isRestoringConfig` 闸门） |
+| `useDiskScan.js` | 全盘打捞 / 库刷新（含 load 锁与合并刷新） |
+| `useAITools.js` | AI 打标三层漏斗（规则 → 本地向量 → LLM）/ 翻译 / 格式升维 |
+| `useTags.js` | 标签体系（全局标签池 / 自定义分类 / 外来标签清洗） |
+| `useSearch.js` | 搜索与筛选（含快捷筛选分类判定） |
+| `useCardGroups.js` | 角色卡分组与分类（物理文件夹移动 + 键迁移） |
+| `useWorldbooks.js` / `useWorldbookEntries.js` / `useWorldbookExtras.js` / `useEmbeddedWorldbook.js` | 世界书库 / 词条 IDE / 提取与导入 / 卡内嵌世界书 |
+| `usePresets.js` / `usePresetStitch.js` | 预设管理 / 预设缝合工作台 |
+| `useGraph.js` | 关系图谱（头像限流 / 连线预算 / 构建缓存） |
+| `useDedupe.js` / `useBatch.js` / `useSnapshots.js` | 查重比对 / 批量操作 / 历史快照 |
+| `useGlobalEntrySearch.js` / `usePlugins.js` / `useStatusbarPreview.js` | 全库词条搜索 / 插件工作区 / 状态栏模板预览 |
+| `chat/*`（16 个） | 测卡引擎：`useChatEngine`（编排）/ `chatStorage`（存储适配 + 响应式版本号）/ `useChatPresets` / `chatBridge` / `useChatMemory` … |
+
+> 其余模块按 `useXxx` 命名即可判断职责；新增模块沿用「App.vue 统一注入 + 四步暴露」的约定。
+
+### 3.3 组件与 ctx 传播（最容易漏的地方）
 
 - `App.vue` 是**唯一根组件**：所有状态/方法集中在 setup → `provide('appCtx', ctx)` → 子组件 `inject('appCtx')` 解构。
 - ⚠️ 新增状态/方法必须**四步齐全**：`定义` + `useXxx 解构` + `ctx return 暴露` + `子组件 return 解构`。漏一处即模板访问 `undefined` 静默失效（历史缺陷见 `docs/bugs/BUG-架构与渲染.md` AR-13）。
 - 关键共享单例：`library`（卡片数组，**shallowRef**）、`cardData`（当前卡，**shallowRef** → 深层改动必须 `refreshCardData()`/`triggerRef`）。
 
-### 3.3 数据流与存储
+### 3.4 数据流与存储
 
 | 数据 | 位置 | 说明 |
 |---|---|---|
@@ -105,7 +139,7 @@ scripts/           压测与探针（library-dup-*、capacity-check.ps1、measur
 | 测卡会话 | `userData/chat_store.json` | 适配层 `chat/chatStorage.js`（localStorage 镜像 + `chatStorageVersion` 响应式版本号） |
 | 长期记忆 | `userData/memory_store.json` | `main/memoryStore.js` + `memory:*` IPC |
 
-### 3.4 性能相关的重要事实（别重复调研）
+### 3.5 性能相关的重要事实（别重复调研）
 
 - 渲染进程堆上限 **4,192MB 是真的**，`--js-flags=--max-old-space-size=6144` **抬不上去**（已实测否证，不要重试）。`--expose-gc` 有效（`window.gc` 存在）。
 - 大库（>3000 张）会自动启用**正文懒加载**：列表态不常驻世界书词条正文与 `alternate_greetings`，打开卡片时才读回。相关文件：`js/utils/cardSlim.js`、`App.vue` 的 `slimLibraryIfNeeded`。
@@ -131,6 +165,12 @@ node --check <file>                            # 语法检查
 - 大库端到端调试：`npx vite --port 5173` + `$env:VITE_DEV_SERVER_URL='http://localhost:5173'` + `electron . --remote-debugging-port=9338 --user-data-dir=<临时目录>`（**必须用隔离 profile**，绝不碰真实配置）。
 - 生产模式 CDP：`electron . --remote-debugging-port=9333`（走 `app://index.html` + `web/` 产物，无 Vite）。
 - 探针脚本见 `docs/技术支持/README.md`（`_cdp-eval.mjs` / `_cdp-mem.mjs` / `_heap-audit.mjs` / `measure-startup.mjs` / `capacity-check.ps1`）。
+
+> ⚠️ **两种运行方式别搞混**：`npm start` = `build:web` + `electron .`（**源码版**，改代码后必须用它验证）；
+> `dist` / `dist_new` 里的安装包是**构建产物**，跑它看不到新代码 —— 历史上真出现过「用户跑打包版、误以为修复无效」。
+>
+> 🚨 **崩溃排查第一现场**：`userData/crash.log`（渲染进程崩溃详情 + 自动 reload 记录）与 `userData/Crashpad/*.dmp`（原生崩溃）；
+> `userData` 下各文件的用途与处置建议见 [`docs/技术支持/README.md`](docs/技术支持/README.md) §五。
 
 ### 4.2 提交前门禁
 
@@ -169,7 +209,7 @@ node --check <file>                            # 语法检查
 
 ## 六、给下一任 AI 的开工清单
 
-1. 读本文件（已读完）→ 按需读 `docs/bugs/` 对应领域 → 需要细节再回查 `docs/history/` 的归档原文。
+1. 读本文件（已读完）→ 按需读 `docs/bugs/` 对应领域 → 接口/实测数据细节看 `docs/技术支持/`。
 2. `git status -sb` + `git log --oneline -5`，确认基线；跑 `npm test` 确认 214/214。
 3. 问清用户这一轮的目标是「修 bug / 加功能 / 发版」中的哪一类；**不要自行打包或推送**。
 4. 动手前 grep 现状；改完过 4.2 的门禁；涉及路径的操作同步迁移派生键。
@@ -178,4 +218,4 @@ node --check <file>                            # 语法检查
 
 ---
 
-*本文件由 AI 助手整理自项目历史交接材料；完整历史原文（含已归档的测试日志与压测记录）在 `docs/history/`。*
+*本文件由 AI 助手整理自项目历史交接材料；缺陷、技术数据与代码片段已全部并入 `docs/bugs/`、`docs/技术支持/`、`docs/发布/` 与 `docs/规格与计划/`。*

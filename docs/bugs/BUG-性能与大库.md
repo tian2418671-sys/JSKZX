@@ -21,14 +21,14 @@
   - `scripts/library-dup-search-refresh.mjs` A~F 全阶段 `dup(lib)=0 / dup(list)=0`，库稳定 11,186 ✅
   - 生产模式真实界面复测（搜「龙」/「的」→ 刷新 → 再搜）列表 `dup=0` ✅
   - 重建合并实测计数：`watch: 80 → coalesced: 77 → start: 4 → done: 3`（80 次库变动只真跑 4 次重建）
-- **来源**：`docs/history/测试日志-2026-09-13.md` BUG-1；`docs/history/大库重复卡-压测数据记录.md` §八
+- **来源**：`v2.2.7 桌面版大库专项实测` BUG-1；`v2.2.7 大库压测` §八
 
 ### PK-02 ｜ 🔴 刷新后整个大库从界面消失
 - **现象**：刷新后列表空了（磁盘未动），必须重启才回来。也解释了历史上「刷新中途只剩 478 张」的不完整计数。
 - **根因**：主进程扫描 catch 分支返回 `{files: [], error}`，渲染层 `if (result && result.files)` 把**空数组当真值** → `library.value = []`。
 - **修复**（`js/composables/useDiskScan.js`）：先判 `result.error` 提前返回；库非空时**拒绝接受 0 文件结果**并提示。
 - **验证**：连点刷新 ×6 库始终 11,186 张 ✅
-- **来源**：`docs/history/测试日志-2026-09-13.md` BUG-2
+- **来源**：`v2.2.7 桌面版大库专项实测` BUG-2
 
 ### PK-03 ｜ 🔴 刷新/搜索时渲染进程 OOM 崩溃
 - **现象**：`render-process-gone {"reason":"oom","exitCode":-536870904}`，崩溃后 Electron 兜底**自动 reload**。
@@ -39,13 +39,13 @@
   3. **P1a 正文懒加载**（`js/utils/cardSlim.js`）：列表态释放世界书词条正文与 `alternate_greetings`，开卡时才读回。
 - **验证**：堆基线 3,039MB → 2,013MB；22,372 卡库实测 2,891MB → **2,053MB**，`crash.log` **无新增** ✅
 - **⚠️ 因果链（重要）**：崩溃兜底 1.5s 后 `win.reload()` → 新页面又全量加载 → 若此刻还有在途的加载/刷新 → **并发重入** → 同一 path 入两条 → 重复卡。**这解释了为什么用户只在「大库 + 反复刷新/搜索」时看到重复卡**（小库不会 OOM，走不到这条链）。
-- **来源**：`docs/history/测试日志-2026-09-13.md` BUG-3；`docs/history/大库重复卡-压测数据记录.md` §6.2/§6.3
+- **来源**：`v2.2.7 桌面版大库专项实测` BUG-3；`v2.2.7 大库压测` §6.2/§6.3
 
 ### PK-09 ｜ 🟡 移动版刷新期间卡片重复出现【移动版】
 - **现象**：下拉刷新后加载过程中同一张卡在列表出现 2 次，扫描完成后恢复；搜索/排序在扫描期间返回翻倍结果。
 - **根因**：`loadLibrary(refresh=true)` 全量重扫开始时**没有清空** `mobileLibrary.library`，渐进上屏的 `publishProgress()` 把新解析的卡 `push` 到仍含上次结果的数组上。
 - **修复**：重扫开始前先 `mobileLibrary.library = []`。
-- **来源**：`docs/history/测试日志-2026-09-12.md` BUG-10
+- **来源**：`v1.10.21 移动版专项实测` BUG-10
 
 ---
 
@@ -61,7 +61,7 @@
   代价：每次启动重写 3,415 张 PNG（含整图读回 + 重写 + 快照备份），mtime 全变 → 下次刷新按 mtime 差分又全量重解析。
 - **修复**（`js/composables/useCardCrud.js`）：改为按「**磁盘原有标签**」（`diskTagsBefore`）判定 —— 只有「盘上真存在不该保留的标签」或「确有新标签要补」才写盘；写盘内容也改成幂等。
 - **验证**：`3,415 张` → `971 张`（一次性残留清洗）→ **第 2 次启动 0 张**；加载 **79.9s → 41~43s**（≈1.85×）。
-- **来源**：`docs/history/测试日志-2026-09-13.md` BUG-4；`docs/history/大库重复卡-压测数据记录.md` §九
+- **来源**：`v2.2.7 桌面版大库专项实测` BUG-4；`v2.2.7 大库压测` §九
 
 ### PK-07 ｜ 🟡 PNG 内嵌提取缓存是**负优化** + 遗留缓存无人清理
 - **现象**：为了提速加了 PNG 内嵌 JSON 分片缓存，实测**反而慢 2~5 倍**；同时 userData 里堆了 24 个 `0 字节 embed_cache_*.tmp` 与 1.17GB 缓存。
@@ -69,14 +69,14 @@
 - **修复**：删除整块缓存实现（**-173 行**）+ 新增 `cleanupLegacyEmbedCache()` 启动时一次性回收历史缓存（本机 **44 文件 / 758MB**），用 `.embed_cache_removed` 标记保证只扫一次目录。
 - **同因同类**：`atomicWriteJson` 中途失败留下的 0 字节 `.tmp`，`cleanupStaleConfigTmp` 原先没覆盖 `embed_cache*`。
 - **经验**：**不要为「本来就便宜」的数据加磁盘缓存** —— 先量"重算成本"再量"缓存加载成本"。
-- **来源**：`docs/history/测试日志-2026-09-13.md` BUG-10；`docs/history/大库重复卡-压测数据记录.md` §11.4/§6.5
+- **来源**：`v2.2.7 桌面版大库专项实测` BUG-10；`v2.2.7 大库压测` §11.4/§6.5
 
 ### PK-08 ｜ 🟡 PNG 卡白白多走两趟 structured clone
 - **现象**：`worker` 6.9s / `assemble` 31s。
 - **根因**：`parseChunkInWorker` 把**所有**卡都送 Worker，而 PNG 卡的 `embeddedData` 本来就是主进程解析好的对象 → 又走两趟 structured clone（万卡库 ≈1.2GB 级搬运）。
 - **修复**：只把「需要 `JSON.parse` 的纯文本卡」送 Worker。
 - **验证**：`worker 6.9s → 1.4~2.0s`；`assemble 31s → 9.6~11.0s`。
-- **来源**：`docs/history/测试日志-2026-09-13.md` §3.1；大库压测记录 §11.2
+- **来源**：`v2.2.7 桌面版大库专项实测` §3.1；v2.2.7 大库压测
 
 ---
 
@@ -88,7 +88,7 @@
 - **修复**：统一 `yieldToMain()` —— **前台 idle / 后台 `MessageChannel`**（保留定时器兜底）；闸门改 `waitForIdle()`；`MessageChannel` 仅在真实 DOM 创建且 Node 下 `unref()`（否则 `npm test` 不退出，见 [AR-20](BUG-架构与渲染.md)）。
 - **验证**：窗口全程隐藏下，11,186 卡索引（349,552 词）+ Token 预热（11,186 次 / 1.45s）均正常完成 ✅
 - **经验**：**前台/后台的调度语义不同**，`requestIdleCallback` 在隐藏窗口不可依赖。
-- **来源**：`docs/history/测试日志-2026-09-13.md` BUG-7；大库压测记录 §11.3
+- **来源**：`v2.2.7 桌面版大库专项实测` BUG-7；v2.2.7 大库压测
 
 ### PK-06 ｜ 🟡 载入期「非角色卡文件」日志刷屏
 - **现象**：单次加载 385+ 行 `console.warn`，污染日志并拖慢 console 转发。
@@ -96,7 +96,7 @@
   ```
   [载入] 跳过 385 个非角色卡/不可解析文件（同类日志已折叠 345 条）
   ```
-- **来源**：`docs/history/测试日志-2026-09-13.md` BUG-8；大库压测记录 §11.5
+- **来源**：`v2.2.7 桌面版大库专项实测` BUG-8；v2.2.7 大库压测
 
 ---
 
@@ -110,28 +110,21 @@
   **判据应是 `typeof window.gc === 'function'`**（`--expose-gc` 与 `--max-old-space-size` 是同一个 `js-flags`）。
 - **第 2 次错**：改用 `webPreferences.additionalArguments = ['--js-flags=...']` 把参数追加到每个渲染进程 argv —— 后经实测**同样无效**（仍在 ~3.3GB 堆时 `render-process-gone {"reason":"oom"}`）。
 - **最终结论（已写进 `main.js` 注释，勿重试）**：**渲染进程堆上限 4,192MB 是真的，抬不上去**。只能靠**真实减少内存占用**（P1a）与**内存守门员**，不能靠抬上限。
-- **来源**：`docs/history/大库重复卡-压测数据记录.md` §13.2 / §13.3.1；`CHANGELOG.md` v2.2.7（五）「先否证一条错误结论」
+- **来源**：`v2.2.7 大库压测` §13.2 / §13.3.1；`CHANGELOG.md` v2.2.7（五）「先否证一条错误结论」
 
 ### PK-11 ｜ 🔴 `_tokenize` 逐字符跑正则 → 2 万卡索引「10 分钟建不完」
 - **现象**：`building=true` 挂了 10 分钟仍未完成（22k 卡待索引文本 ≈1.16GB，其中 80% 是世界书正文）。
 - **根因**：`_tokenize` 对**每个字符**跑两次正则（`/[\u4e00-\u9fff]/.test(char)`）→ 十亿级正则调用。
 - **修复**：改成 `charCodeAt` 区间比较（CJK `0x4E00–0x9FFF`、`0x3400–0x4DBF`；词字符 `0-9A-Za-z_`），语义不变，**快一个量级**。
 - **验证**：22,372 卡 / **349,648 token**，索引正常建完 ✅
-- **来源**：`docs/history/大库重复卡-压测数据记录.md` §13.3.1
+- **来源**：`v2.2.7 大库压测` §13.3.1
 
 ### PK-12 ｜ 🟡 内存守门员阈值算在**假上限**上
 - **现象**：`memoryGuard` 在真实水位只有 49% 时就触发 warn（误报 1 次）。
 - **根因**：按 `performance.memory.jsHeapSizeLimit`（恒 4192MB）算比例，而配置的上限是 6144MB。
 - **修复**：`createMemoryGuard({ assumedLimitMB })` 取「配置值 vs 上报值」较大者；最终因为上限抬不上去（PK-10），`App.vue` 改为**不传**该参数，基准确认为上报的 4,192MB。
 - **验证**：24k 卡高压下 `warns=1 gcCalls=1 releases=1` —— 守门员**真在上场**，不是摆设。
-- **来源**：`docs/history/大库重复卡-压测数据记录.md` §13.3.1 / §13.5
-
-### PK-13 ｜ 🔴 AI 打标时渲染进程崩溃（打标 → 触发索引全量重建）
-- **现象**：批量 AI 打标跑到几千张卡时渲染进程 native 崩溃（`exitCode -36861`）。
-- **根因**：打标每改一张卡 → `triggerRef(library)` → `watch(library)` 触发**全量重建搜索索引 + Token 预热**（几千张卡 × 正则/分词），叠加后超出渲染进程内存上限。
-- **修复**：打标期间**跳过索引重建**（`pendingRebuild` 标记），打标结束**补建一次**；同时新增崩溃兜底（`crashReporter` 本地 `.dmp` + `render-process-gone` 落盘 `crash.log` + 自动 reload 恢复）。
-- **同轮修的相关缺陷**：规则匹配层进度条不动（改为实时进度）；向量层 `vector:batchProgress` 未合并进 `aiTaggingProgress`；三层 O(n²) `find` 改 O(1) Map；LLM 层 `targetIds[i]` → `llmTargetIds[i]` **索引 bug**。
-- **来源**：`docs/history/AI交接指导-合集.md` §四 2026-08-29
+- **来源**：`v2.2.7 大库压测` §13.3.1 / §13.5
 
 ---
 

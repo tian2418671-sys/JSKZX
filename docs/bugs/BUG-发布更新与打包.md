@@ -13,12 +13,12 @@
 - **根因**：`electron-updater` 读的是 `releases/latest/download/latest.yml`，缺这个文件就是 404 —— **没有任何用户可见的报错**。
 - **修复/规矩**：`exe` + **`latest.yml`** + `*.exe.blockmap` 必须**同一次一起上传**。
 - **验证**：`Invoke-WebRequest https://github.com/tian2418671-sys/JSKZX/releases/latest/download/latest.yml` 返回 200，且里面的 `version:` 是新版本号。
-- **来源**：合集 §五 5.4；v1.8.5；`docs/history/发布一条龙-执行清单.md` §4
+- **来源**：早期坑清单（打包/发布）；v1.8.5；`v2.2.7 发布执行清单` §4
 
 ### RL-05 ｜ 🟡 发布未同步 GitHub Release → OTA 误报 downgrade
 - **根因**：OTA 以 `releases/latest` 为基准，只推 tag 不建 Release（或建成 draft/prerelease）会让更新检测出错。
 - **规矩**：发布后必须 `gh release list` 确认该版本 **Latest**（`gh release view --json` **没有 `isLatest`** 字段，只能用 list）。
-- **来源**：合集 §五 5.4；v1.8.5
+- **来源**：早期坑清单（打包/发布）；v1.8.5
 
 ---
 
@@ -31,19 +31,19 @@
   $env:ELECTRON_BUILDER_OFFLINE='true'
   npx electron-builder --win nsis --config.electronDist="<项目>\node_modules\electron\dist"
   ```
-- **来源**：合集 §五 5.4；v1.8.5
+- **来源**：早期坑清单（打包/发布）；v1.8.5
 
 ### RL-03 ｜ 🟡 打包前未杀旧实例 → EBUSY 锁文件
 - **修复**：按 **Path** 匹配杀，不能只杀 `electron.exe`：
   ```powershell
   Get-Process | Where-Object { $_.Path -like '*JSK管理*' -or $_.Path -like '*win-unpacked*' -or $_.ProcessName -eq 'electron' } | Stop-Process -Force -EA SilentlyContinue
   ```
-- **来源**：合集 §五 5.4
+- **来源**：早期坑清单（打包/发布）
 
 ### RL-04 ｜ 🟡 `build:web` 的 `rmSync` 可能没真正清空 `web/`
 - **后果**：历史 JS 累积进 asar，包体虚增。
 - **修复**：必要时 PowerShell 强删 `web/` 后重建。
-- **来源**：合集 §五 5.4
+- **来源**：早期坑清单（打包/发布）
 
 ### RL-07 ｜ 🔴 `electron-builder` 报 EPERM rmdir `onnxruntime-node\lib`
 - **现象**：
@@ -55,7 +55,7 @@
   ```
   npx electron-builder -w --config.directories.output=dist_new
   ```
-- **来源**：`docs/history/大库重复卡-压测数据记录.md`；v2.2.7 实战
+- **来源**：`v2.2.7 大库压测`；v2.2.7 实战
 
 ### RL-12 ｜ 🟡 PowerShell 脚本的两个编码/调用陷阱
 - **① BOM-less `.ps1` 含中文字面量 → 乱码**（路径匹配失败、`Tee-Object` 写出乱码）。
@@ -74,7 +74,7 @@
 
 ### RL-06 ｜ 📌 `gh release` 无输出 = 正在后台上传
 - **规矩**：大文件上传时**不要中断**，等完成通知；`gh release list` 看 Latest（`view --json` 没有 `isLatest`）。
-- **来源**：合集 §五 5.4
+- **来源**：早期坑清单（打包/发布）
 
 ### RL-08 ｜ 🟡 本机 git 直连 GitHub **间歇性**失败
 - **现象**：`fatal: unable to access ...: Empty reply from server` 或 `Could not connect to github.com:443 after 21148 ms`；**有时 tag 推成功、master 推失败**（两次是独立的网络事务）。
