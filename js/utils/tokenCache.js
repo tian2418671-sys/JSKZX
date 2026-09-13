@@ -2,6 +2,7 @@
  * 卡片 Token 估算缓存。使用 WeakMap 按卡片对象缓存，卡片释放后缓存可自动回收。
  */
 import { estimateTokens } from './tokenEstimate.js';
+import { yieldToMain } from './searchIndex.js';
 
 class TokenCache {
     constructor() {
@@ -38,13 +39,10 @@ class TokenCache {
             const chunk = list.slice(i, i + chunkSize);
             for (const card of chunk) this.get(card);
             if (i + chunkSize < list.length) {
-                await new Promise(resolve => {
-                    if (typeof requestIdleCallback === 'function') {
-                        requestIdleCallback(resolve, { timeout: 50 });
-                    } else {
-                        setTimeout(resolve, 0);
-                    }
-                });
+                // 🚦 用统一让步调度器：纯 requestIdleCallback 在窗口隐藏时**永不回调**
+                //    （后台节流），万卡预热会永久卡住；yieldToMain 在后台走不节流的
+                //    MessageChannel，前台仍优先 idle。
+                await yieldToMain(60);
             }
         }
     }

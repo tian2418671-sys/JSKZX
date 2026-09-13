@@ -553,6 +553,12 @@ const configPath = path.join(app.getPath('userData'), 'tavern_manager_config.jso
 // 原子写入：先写临时文件再 rename，防止写入中途崩溃导致配置损坏/丢失。
 const APP_CONFIG_PATH = path.join(app.getPath('userData'), 'app_config.json');
 
+// 【测卡数据独立落盘】会话 / 变量树 / 聊天设置的持久化载体。
+// ⚠️ 刻意独立于 app_config.json：后者是「整份全量替换」语义（渲染层 useConfigPersistence
+//    全量生成 payload 后原子覆盖），若把聊天记录混进去，任何部分写入都会被下一次
+//    syncConfigToDisk 覆盖，且反过来会覆盖掉别人的字段。独立文件互不干扰。
+const CHAT_STORE_PATH = path.join(app.getPath('userData'), 'chat_store.json');
+
 // 原子写 JSON 配置文件（写临时文件 + rename 原子替换，绝不在原文件上直接覆盖）
 // 🚀 v1.8.5 性能修复：同步 writeFileSync/renameSync 改 fs/promises 异步版 ——
 //    旧版每次配置落盘（sys:saveConfig 高频触发）都阻塞主进程事件循环，
@@ -1003,8 +1009,31 @@ async function scanDirectoryForCards(dirPath, event, progressState = { count: 0 
     }
 }
 
+// 🧹 一次性回收 v2.3 遗留的内嵌提取缓存（embed_cache_*，老版本可达 1.17GB）
+//    该缓存实测是「负优化」已被整体移除（理由见文件末尾说明）；此处仅帮老用户把
+//    磁盘空间收回来。用标记文件保证只扫一次目录，不影响后续启动耗时。
+function cleanupLegacyEmbedCache() {
+  try {
+    const dir = app.getPath('userData');
+    const marker = path.join(dir, '.embed_cache_removed');
+    if (fs.existsSync(marker)) return;
+    let n = 0; let bytes = 0;
+    for (const f of fs.readdirSync(dir)) {
+      if (!f.startsWith('embed_cache_')) continue;
+      try {
+        const st = fs.statSync(path.join(dir, f));
+        fs.unlinkSync(path.join(dir, f));
+        bytes += st.size || 0; n++;
+      } catch (e) { /* 占用/已删忽略 */ }
+    }
+    fs.writeFileSync(marker, new Date().toISOString(), 'utf-8');
+    if (n) console.log(`[embed-cache] 已回收遗留缓存 ${n} 个文件 / ${(bytes / 1048576).toFixed(1)}MB`);
+  } catch (e) { /* 忽略 */ }
+}
+
 app.whenReady().then(() => {
   registerAppProtocol();
+  cleanupLegacyEmbedCache();   // 🧹 回收 v2.3 遗留缓存（迁移一次性）
 
   // 【安全加固】仅生产模式注入 CSP（纵深防御兜底）：开发模式走 Vite Dev Server
   // (http://localhost:5173)，HMR 依赖 ws:// 连接，无条件注入 connect-src 'self'
@@ -1213,6 +1242,37 @@ app.whenReady().then(() => {
   // 且为旧文件双权威 + 裸 writeFileSync 非原子写根源。旧文件 uiSettings 由 sys:loadConfig 只读迁移。
 
   // ==========================================
+  // 💬 测卡数据专属落盘（chat_store.json）
+  // 生产模式 app:// 下 localStorage 不可靠，测卡会话/变量树/聊天设置改走物理文件。
+  // 独立于 app_config.json（避免与 useConfigPersistence 的全量替换语义互相覆盖）。
+  // 写入串行化：同刻多次保存排队执行，后写覆盖先写（聊天场景「最新即正确」）。
+  // ==========================================
+  let chatStoreWriteChain = Promise.resolve();
+  ipcMain.handle('chatStore:load', async () => {
+    try {
+      if (!fs.existsSync(CHAT_STORE_PATH)) return { success: true, data: null };
+      const raw = await fsp.readFile(CHAT_STORE_PATH, 'utf-8');
+      const data = JSON.parse(raw);
+      return { success: true, data: (data && typeof data === 'object') ? data : null };
+    } catch (e) {
+      // 文件损坏/不可读 → 返回 null 让渲染层回退 localStorage，不抛错阻断启动
+      console.error('读取测卡数据失败:', e);
+      return { success: false, error: e.message, data: null };
+    }
+  });
+  ipcMain.handle('chatStore:save', (event, data) => {
+    const payload = (data && typeof data === 'object') ? data : {};
+    chatStoreWriteChain = chatStoreWriteChain
+      .then(() => atomicWriteJson(CHAT_STORE_PATH, payload))
+      .then(() => ({ success: true }))
+      .catch((e) => {
+        console.error('写入测卡数据失败:', e);
+        return { success: false, error: e.message };
+      });
+    return chatStoreWriteChain;
+  });
+
+  // ==========================================
   // 🛡️ 统一持久化中枢（app_config.json 最高权威）
   // 全软件所有全局状态（语言/分组/全局标签池/卡片覆盖层/API Key 等）
   // 统一经 sys:saveConfig 原子写入 app_config.json；sys:loadConfig 全量读取。
@@ -1322,28 +1382,14 @@ app.whenReady().then(() => {
     // paths: [{ path, size, mtime }] —— size 供自适应窗口计算读头长度（兼容纯字符串数组）
     const results = [];
     const items = Array.isArray(paths) ? paths : [];
-    await loadEmbedCache(); // 🚀 v2.3 惰性加载缓存（首次调用前，异步分片读防阻塞）
     for (let i = 0; i < items.length; i += READ_BATCH) {
       const batch = items.slice(i, i + READ_BATCH);
       const part = await Promise.all(batch.map(async (item) => {
         const p = (typeof item === 'string' ? item : (item && item.path)) || '';
         const size = (item && typeof item === 'object') ? (item.size || 0) : 0;
-        const mtime = (item && typeof item === 'object') ? (item.mtime || 0) : 0;
         if (!isPathAllowed(p)) return { path: p, ok: false, reason: 'forbidden' };
         try {
-          // 🚀 v2.3 缓存命中：同一文件（mtime+size 未变）已提取过 → 直接复用，跳过 PNG 读取
-          const ck = `${p}|${mtime}|${size}`;
-          if (mtime && embedCache.has(ck)) {
-            return { path: p, data: embedCache.get(ck), ok: true, cached: true };
-          }
           const data = await readPngEmbeddedFromFile(p, size);
-          if (data && mtime) {
-            // 🚀 v2.3 LRU 缓存：单条 > 512KB 的巨卡跳过，防缓存文件膨胀
-            try {
-              if (JSON.stringify(data).length <= EMBED_CACHE_ITEM_MAX) cacheSetEmbed(ck, data);
-            } catch (e) { /* 序列化失败跳过缓存 */ }
-            scheduleEmbedCacheSave();
-          }
           return { path: p, data: data || null, ok: true };
         } catch (e) {
           return { path: p, ok: false, reason: e.message };
@@ -3823,81 +3869,16 @@ async function readPngEmbeddedFromFile(filePath, size) {
 //    旧版 walkLibraryDir 对每个文件 await stat，1 万张 = 1 万次串行磁盘 IO，
 //    是万卡库扫描耗时的主要瓶颈；现入队后按 STAT_BATCH(128) 并发批量 stat。
 const STAT_BATCH = 128;
-// ================= [ 🚀 v2.3 PNG 内嵌提取缓存 ] =================
-// 万卡/真实大库（数万张 PNG）每次启动都重读全部 PNG 头部提取内嵌 card JSON，
-// 是首屏慢的主因之一。按 (path+mtime+size) 缓存已提取结果到 embed_cache_N.json：
-//   - 首次启动：逐 PNG 提取并写入缓存（内存 Map + 防抖分片落盘）
-//   - 后续启动：缓存命中直接复用，跳过 PNG 读取，首屏大幅提速
-// 安全：key 含 mtime+size，文件被修改/替换后 key 失效自动重新提取，绝不返回旧数据。
-// 防爆：LRU 上限 EMBED_CACHE_MAX 条 + 单条 > EMBED_CACHE_ITEM_MAX 不缓存 +
-//       分片保存（每片 EMBED_CACHE_CHUNK 条），杜绝 JSON.stringify 超限崩溃。
-const embedCache = new Map();
-let embedCacheLoaded = false;
-let embedCacheSaveTimer = null;
-const EMBED_CACHE_MAX = 12000;            // LRU 上限：覆盖万卡级库（2000 上限下万卡库命中率仅 20%，二次启动大量重读 PNG）
-const EMBED_CACHE_ITEM_MAX = 512 * 1024;  // 单条 > 512KB 的巨卡不缓存
-const EMBED_CACHE_CHUNK = 500;            // 分片保存：每片 500 条
-function getEmbedCacheBase() {
-  try { return path.join(app.getPath('userData'), 'embed_cache'); } catch (e) { return ''; }
-}
-function cacheSetEmbed(key, data) {
-  if (embedCache.has(key)) embedCache.delete(key);
-  embedCache.set(key, data);
-  while (embedCache.size > EMBED_CACHE_MAX) {
-    const oldest = embedCache.keys().next().value;
-    if (oldest === undefined) break;
-    embedCache.delete(oldest);
-  }
-}
-async function loadEmbedCache() {
-  if (embedCacheLoaded) return;
-  embedCacheLoaded = true;
-  const base = getEmbedCacheBase();
-  if (!base) return;
-  try {
-    const dir = path.dirname(base);
-    let files = [];
-    try { files = fs.readdirSync(dir).filter(f => f.startsWith(path.basename(base) + '_') && f.endsWith('.json')); } catch (e) { /* 目录不存在 */ }
-    for (const f of files) {
-      try {
-        // 🚀 异步分片读：缓存文件随 EMBED_CACHE_MAX 提升而变大，同步 readFileSync 会阻塞主进程数秒
-        const raw = JSON.parse(await fs.promises.readFile(path.join(dir, f), 'utf-8'));
-        if (raw && raw.v === 1 && raw.items && typeof raw.items === 'object') {
-          for (const [k, v] of Object.entries(raw.items)) {
-            if (v && typeof v === 'object' && embedCache.size < EMBED_CACHE_MAX) embedCache.set(k, v);
-          }
-        }
-      } catch (e) { /* 单片损坏跳过 */ }
-      await yieldToEventLoop(); // 片间让出事件循环，防大缓存加载阻塞 UI
-    }
-    if (embedCache.size > 0) console.log(`[embed-cache] 已加载 ${embedCache.size} 条 PNG 内嵌缓存`);
-  } catch (e) { /* 缓存损坏/过大时忽略，重新构建 */ }
-}
-function scheduleEmbedCacheSave() {
-  if (embedCacheSaveTimer) return;
-  embedCacheSaveTimer = setTimeout(() => {
-    embedCacheSaveTimer = null;
-    const base = getEmbedCacheBase();
-    if (!base || embedCache.size === 0) return;
-    const dir = path.dirname(base);
-    // 清理旧分片
-    try {
-      for (const f of fs.readdirSync(dir)) {
-        if (f.startsWith(path.basename(base) + '_') && f.endsWith('.json')) {
-          try { fs.unlinkSync(path.join(dir, f)); } catch (e) { /* 忽略 */ }
-        }
-      }
-    } catch (e) { /* 忽略 */ }
-    // 分片原子写：防单文件 JSON.stringify 超限（RangeError: Invalid string length）
-    const entries = [...embedCache.entries()];
-    for (let i = 0; i < entries.length; i += EMBED_CACHE_CHUNK) {
-      const items = {};
-      for (const [k, v] of entries.slice(i, i + EMBED_CACHE_CHUNK)) items[k] = v;
-      const file = `${base}_${i / EMBED_CACHE_CHUNK}.json`;
-      atomicWriteJson(file, { v: 1, items }).catch(() => { /* 保存失败不影响功能 */ });
-    }
-  }, 3000);
-}
+// 📌 [已移除] v2.3 的 PNG 内嵌提取缓存（embed_cache_N.*）
+//    实测（I:\03\角色色卡 = 11186 张 / 9.76GB，同机交替复测，均为主进程批读同一条链路）：
+//      · 无缓存            : fetch 3.1s / worker 1.8s / assemble 10.5s / 合计 17.0s  ← 最快
+//      · v1 .json 分片(1.17GB): fetch 9.3s / 合计 36.9~43.3s
+//      · v2 .json.gz 分片(385MB): fetch 29.1s / worker 1.6s / assemble 52.8s / 合计 85.3s
+//    结论：从 PNG 头部提取内嵌 JSON 本身仅约 3s（128 路并发、按需流式，边到边组装，GC 可回收），
+//    而缓存会把 1.2GB 对象一次性常驻主进程 → 堆压力/GC 抖动 + 额外 IPC 克隆，反而慢 2~5 倍。
+//    （另：曾试 v8.serialize 二进制分片，实测 137s —— v8.deserialize 产出 dictionary-mode
+//      对象，跨 IPC structured clone 与属性访问都明显变慢；JSON.parse 反而是快路径。）
+//    ⇒ 收益为负，整体移除；老版本用户磁盘上的 embed_cache_* 由 cleanupLegacyEmbedCache() 回收。
 
 async function flushStatQueue(queue) {
   if (!queue || queue.length === 0) return;

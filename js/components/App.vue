@@ -581,12 +581,13 @@ import { useWorldbookExtras } from '../composables/useWorldbookExtras.js'; // �
 import { useAITools } from '../composables/useAITools.js'; // ✨ AI 打标/翻译/格式升维功能（拆分出的组合式函数）
 import { useTags } from '../composables/useTags.js'; // 🏷️ 标签系统（批量标签/预设标签/系统标签池/中英切换/全局标签库）组合式函数
 import { useChat } from '../composables/useChat.js'; // 💬 聊天测卡（聊天历史/发送/API 设置/模型拉取）组合式函数
+import { useChatEngine } from '../composables/chat/useChatEngine.js'; // ⚙ 测卡编排引擎（预设→世界书→宏→变量→EJS→正则→发送→分段→swipe）
 import { useSearch, extractCardSearchableText, extractCardTags } from '../composables/useSearch.js'; // 🔎 超级搜索引擎（搜索防抖/全字段过滤/分页）组合式函数
 import { TAG_CATEGORIES, classifyTagsByVector, setCustomTagState, setBuiltinCatCustom, getBuiltinCategories, normalizeTagName } from '../utils/tagCategories.js'; // 🏷️ 标签大分类：向量模型辅助归类 + 自定义大分类装载 + 内置分类定制
 import { useGraph } from '../composables/useGraph.js'; // 🕸️ 关系图谱（角色宇宙关系图谱生成/渲染）组合式函数
 import { useDiskScan } from '../composables/useDiskScan.js'; // 💽 磁盘卡片扫描（全盘扫描/收编/刷新目录）组合式函数
 import { useBatch } from '../composables/useBatch.js'; // ✅ 批量操作（多选/批量导出/批量删除/批量打标）组合式函数
-import searchIndex from '../utils/searchIndex.js'; // 🚀 高性能搜索索引引擎
+import searchIndex, { waitForIdle } from '../utils/searchIndex.js'; // 🚀 高性能搜索索引引擎
 import tokenCache from '../utils/tokenCache.js'; // 🚀 Token 估算缓存
 
 /** 用户可读的错误提示映射 */
@@ -1284,7 +1285,10 @@ export default {
         };
 
         // 打开聊天测卡（映射到聊天 Tab）
-        const openChatTab = () => { currentTab.value = 'chat'; initChat(); };
+        // ⚠️ 这里调的是**新编排引擎**的 init。旧 useChat 的 initChat 只往它自己那份
+        //    chatHistory 塞开场白，而聊天 Tab 已改用 chatEngine —— 调旧的就是「什么都没发生」。
+        //    chatEngine 在 setup 后段才创建（TDZ），故用可选链，运行期（用户点击）必然已就绪。
+        const openChatTab = () => { currentTab.value = 'chat'; chatEngine?.initChat(); };
 
         const isDragging = ref(false);
         const dragCounter = ref(0); // 拖拽进入深度计数器（防止在子元素间移动时遮罩闪烁）
@@ -1553,9 +1557,22 @@ export default {
             return cardData.value.data || cardData.value || {};
         });
 
+        // 🛡️ 卡片内容版本号（响应式补丁，2026-09-13）
+        //    cardData 是 shallowRef，深层改动靠 triggerRef 通知；但 Vue 3.4+ 的 computed
+        //    在「新值 === 旧值」时**不再向下传播**（safeData 重算后返回同一个对象 →
+        //    依赖它的 computed 不会被标脏）。于是「整体替换数组」型改动会漏刷新：
+        //    典型例子是给原本**没有** extensions.regex_scripts 的卡新增第一条正则脚本
+        //    （ensureRegexScriptsArray 会新建数组并赋值）—— 面板仍显示「0 条脚本」，
+        //    必须切到别的 Tab 再切回来（子树重挂载）才看得到 = 用户反馈的现象。
+        //    （原本已有数组的卡因为缓存的就是同一个数组对象，原地 push 刚好“侥幸”正常。）
+        //    修法：refreshCardData 时自增版本号，需要感知「数组被整体替换」的 computed
+        //    在取值前先读一下版本号，就能被正确标脏重算。
+        const cardContentVersion = ref(0);
+
         // 【修复】shallowRef 下深层编辑（v-model 直接改 data 内部字段）不会触发响应式更新，
         // 导致 Token 统计 / Raw JSON 视图在打字时不刷新。手动 triggerRef 强制刷新（保留 shallowRef 性能优势）
         const refreshCardData = () => {
+            cardContentVersion.value++;   // 🔔 让「可能被整体替换」的数组型 computed 一定重算
             if (cardData.value) triggerRef(cardData);
             // 🚀 v1.8.5：编辑器改了当前卡内容 → 精确失效该卡的 Token 缓存（侧栏徽章下次渲染重算）
             if (cardData.value) cardTokensCache.delete(cardData.value);
@@ -1628,6 +1645,7 @@ export default {
 
         // 正则脚本（兼容不同存放位置；只读提取，不做副作用，避免无正则卡片保存时写入空数组）
         const regexScripts = computed(() => {
+            cardContentVersion.value;   // 🔔 关键：数组被整体替换（如新增首条）也要能重算，见 cardContentVersion 注释
             const d = safeData.value;
             if (!d || typeof d !== 'object') return [];
             return d.extensions?.regex_scripts || (Array.isArray(d.regex_scripts) ? d.regex_scripts : []);
@@ -1646,6 +1664,10 @@ export default {
         };
 
         // 新增一条正则脚本
+        // 🛡️ 响应式修复：cardData 是 shallowRef，向 extensions.regex_scripts 里 push
+        //    不会触发视图更新 —— 旧版新增后列表不变，用户必须切到别的 Tab 再切回来
+        //    （子树 v-if 重挂载才重新求值）才看得到。这里与 syncRegexScriptField / 批量
+        //    操作保持一致：改完必须 triggerRef(cardData) + 失效该卡 Token 缓存。
         const addRegexScript = () => {
             if (!cardData.value) return;
             const arr = ensureRegexScriptsArray();
@@ -1658,13 +1680,34 @@ export default {
                 placement: [2], // 默认作用于 2: AI 输出
                 disabled: false
             });
+            refreshCardData();
+            addLog(`➕ 已新增正则脚本（共 ${arr.length} 条）`, 'info');
         };
 
         // 删除一条正则脚本
-        const deleteRegexScript = (index) => {
-            if (cardData.value && regexScripts.value[index] !== undefined) {
-                regexScripts.value.splice(index, 1);
-            }
+        // 🛡️ 响应式修复：同上，splice 原地删除不触发视图更新 → 旧版点删除后条目仍在，
+        //    且没有任何提示，看起来像「点了没反应」。现在：二次确认 + 手动刷新 + 操作日志。
+        const deleteRegexScript = async (index) => {
+            if (!cardData.value) return;
+            const arr = regexScripts.value;
+            const target = Array.isArray(arr) ? arr[index] : null;
+            if (!target) return;
+            const name = target.scriptName || target.script_name || `#${index + 1}`;
+            const isStatusbar = /<(?:status|Status)>/.test(String(target.findRegex || target.find_regex || ''));
+            const ok = await confirmDialog(
+                `确定删除正则脚本「${name}」吗？\n\n` +
+                (isStatusbar ? `该脚本是状态栏/美化模板（<status> 触发），删除后卡内将不再渲染状态面板。\n\n` : '') +
+                `• 删除后立即从列表消失\n` +
+                `• 需点「保存卡片」才会写回文件（未保存时可关闭卡片放弃改动）`
+            );
+            if (!ok) return;
+            // 重新取一次（确认弹窗期间数组可能已变）
+            const live = ensureRegexScriptsArray();
+            const idx = Array.isArray(live) ? live.indexOf(target) : -1;
+            if (idx < 0) return;
+            live.splice(idx, 1);
+            refreshCardData();
+            addLog(`🗑️ 已删除正则脚本「${name}」（剩 ${live.length} 条）`, 'warning');
         };
 
         // =========================================================
@@ -1875,7 +1918,7 @@ export default {
                 { id: 'worldbook', name: '世界书', icon: '🌍', badge: worldbookEntries.value.length || null },
                 { id: 'regex', name: '正则脚本', icon: '⚙️', badge: regexScripts.value.length || null },
                 { id: 'statusbar', name: '美化/状态栏', icon: '📊', badge: renderableScripts.value.length || null },
-                { id: 'chat', name: '聊天测试', icon: '💬', action: initChat },
+                { id: 'chat', name: '聊天测试', icon: '💬', action: () => chatEngine?.initChat() },
                 { id: 'raw', name: 'Raw JSON', icon: '💻' }
             ];
             return list.filter(t => {
@@ -4533,7 +4576,7 @@ export default {
         //     箭头函数体运行时才求值（deleteCardItem 仅在用户交互时执行），无 TDZ。
         const {
             persistCardCategory, persistCardUpdate, deleteCardOverlays,
-            parseAndAddCard, processElectronFiles, flushDeferredAutoTagSaves,
+            parseAndAddCard, processElectronFiles, withLoadLock, flushDeferredAutoTagSaves,
             handleDrop, importCards, downloadCardFromUrl,
             deleteCardItem, deleteCard,
             exportCard, renameCard
@@ -4560,7 +4603,7 @@ export default {
         const {
             isScanningDisk, diskScanProgress, useSizeFilter, showDiskScanModal,
             runDiskScan, handleScanImported, selectFixedDirectory, refreshLibrary
-        } = useDiskScan({ library, currentFolderPath, cardData, customCategories, appMode, nativeAlert, showToast, isCategoryKnown, openFromLibrary, parseAndAddCard, processElectronFiles });
+        } = useDiskScan({ library, currentFolderPath, cardData, customCategories, appMode, nativeAlert, showToast, isCategoryKnown, openFromLibrary, parseAndAddCard, processElectronFiles, withLoadLock });
 
         // 🔎 超级搜索引擎：组合式函数注入（共享状态 library/currentCategoryKey/allCategories/sortBy/currentPage/itemsPerPage/lastSelectedIndex 保留在 App.vue）
         const {
@@ -4573,12 +4616,30 @@ export default {
         // 监听 library 变化，分片异步构建索引（每 50 张卡 yield 一次主线程）
         let buildTaskId = 0;
         let pendingRebuild = false;
+        // 🛡️ 重建合并（防「搜索后刷新出现重复卡」+ 防渲染进程崩溃）：
+        //    刷新期间 library 会变动多次（数组引用替换 + 每张新解析卡 triggerRef），
+        //    旧实现每次变动都启动一次全量重建 —— 万卡库下多个重建循环重叠运行：
+        //    ① 索引被写入重复条目 / 刷新前的旧对象在 clear() 后又被补回
+        //       → 搜索时同一张卡命中两次（用户看到的「一个角色卡重复出现」）；
+        //    ② 每轮重建 = 全库正则/分词 + Token 预热，重叠运行把渲染进程打到 OOM
+        //       （render-process-gone exitCode -36861）。
+        //    现在：构建在途时只记一次「补建」，收尾时用最新库重建一次。
+        let indexBuilding = false;
+        let indexDirty = false;
         const rebuildSearchIndex = (newLibrary) => {
             if (!newLibrary || newLibrary.length === 0) {
+                buildTaskId++;          // 取消在途任务（库已空，无需补建）
+                indexBuilding = false;
+                indexDirty = false;
                 searchIndex.clear();
                 tokenCache.clear();
                 return;
             }
+            if (indexBuilding) {        // 已在构建：合并为一次收尾补建，绝不重叠
+                indexDirty = true;
+                return;
+            }
+            indexBuilding = true;
             const taskId = ++buildTaskId;
             const runTask = async () => {
                 try {
@@ -4595,14 +4656,31 @@ export default {
                     console.log('⚡ Token 缓存预热完成:', tokenCache.getStats());
                 } catch (e) {
                     console.error('⚠️ 搜索索引构建失败:', e);
+                } finally {
+                    indexBuilding = false;
+                    // 构建期间的库变动：用最新库补建一次（只补一次，不随触发次数增长）
+                    if (indexDirty) {
+                        indexDirty = false;
+                        rebuildSearchIndex(library.value);
+                    }
                 }
             };
             // 🛡️ 启动卡顿优化：索引/预热不抢「蒙版淡出 + 首屏卡片渲染」的主线程。
-            //    首次加载触发时，等 isAppLoading 置 false（蒙版已淡出、首帧绘出）再开跑；
-            //    轮询本身用 setTimeout(120ms) 让出主线程，不阻塞 UI。
-            //    ⏱️ 超时保险：最多等 5s（防加载蒙版异常永不消失导致索引永远不建）。
+            //    ① 首次加载触发时，先等 isAppLoading 置 false（蒙版已淡出、首帧绘出）；
+            //    ② 再等主线程**真正空闲**（idle 回调余量充足）才开跑 —— 实测万卡全量索引
+            //       约 38s，紧跟加载后会与「首屏渲染 + 自动打标后台落盘 IO」抢资源；
+            //    ③ 索引已改为**双缓冲**（构建写入暂存、完成才切换），所以「晚点建」不会
+            //       影响搜索正确性：构建期间查询走上一代完整索引，构建完自动无缝切换。
+            //    ⏱️ 双重超时保险：等蒙版最多 5s、等空闲最多 8s（防异常导致索引永不构建）。
+            //    ⚠️ 2026-09-13：改用 waitForIdle —— 旧写法单独 await requestIdleCallback
+            //       在窗口隐藏时可能连 timeout 都不兑现，闸门会永久卡住（实测 3 分钟未开建）。
+            const waitIdleThenRun = async (deadline) => {
+                const idleEnough = await waitForIdle(120);
+                if (idleEnough || Date.now() > deadline) { runTask(); return; }
+                waitIdleThenRun(deadline);   // 还在忙（首屏渲染/落盘），再等一轮
+            };
             const waitAppReady = (waitedMs) => {
-                if (!isAppLoading.value || waitedMs >= 5000) { runTask(); return; }
+                if (!isAppLoading.value || waitedMs >= 5000) { waitIdleThenRun(Date.now() + 8000); return; }
                 setTimeout(() => waitAppReady(waitedMs + 120), 120);
             };
             setTimeout(() => waitAppReady(0), 40);
@@ -4806,13 +4884,184 @@ export default {
         });
 
         // �💬 聊天测卡：组合式函数注入（共享状态 apiEndpoint/apiKey/apiModel/apiType 与工具 resolveApiModel/extractReplyContent 保留在 App.vue）
+        // 💬 旧 useChat 仅保留仍被其它域消费的部分：
+        //    chatHistory → useGraph / useStatusbarPreview / 预设缝合等以 getter 注入；
+        //    api* 配置与模型拉取 → ApiSettingsModal / AITagModal 仍在用。
+        //    ⚠️ 已移除（聊天 Tab 不再使用，API 栏已由右侧抽屉「设置」分区取代）：
+        //       chatInput / isChatting / isChatRenderMode / sendMessage / chatContainer
+        //    如需彻底删除本组合式函数，得先把上面两类消费方一起迁走，别直接删。
         const {
-            chatHistory, chatInput, isChatting, chatContainer,
+            chatHistory, chatContainer,
             saveApiConfig, handleApiTypeChange,
-            availableModels, isFetchingModels, fetchModelStatus, fetchAvailableModels,
-            isChatRenderMode,
-            initChat, sendMessage, clearChat
+            availableModels, isFetchingModels, fetchModelStatus, fetchAvailableModels
         } = useChat({ apiEndpoint, apiKey, apiModel, apiType, resolveApiModel, extractReplyContent, DEFAULT_API_ENDPOINT, syncConfigToDisk, nativeAlert, safeData, cardData });
+
+        // ================= [ ⚙ 测卡编排引擎的共享依赖 ] =================
+        // 变量树 / 会话列表的版本号：引擎内部变更时 bump，EditorPanel 的侧栏 computed
+        // 依赖它们重算（跨组件无直接 ref 引用，用版本号做失效信号）。
+        const chatVarsVersion = ref(0);
+        const chatSessionsVersion = ref(0);
+        /** 当前打开卡片的物理路径：测卡会话与变量树按它隔离（cardData 本身不带 path） */
+        const chatCardPathForEngine = computed(() => {
+            const item = currentOpenCardItem && currentOpenCardItem.value;
+            return (item && item.path) || '';
+        });
+
+
+        // ================= [ ⚙ 测卡编排引擎（移动版 useChat* 12 引擎的桌面接线） ] =================
+        // 旧 useChat 仍保留：其 API 配置/模型拉取/渲染模式开关仍被本页与其它域使用；
+        // 新引擎接管「聊天 Tab」的消息、会话、变量、分段渲染与 swipe 全链路。
+        // ⚠️ 命名一律加 chat 前缀 —— ctx 里已有 activePreset/plugins/presets（预设中心/插件工作区），
+        //    直接同名会互相覆盖（实测踩过）。
+        const chatEngine = useChatEngine({
+            cardData, safeData,
+            regexScripts,                             // 卡内正则（桌面已有域）
+            worldbookEntries,                         // 内嵌世界书条目（桌面已有域，useEmbeddedWorldbook 已在前方注入）
+            apiEndpoint, apiKey, apiModel, apiType, resolveApiModel,
+            chatCardPath: chatCardPathForEngine,      // 当前打开卡片的物理路径
+            chatVarsVersion, chatSessionsVersion,
+            nativeAlert, showToast
+        });
+        // 切卡：重建会话列表 + 变量引擎 + 重载开场白（openFromLibrary / 关闭卡片时调用）
+        const resetChatEngineForCard = () => {
+            try { chatEngine.resetForCard(); } catch (e) { console.warn('[chatEngine] 重置失败', e); }
+        };
+        // 用 watch 而非只在 openFromLibrary 里调用：卡片的打开路径不止一条
+        // （库里点开 / 关闭卡片回列表 / 导入后自动打开），watch 能覆盖全部。
+        // 条件须同时判断「卡变了」与「路径有效」，避免启动期 cardData 由 undefined→null 误触发。
+        watch(
+            () => (cardData.value && chatCardPathForEngine.value) || '',
+            (next, prev) => { if (next && next !== prev) resetChatEngineForCard(); }
+        );
+        // 进入「聊天测试」Tab 时初始化测卡引擎（恢复上次会话；无消息则补开场白）。
+        // ⚠️ 挂 watch 而不是改 openChatTab：进聊天 Tab 的入口不止一个
+        //    （左侧菜单项 action / 卡片页签点击 / openChatTab 快捷键）。
+        //    多调一次 initChat 是幂等的（它本身就是「从存储恢复当前会话」）。
+        watch(currentTab, (t) => {
+            if (t !== 'chat') return;
+            try { chatEngine.initChat(); } catch (e) { console.warn('[chatEngine] 初始化失败', e); }
+        });
+        // 🔬 临时诊断句柄（大库压测用，测完删除）
+        if (!import.meta.env.PROD) {
+            try {
+                window.__jskDiag = {
+                    lib: () => library.value,
+                    folder: () => currentFolderPath.value,
+                    filteredCount: () => filteredLibrary.value.length,
+                    totalPages: () => totalPages.value,
+                    refresh: () => refreshLibrary(),
+                    // 🔬 暴露应用真正使用的那一份 searchIndex / tokenCache 单例（dev-only）
+                    //    压测/诊断用：`import('/js/utils/searchIndex.js')` 可能因 Vite 的
+                    //    `?t=` 查询参数拿到另一个模块实例，导致读数全错。
+                    idx: searchIndex,
+                    tokenCache,
+                    setSearch: (q) => { searchQueryInput.value = q; },
+                    clearSearch: () => { searchQueryInput.value = ''; },
+                    setCategory: (k) => { currentCategoryKey.value = k; },
+                    category: () => currentCategoryKey.value,
+                    /** 🔬 并发重入触发：同时发起 N 次刷新（不 await 前一次）——复现「快速连点刷新」 */
+                    concurrentRefresh: async (n = 5) => {
+                        const calls = [];
+                        for (let i = 0; i < n; i++) calls.push(refreshLibrary());   // 故意不逐个 await
+                        await Promise.allSettled(calls);
+                        await new Promise((r) => setTimeout(r, 1500));
+                        return true;
+                    },
+                    /** 🔬 并发两次「全量加载」（模拟加载未完成就刷新/切库） */
+                    concurrentLoad: async () => {
+                        if (!currentFolderPath.value) return false;
+                        const r = await window.electronAPI.rescanLibrary(currentFolderPath.value);
+                        if (!r || !r.files) return false;
+                        const p1 = processElectronFiles(r);
+                        const p2 = processElectronFiles(r);
+                        await Promise.allSettled([p1, p2]);
+                        await new Promise((x) => setTimeout(x, 1500));
+                        return true;
+                    },
+                    /** 只统计「当前过滤结果集」内部的重复（11k 库上每次几百 ms，可反复跑） */
+                    filteredDup: () => {
+                        const arr = filteredLibrary.value;
+                        const byPath = new Map();
+                        for (const c of arr) byPath.set(c.path, (byPath.get(c.path) || 0) + 1);
+                        const byId = new Map();
+                        for (const c of arr) byId.set(c.id, (byId.get(c.id) || 0) + 1);
+                        const dupPaths = [...byPath.entries()].filter(([, n]) => n > 1);
+                        const dupIds = [...byId.entries()].filter(([, n]) => n > 1);
+                        return {
+                            filtered: arr.length,
+                            uniquePaths: byPath.size,
+                            duplicatePaths: dupPaths.length,
+                            dupPathSamples: dupPaths.slice(0, 5),
+                            duplicateIds: dupIds.length,
+                            dupIdSamples: dupIds.slice(0, 3)
+                        };
+                    },
+                    /** 轻量去重查询：只查 path（不做 id/name 三次遍历），供高频轮询抓中间态 */
+                    quickDup: () => {
+                        const arr = library.value;
+                        const byPath = new Map();
+                        let dup = 0;
+                        for (let i = 0; i < arr.length; i++) {
+                            const p = arr[i] && arr[i].path;
+                            const n = (byPath.get(p) || 0) + 1;
+                            byPath.set(p, n);
+                            if (n === 2) dup++;
+                        }
+                        return { total: arr.length, uniquePaths: byPath.size, dupPaths: dup };
+                    },
+                    // 只扫描不重建（快）：验证「扫描结果本身是否出现同一 path 两次」
+                    rawScan: async () => {
+                        const r = await window.electronAPI.rescanLibrary(currentFolderPath.value);
+                        if (!r || !r.files) return { error: (r && r.error) || 'no files' };
+                        const counts = new Map();
+                        for (const f of r.files) counts.set(f.path, (counts.get(f.path) || 0) + 1);
+                        const dups = [...counts.entries()].filter(([, n]) => n > 1);
+                        return { files: r.files.length, uniquePaths: counts.size, dupPaths: dups.length, dupSamples: dups.slice(0, 5) };
+                    },
+                    dupInfo: () => {
+                        const arr = library.value;
+                        const byPath = new Map();
+                        for (const c of arr) byPath.set(c.path, (byPath.get(c.path) || 0) + 1);
+                        const dupPaths = [...byPath.entries()].filter(([, n]) => n > 1);
+                        const byId = new Map();
+                        for (const c of arr) byId.set(c.id, (byId.get(c.id) || 0) + 1);
+                        const dupIds = [...byId.entries()].filter(([, n]) => n > 1);
+                        // 同名不同路径（用户的「重复卡」观感来源之一，属物理事实、非 bug）
+                        const byName = new Map();
+                        for (const c of arr) byName.set(c.name, (byName.get(c.name) || 0) + 1);
+                        const dupNames = [...byName.entries()].filter(([, n]) => n > 1);
+                        return {
+                            total: arr.length,
+                            uniquePaths: byPath.size,
+                            duplicatePaths: dupPaths.length,
+                            dupPathSamples: dupPaths.slice(0, 5),
+                            duplicateIds: dupIds.length,
+                            dupIdSamples: dupIds.slice(0, 3),
+                            sameNameDiffPath: dupNames.length,
+                            sameNameSamples: dupNames.slice(0, 5).map(([n, c]) => ({ name: n, count: c }))
+                        };
+                    }
+                };
+            } catch (e) { /* 忽略 */ }
+        }
+
+        // 🔬 开发环境调试句柄：供 scripts/chat-engine-test.mjs 端到端断言编排管线
+        //    （buildPayload 分支 / 宏 / EJS / 世界书激活 / 分段 / swipe）。
+        //    ⚠️ 生产构建不挂载（import.meta.env.PROD 为 true），不污染发布包。
+        if (!import.meta.env.PROD) {
+            try {
+                window.__jskChatEngine = {
+                    engine: chatEngine,
+                    buildPayload: chatEngine.buildPayload,
+                    segmentsOf: chatEngine.segmentsOf,
+                    collectActivatedWbText: chatEngine.collectActivatedWbText,
+                    renderTpl: chatEngine.renderTpl,
+                    macros: () => chatEngine.fullMacros.value,
+                    init: chatEngine.initChat,
+                    send: chatEngine.sendChat
+                };
+            } catch (e) { /* 调试句柄失败不影响运行 */ }
+        }
 
         // 🕸️ 关系图谱：组合式函数注入（共享状态 library/cardData/imgUrl/currentTab/chatHistory/worldbookExpanded/allCategories/currentCategoryKey 保留或来自其他组合式函数）
         const {
@@ -4933,11 +5182,44 @@ export default {
             // 🧩 内置大分类定制（改名 / 删除隐藏 / 恢复）
             builtinCatRenames, builtinCatHidden, builtinCategoryDisplayName,
             renameBuiltinCategory, hideBuiltinCategory, restoreBuiltinCategory,
-            chatHistory, chatInput, isChatting, apiEndpoint, apiKey, apiModel, apiType, saveApiConfig, handleApiTypeChange, chatContainer,
+            // 💬 旧 useChat 残量：api* 与模型拉取仍供 ApiSettingsModal / AITagModal 使用；
+            //    chatInput/isChatting/isChatRenderMode/sendMessage/clearChat 已随 API 栏一并移除
+            //    （聊天 Tab 现由 chatEngine 驱动，见下方 chat* 字段）
+            chatHistory, apiEndpoint, apiKey, apiModel, apiType, saveApiConfig, handleApiTypeChange,
             rebindTavernPath,
             availableModels, isFetchingModels, fetchModelStatus, fetchAvailableModels,
-            isChatRenderMode, // 【新增暴露】渲染/代码模式开关
-            sendMessage, clearChat,
+            // ⚙ 测卡编排引擎（setup 返回值 = 模板可用的 ctx，缺一项模板拿到 undefined）
+            chatMessages: chatEngine.chatMessages,
+            chatDraft: chatEngine.chatDraft,
+            chatSending: chatEngine.chatSending,
+            chatSessions: chatEngine.sessions,
+            chatActiveSessionId: chatEngine.activeSessionId,
+            chatVarsTree: chatEngine.varsTree,
+            chatVarsLog: chatEngine.varsLog,
+            chatVarsStats: chatEngine.varsStats,
+            chatVarsJson: chatEngine.varsJson,
+            chatVarsVersion, chatSessionsVersion,
+            chatFullMacros: chatEngine.fullMacros,
+            chatActivePreset: chatEngine.activePreset,
+            chatInit: chatEngine.initChat,
+            chatResetForCard: resetChatEngineForCard,
+            chatClear: chatEngine.clearChat,
+            chatSend: chatEngine.sendChat,
+            chatBuildPayload: chatEngine.buildPayload,
+            chatNextSwipe: chatEngine.nextSwipe,
+            chatPrevSwipe: chatEngine.prevSwipe,
+            chatMoreSwipe: chatEngine.moreSwipe,
+            chatRegenerateSwipe: chatEngine.regenerateSwipe,
+            chatContinueSwipe: chatEngine.continueSwipe,
+            chatNewSession: chatEngine.newSession,
+            chatSwitchSession: chatEngine.switchSession,
+            chatRenameSession: chatEngine.renameSessionById,
+            chatRemoveSession: chatEngine.removeSessionById,
+            chatSaveSession: chatEngine.saveCurrentChat,
+            chatResetVars: chatEngine.resetVars,
+            chatUndoVar: chatEngine.undoVar,
+            chatSetVar: chatEngine.setVar,
+            chatSegmentsOf: chatEngine.segmentsOf,
             showGraph, graphBuilding, openGraph, closeGraph,
             graphLayoutMode, graphSearchKeyword, minLinkWeight,
             isolateCurrentGroup, edgeFilters, graphStats,
@@ -5048,7 +5330,40 @@ export default {
             // 🚀 系统版本更新检测
             showUpdateModal, updateInfo, updateErrorMsg, showUpdateBadge, dismissUpdateBadge, checkForUpdatesManual, openExternalUrl,
             // 🛡️ 统一持久化中枢（app_config.json 最高权威）
-            appConfig, syncConfigToDisk, persistCardUpdate
+            appConfig, syncConfigToDisk, persistCardUpdate,
+            // ⚙ 测卡编排引擎（新消息管线：预设→世界书→宏→变量→EJS→正则→发送→分段→swipe）
+            //    ⚠️ 全部带 chat 前缀，勿改成 activePreset/plugins（已被预设中心/插件工作区占用）
+            chatMessages: chatEngine.chatMessages,
+            chatDraft: chatEngine.chatDraft,
+            chatSending: chatEngine.chatSending,
+            chatSessions: chatEngine.sessions,
+            chatActiveSessionId: chatEngine.activeSessionId,
+            chatVarsTree: chatEngine.varsTree,
+            chatVarsLog: chatEngine.varsLog,
+            chatVarsStats: chatEngine.varsStats,
+            chatVarsJson: chatEngine.varsJson,
+            chatVarsVersion, chatSessionsVersion,
+            chatFullMacros: chatEngine.fullMacros,
+            chatActivePreset: chatEngine.activePreset,
+            chatInit: chatEngine.initChat,
+            chatResetForCard: resetChatEngineForCard,
+            chatClear: chatEngine.clearChat,
+            chatSend: chatEngine.sendChat,
+            chatBuildPayload: chatEngine.buildPayload,
+            chatNextSwipe: chatEngine.nextSwipe,
+            chatPrevSwipe: chatEngine.prevSwipe,
+            chatMoreSwipe: chatEngine.moreSwipe,
+            chatRegenerateSwipe: chatEngine.regenerateSwipe,
+            chatContinueSwipe: chatEngine.continueSwipe,
+            chatNewSession: chatEngine.newSession,
+            chatSwitchSession: chatEngine.switchSession,
+            chatRenameSession: chatEngine.renameSessionById,
+            chatRemoveSession: chatEngine.removeSessionById,
+            chatSaveSession: chatEngine.saveCurrentChat,
+            chatResetVars: chatEngine.resetVars,
+            chatUndoVar: chatEngine.undoVar,
+            chatSetVar: chatEngine.setVar,
+            chatSegmentsOf: chatEngine.segmentsOf
         };
         provide('appCtx', ctx);
         return ctx;

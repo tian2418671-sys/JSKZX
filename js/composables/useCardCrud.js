@@ -27,15 +27,17 @@ function getParseWorker() {
   }
 }
 // 把一块卡的原始数据发往 Worker 解析（不 await，返回 Promise；null = Worker 不可用）
+// 🔥 P0 优化（库加载）：**只送「需要 JSON.parse 的纯文本卡」**（.json 卡 + 内存导入文本）。
+//    PNG 卡的 embeddedData 已是主进程解析好的对象，送进 Worker 等于白白多两次
+//    structured clone（万卡库 ≈1.2GB 级搬运，实测是 fetch/assemble 墙钟时间的主要来源之一）；
+//    这类卡改在主线程直接做血统鉴定（见 assembleChunk），语义不变。
 function parseChunkInWorker(chunk) {
   const w = getParseWorker();
   if (!w) return null;
   const items = [];
   for (const f of chunk) {
-    const rawText = (f.rawText != null) ? f.rawText : undefined;
-    const embeddedData = (f.embeddedData && typeof f.embeddedData === 'object') ? f.embeddedData : undefined;
-    if (rawText != null || embeddedData) {
-      items.push({ path: f.path, rawText, embeddedData });
+    if (typeof f.rawText === 'string' && f.rawText.length > 0 && !f.embeddedData) {
+      items.push({ path: f.path, rawText: f.rawText });
     }
   }
   if (items.length === 0) return Promise.resolve([]);
@@ -47,6 +49,26 @@ function parseChunkInWorker(chunk) {
     w.addEventListener('message', handler);
     w.postMessage({ items });
   });
+}
+
+// 🔇 载入期「跳过文件」日志降噪：
+//    万卡库里同一批世界书 / 预设 JSON 会散落在多个子目录，旧写法逐条 console.warn 刷屏
+//    （实测单次加载 500+ 条），既拖慢 console 转发，也把真正的错误淹没在噪声里。
+//    现在：同一「原因+文件名」只打一条，总量封顶 SKIP_LOG_CAP，收尾给一行汇总。
+const SKIP_LOG_CAP = 40;
+let _skipLogSeen = new Set();
+let _skipLogTotal = 0;
+function resetSkipLog() { _skipLogSeen = new Set(); _skipLogTotal = 0; }
+function warnSkipOnce(key, message, extra) {
+  _skipLogTotal++;
+  if (_skipLogSeen.size >= SKIP_LOG_CAP || _skipLogSeen.has(key)) return;
+  _skipLogSeen.add(key);
+  if (extra !== undefined) console.warn(message, extra); else console.warn(message);
+}
+function logSkipSummary() {
+  if (_skipLogTotal === 0) return;
+  const hidden = _skipLogTotal - _skipLogSeen.size;
+  console.log(`[载入] 跳过 ${_skipLogTotal} 个非角色卡/不可解析文件` + (hidden > 0 ? `（同类日志已折叠 ${hidden} 条）` : ''));
 }
 
 export function useCardCrud({
@@ -339,14 +361,17 @@ export function useCardCrud({
             // 标记 _skippedExisting 供上层区分"已在库中"与"无法解析"，给出准确提示
             // 🚀 v1.8.5：批量加载（staging）时需同时查 staging 与 library ——
             //    加载窗口期手工导入与正在扫描的同路径卡若只查一边会双双入库（影分身）
-            const dupIn = (arr) => arr.some(c => c.path === file.path);
+            const dupIn = (arr) => Array.isArray(arr) && arr.some(c => c && c.path === file.path);
             // 🚀 v2.0 修复：批量加载时用 seenPaths Set 对 staging 维度 O(1) 判重 ——
             //    旧版 arr.some 对 staging 全量线性扫描，万张 ≈ 5000 万次路径比较。
-            //    library 维度判重保留（批量加载期 library 为空，代价可忽略）。
-            const inStaging = (opts.seenPaths instanceof Set)
-                ? opts.seenPaths.has(file.path)
-                : dupIn(opts.target || library.value);
-            if (inStaging || (opts.target && dupIn(library.value))) {
+            // 🐞 2026-09-13 加固（「卡库重复卡」排查）：旧写法是
+            //       const inStaging = seenPaths ? seenPaths.has(p) : dupIn(opts.target || library.value);
+            //       if (inStaging || (opts.target && dupIn(library.value)))
+            //    → **没传 seenPaths 时，library 那一份完全不查**（`opts.target &&` 直接短路为 false）。
+            //    增量刷新（useDiskScan.refreshLibrary）旧版正是「无 target 且无 seenPaths」，
+            //    于是同一 path 进两次就真的写两条。现在两个维度**无条件都查**。
+            const seenHit = (opts.seenPaths instanceof Set) && opts.seenPaths.has(file.path);
+            if (seenHit || dupIn(opts.target) || dupIn(library.value)) {
                 file._skippedExisting = true;
                 return false;
             }
@@ -364,13 +389,13 @@ export function useCardCrud({
                 } else if (window.electronAPI && typeof window.electronAPI.readText === 'function') {
                     const res = await window.electronAPI.readText(file.path);
                     if (res && res.success && typeof res.text === 'string') text = res.text;
-                    else console.warn(`读取 JSON 失败（可能路径不在白名单）: ${file.name}`, res && res.error);
+                    else warnSkipOnce(`readjson:${file.name}`, `读取 JSON 失败（可能路径不在白名单）: ${file.name}`, res && res.error);
                 }
                 if (text === null) return false;
                 const parsed = JSON.parse(text);
                 // 内容校验：非角色卡的 JSON（如 config.json/世界书/快速回复）直接跳过，不进入解析与入库
                 if (!isCharacterCardData(parsed)) {
-                    console.warn(`跳过非角色卡 JSON [${getCardRejectReason(parsed)}]: ${file.name}`);
+                    warnSkipOnce(`reject:${getCardRejectReason(parsed)}:${file.name}`, `跳过非角色卡 JSON [${getCardRejectReason(parsed)}]: ${file.name}`);
                     return false;
                 }
                 parsedData = parsed;
@@ -389,7 +414,7 @@ export function useCardCrud({
                     const res = await window.electronAPI.readBuffer(file.path);
                     // readBuffer 返回 forbidden() 对象（{success:false}）时不能取 .buffer 解析
                     if (res && typeof res === 'object' && res.buffer) buffer = res.buffer;
-                    else console.warn(`读取图片失败（可能路径不在白名单）: ${file.name}`, res && res.error);
+                    else warnSkipOnce(`readimg:${file.name}`, `读取图片失败（可能路径不在白名单）: ${file.name}`, res && res.error);
                 }
                 if (!buffer) return false;
                 // 复用解析函数（Buffer 经 IPC 传递后为 Uint8Array，取 .buffer 为 ArrayBuffer）
@@ -442,16 +467,28 @@ export function useCardCrud({
                 // 触发自动标签和分类（会优先应用导入的历史配置）
                 const oldTagsLen = (cardInfo.customTags || []).length;
                 const oldCategory = cardInfo.category;
-                // 🧹 记录清洗前的原生 data.tags 长度（sanitize 物理清洗落盘判定用）
+                // 🧹 记录清洗前的原生 data.tags 长度（已废弃，保留变量名为兼容旧逻辑引用点）
                 const dataLayerBefore = cardInfo.data?.data || cardInfo.data || {};
-                const oldNativeTagsLen = Array.isArray(dataLayerBefore.tags)
-                    ? dataLayerBefore.tags.length
-                    : (typeof dataLayerBefore.tags === 'string' && dataLayerBefore.tags.trim() !== '' ? 1 : 0);
+                // 🧹 记录「物理文件上原本的标签」——写盘判定必须基于盘上状态（而非清洗后的内存状态），
+                //    否则会陷入「清洗→判定需写盘→写回→下次启动又被当原生标签清掉」的无限重写（详见下方注释）
+                const diskTagsBefore = Array.isArray(dataLayerBefore.tags)
+                    ? [...dataLayerBefore.tags]
+                    : (typeof dataLayerBefore.tags === 'string' && dataLayerBefore.tags.trim() !== ''
+                        ? dataLayerBefore.tags.split(',').map(s => s.trim()).filter(Boolean) : []);
                 processAutoTagsAndCategory(cardInfo);
                 // 🚀 v1.8.5 性能修复：批量加载路径推入 staging 暂存数组（加载完成后一次性
                 //    赋给 library），避免每 push 一张就触发全库 computed（filteredLibrary/
                 //    globalAllWorldbooks 等）失效风暴 —— 千卡库加载期 O(N²) 重算主因之一。
-                (opts.target || library.value).push(cardInfo);
+                // 🛡️ 最终防线（防重复卡）：同一 path 已在库中时**替换**（顶层 mtime 变化会走这条），
+                //    绝不再新增一条。上面的 seenPaths 只覆盖「本批 toParse」，
+                //    若调用方未传 seenPaths（旧刷新路径）则完全无判重 → 重复卡。
+                const liveList = opts.target || library.value;
+                const dupIdx = liveList.findIndex(c => c && c.path && c.path === cardInfo.path);
+                if (dupIdx >= 0) {
+                    liveList[dupIdx] = cardInfo;
+                } else {
+                    liveList.push(cardInfo);
+                }
                 if (!opts.target) triggerRef(library); // shallowRef：单卡直接入库时手动触发响应式
                 // 🚀 v2.0 修复：批量加载时登记 seenPaths，供下一张卡 O(1) 判重
                 if (opts.seenPaths instanceof Set) opts.seenPaths.add(file.path);
@@ -473,13 +510,23 @@ export function useCardCrud({
                     //    消除万卡库重复写盘 IO（首次写入后 mtime 更新，后续启动零重写）。
                     // 🧹 v2.1.4 例外：sanitize 开关开启时原生 tags 被物理清空，必须写盘把
                     //    清洗结果同步到 PNG 文件，否则磁盘文件仍残留外来标签（重启复活）。
-                    const nativeCleared = oldNativeTagsLen > 0 && (Array.isArray(dataLayer.tags)
-                        ? dataLayer.tags.length === 0
-                        : (typeof dataLayer.tags !== 'string' || dataLayer.tags.trim() === ''));
-                    const existingTags = new Set(Array.isArray(dataLayer.tags) ? dataLayer.tags : []);
-                    const newTags = (cardInfo.customTags || []).filter(t => !existingTags.has(t));
-                    if (newTags.length > 0 || nativeCleared) {
-                        dataLayer.tags = Array.from(new Set([...(Array.isArray(dataLayer.tags) ? dataLayer.tags : []), ...newTags]));
+                    // 🐛 本次修复（「库加载变慢」主因之一）：旧判据基于「清洗后」的内存状态，
+                    //    而忽略开关【每次加载都会清空原生 tags】→ 永远判定「需要写盘」→
+                    //    把 customTags 又写回 PNG；下次启动这些 tags 又成了原生标签被清掉 →
+                    //    无限重写循环（实测 3,415 张卡每次启动全量重写，mtime 全变，
+                    //    「刷新」又反复重解析这批卡）。现改为基于【磁盘上原本的标签】判定：
+                    //      · 盘上存在我们不想要的标签（既不在 customTags 里）→ 才需要物理清洗；
+                    //      · 盘上已是期望状态 → 一次也不写。
+                    const desiredTags = (cardInfo.customTags || []).map(t => String(t));
+                    const desiredSet = new Set(desiredTags);
+                    const diskTags = diskTagsBefore.map(t => String(t));
+                    const existingTags = new Set(diskTags);
+                    const newTags = desiredTags.filter(t => !existingTags.has(t));
+                    const needsPhysicalClean = sanitizeImportedTags.value && diskTags.some(t => !desiredSet.has(t));
+                    if (newTags.length > 0 || needsPhysicalClean) {
+                        dataLayer.tags = sanitizeImportedTags.value
+                            ? [...desiredTags]                    // 忽略开关开：盘上只留我们自己打的标签（幂等）
+                            : Array.from(new Set([...diskTags, ...newTags])); // 开关关：保留作者原标签并补上规则标签
                         if (opts.deferAutoTagSave) {
                             deferredAutoTagSaves.push(cardInfo);
                         } else {
@@ -495,9 +542,30 @@ export function useCardCrud({
                 return true;
             }
         } catch (err) {
-            console.warn(`跳过文件 ${file.name}`, err);
+            warnSkipOnce(`err:${file.name}:${err && err.message}`, `跳过文件 ${file.name}`, err);
         }
         return false;
+    };
+
+    // 🛡️ 加载互斥锁（防「重复卡」的并发重入根因）
+    //     processElectronFiles 与 refreshLibrary 都会对 live library 做
+    //     「清空 → 逐张 push / 分块并入」。若两者并发（启动加载未完成时用户点刷新、
+    //     或快速连点刷新触发两次 rescan），两个循环会交错操作同一个 library 数组：
+    //     后进入者先清空、先进入者的分块 push 又落回来 → 同一 path 进两次 → 列表出现重复卡。
+    //     这里用一把共享锁把「清库+填充」整体串行化：后到的调用等待前一次完成，
+    //     并在拿到锁后【重新读取】当前状态（而非沿用调用时的快照），保证不叠加。
+    let loadLock = Promise.resolve();
+    /** 串行化执行 loading 段；返回 { skipped:true } 表示本次被合并跳过 */
+    const withLoadLock = async (fn) => {
+        const prev = loadLock;
+        let release;
+        loadLock = new Promise((r) => { release = r; });
+        await prev.catch(() => {});
+        try {
+            return await fn();
+        } finally {
+            release();
+        }
     };
 
     // 统一处理主进程传来的文件列表（并发受限批处理：每批最多 8 张并行解析，
@@ -512,6 +580,7 @@ export function useCardCrud({
     //       flushDeferredAutoTagSaves），启动路径彻底告别「千卡读写 I/O 风暴」。
     const processElectronFiles = async (folderData) => {
         if (!folderData || !folderData.files) return;
+        resetSkipLog();   // 🔇 每次加载重置降噪计数
 
         currentFolderPath.value = folderData.folderPath;
         // 🔧 v1.8.5 修复：记录切换前正在编辑卡片的路径 —— 旧版切库后编辑面板还开着
@@ -602,7 +671,17 @@ export function useCardCrud({
             const resultMap = new Map((workerResults || []).map(r => [r.path, r]));
             for (const f of chunk) {
                 const r = resultMap.get(f.path);
-                f.preParsed = (r && r.ok && r.data) ? r.data : null;
+                if (r) {
+                    f.preParsed = (r.ok && r.data) ? r.data : null;
+                    continue;
+                }
+                // 🔥 P0：本块里没走 Worker 的（PNG 内嵌 JSON，主进程已解析好）→ 本地直接鉴定，
+                //    不再送回 Worker 多两次深拷贝。解析与规范化仍由 parseAndAddCard 统一处理。
+                if (f.embeddedData && typeof f.embeddedData === 'object') {
+                    f.preParsed = isCharacterCardData(f.embeddedData) ? f.embeddedData : null;
+                } else {
+                    f.preParsed = null;
+                }
             }
             for (let j = 0; j < chunk.length; j += CONCURRENCY) {
                 const batch = chunk.slice(j, j + CONCURRENCY);
@@ -666,11 +745,32 @@ export function useCardCrud({
         //    会直接 push 进 library.value 当前数组 —— 整体换引用会把这些卡连同
         //    旧数组一起丢弃（提示导入成功但卡从界面消失，须手动刷新才找回）。
         //    分块 push 保留这些窗口期卡片，且不损失"一次性失效"的 computed 优化。
+        // 🛡️ 自愈式收尾去重（防「重复卡」最后一道防线）：
+        //    以 library 当前内容为基准，把 staging 里 path 已存在的条目剔除再并入。
+        //    正常情况下 staging 内部已被 seenPaths 去重，这里是防「窗口期并发」——
+        //    例如加载过程中拖拽/URL 导入直接 push 进了 library 的那张卡，
+        //    若它同时也在 staging 里，旧写法会并入第二份。
+        (() => {
+            const existing = new Set(library.value.map((c) => c && c.path).filter(Boolean));
+            const before = staging.length;
+            const kept = staging.filter((c) => {
+                if (!c || !c.path) return true;
+                if (existing.has(c.path)) return false;
+                existing.add(c.path); // 同一批内也去重
+                return true;
+            });
+            if (kept.length !== before) {
+                console.warn(`[去重] 加载收尾剔除重复 path ${before - kept.length} 张（防重复卡自愈）`);
+                staging.length = 0;
+                staging.push(...kept);
+            }
+        })();
         for (let i = 0; i < staging.length; i += 500) {
             library.value.push(...staging.slice(i, i + 500));
         }
         triggerRef(library); // shallowRef：批量并入后手动触发一次响应式
         console.log(`成功从 ${folderData.folderPath} 加载了 ${addedCount} 张卡片`);
+        logSkipSummary();   // 🔇 跳过日志汇总（替代逐条刷屏）
         // 🔧 v1.8.5 修复：切库后重绑/关闭当前编辑卡片（防"孤儿编辑面板"保存失败）
         if (prevCardPath && cardData.value) {
             const reopen = library.value.find(i => i.path === prevCardPath);
@@ -680,6 +780,13 @@ export function useCardCrud({
         // 🚀 自动打标落盘转后台低并发执行，不阻塞首屏呈现
         flushDeferredAutoTagSaves();
     };
+
+    /**
+     * 带互斥锁的对外版本：所有「清库 + 填充」入口都必须走它，
+     * 否则与 refreshLibrary 并发时会交错操作同一个 library 数组 → 重复卡。
+     * 定义在 processElectronFiles 之后再赋值，闭包在调用时才解引用（无 TDZ 问题）。
+     */
+    const processElectronFilesLocked = (folderData) => withLoadLock(() => processElectronFiles(folderData));
 
     // 系统级拖拽导入：将拖入的文件复制到卡片库文件夹
     const handleDrop = async (e) => {
@@ -870,7 +977,12 @@ export function useCardCrud({
         // 自动分类与打标
         processAutoTagsAndCategory, flushDeferredAutoTagSaves,
         // 导入入库域
-        parseAndAddCard, processElectronFiles, handleDrop, importCards, downloadCardFromUrl,
+        // ⚠️ processElectronFiles 对外一律给「带互斥锁」的版本，防止与 refreshLibrary 并发
+        //    交错操作 library 数组产生重复卡；withLoadLock 供 useDiskScan 复用同一把锁。
+        parseAndAddCard,
+        processElectronFiles: processElectronFilesLocked,
+        withLoadLock,
+        handleDrop, importCards, downloadCardFromUrl,
         // 删除域
         deleteCardItem, deleteCard,
         // 杂项
