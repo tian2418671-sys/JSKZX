@@ -1,4 +1,4 @@
-<#
+﻿<#
     Capacity check - build a giant replica library, launch the app against it, measure, clean up.
 
     WHY: users keep asking "how big a library can this handle". We answered it once by hand

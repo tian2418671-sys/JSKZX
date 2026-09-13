@@ -160,7 +160,15 @@ export const chatStorage = {
         const k = String(key);
         if (mem.has(k)) return mem.get(k);
         const v = lsGet(k);
-        if (v !== null) mem.set(k, v);
+        if (v !== null) {
+            mem.set(k, v);
+            // 🐞 2026-09-13 回归审计修正：原来只写 mem、不写 mirror，导致两个问题 ——
+            //   ① flushNow() 落盘读的是 mirror ⇒ mem 里独有的键**永远不会被落盘**，
+            //      与「内存为权威」的语义矛盾（读到的值重启后消失）；
+            //   ② migrateChatKeys 原先只遍历 mirror ⇒ 这类键不会被迁移。
+            //   这里同步回填 mirror，保持二者一致。
+            mirror[k] = v;
+        }
         return v;
     },
     /** 同步写入（内存 + localStorage 立即可见，磁盘防抖落盘） */
@@ -252,11 +260,20 @@ export default chatStorage;
 export function migrateChatKeys(oldPath, newPath) {
     if (!oldPath || !newPath || oldPath === newPath) return 0;
     let moved = 0;
-    for (const key of Object.keys(mirror)) {
+    // 🐞 2026-09-13 回归审计修正：原来只 `for (const key of Object.keys(mirror))`，
+    //    而 get() 未命中时只写 mem、**不写 mirror**（见本文件 get 实现），
+    //    于是「仅存在于 localStorage / 仅被 get() 懒加载进 mem」的旧键**永远不会被迁移**。
+    //    改为遍历 mem ∪ mirror 的并集，值优先取 mem（更可能是当前最新）。
+    //    已知边界：只在 localStorage 里存在、两个缓存都没有的键仍无法枚举 ——
+    //    桌面以 chat_store.json 为权威，启动 hydrate 后二者应一致，故窗口很窄。
+    const keys = new Set([...Object.keys(mirror), ...mem.keys()]);
+    for (const key of keys) {
         if (key.indexOf(oldPath) === -1) continue;
         const next = key.split(oldPath).join(newPath);
-        if (next === key || Object.prototype.hasOwnProperty.call(mirror, next)) continue; // 不覆盖已有
-        const val = mirror[key];
+        if (next === key) continue;
+        // 不覆盖已存在的目标键（镜像 / 内存 / localStorage 三处都查）
+        if (Object.prototype.hasOwnProperty.call(mirror, next) || mem.has(next) || lsGet(next) !== null) continue;
+        const val = mem.has(key) ? mem.get(key) : mirror[key];
         mirror[next] = val;
         delete mirror[key];
         mem.set(next, val);

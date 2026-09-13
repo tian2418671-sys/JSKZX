@@ -177,6 +177,36 @@
   （已确认安全的：`AITagModal.vue` 阈值滑块是受控组件 `:value` + `@input` emit ✅；`snapshotConfig` 是 `<select>` 低频 ✅）
 - **来源**：v2.1.0 交互性能专项（2026-09-01）
 
+### AR-30 ｜ 🔴 卡内世界书词条增/删/克隆/排序后列表不刷新（要切卡才出现）
+- **现象**（用户报告 2026-09-14）：「删除词条后等一下也没变化，**必须切换别的卡再切回去**才看到结果」；
+  实际同一根因影响**所有**卡内世界书条目编辑（新增 / 删除 / 克隆 / 上移下移 / 批量 / 从库导入），
+  还连带影响「状态栏模板预览」的数据源（它也读同一 computed）。
+- **根因**（两层叠加）：
+  1. `useEmbeddedWorldbook.js` 的 `worldbookEntries` computed 写作
+     `safeData.value.character_book || cardData.value?.character_book || {}` ——
+     当 `character_book` **存在**时右半**短路不求值**，于是该 computed **完全不依赖 `cardData`**；
+  2. 而编辑后统一走 `refreshCardData()` → `triggerRef(cardData)`（shallowRef 的标准手法），
+     且 `safeData` 重算后**返回同一个对象**——Vue 3.4+ 的 computed 值未变时**不再向下传播**
+     （同 AR-18 的记录）→ 这个 computed 永远不会被标脏，**一直返回上一次的缓存数组**。
+  3. 切卡时 `cardData.value` 换成新对象 → `safeData` 返回值变了 → 传播恢复 → 列表才更新
+     （这正是用户看到的「切卡才出现」）。
+- **实测证据**（dev 实例 + CDP，修复前/后同一脚本）：
+  raw `entries.length` 88 → 87（`splice` 后）→ `refreshCardData()` 后 computed **仍为 88**；
+  把 `cardData` 换成新对象（≈切卡）后 computed 才变 87。修复后：`splice` + `refreshCardData()`
+  即时 computed 4→3 且 **DOM 行数 4→3**；点「克隆」「新增词条」「下移」按钮 DOM 均即时变化。
+- **修复**：在 `worldbookEntries` 里**显式读取** `const cd = cardData.value`（拿掉短路路径对依赖收集的影响）：
+  `const book = safeData.value.character_book || (cd && cd.character_book) || {};`
+  并加注释说明「为什么必须显式读」（后人容易“顺手优化”回短路写法而重引 bug）。
+- **防再犯**：
+  1. **shallowRef 场景下的 computed，必须真依赖到了那个 shallowRef**——
+     `safeData` 这类 computed 返回**同一对象**时不会向下传播，不能寄托于它中转；
+  2. 写 `a || b` 时要意识到：**短路会让依赖收集漏掉右半**；
+  3. 同类排查点：`regexScripts`（已用 `cardContentVersion` 版本号修）、任何只读 `safeData` 而不读
+     `cardData` 的 computed；新增此类 computed 时先问「`triggerRef(cardData)` 能叫醒它吗」。
+- **来源**：用户实测报告 + dev/CDP 复现（2026-09-14，v2.2.7 补丁）
+
+> 📌 测卡区的两条新缺陷（状态栏空白、翻页控件不可见）归 **CT 领域**：[CT-13 / CT-14](BUG-测卡工作区.md)。
+
 ---
 
 ## 四、约定

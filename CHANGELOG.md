@@ -201,6 +201,84 @@
 
 ---
 
+## 🚀 v2.2.7（六）补丁：测卡区状态栏渲染 + 翻页 + 卡文件字段净化（2026-09-14）
+
+> 版本号不变（补丁），对外文案见 `RELEASE_NOTES.md` v2.2.7 补丁段；本节为内部细节。
+> 缺陷条目：[DF-14/DF-15](docs/bugs/BUG-数据与文件.md)、[AR-30](docs/bugs/BUG-架构与渲染.md)、
+> [PK-13](docs/bugs/BUG-性能与大库.md)、[CT-13/CT-14/CT-15](docs/bugs/BUG-测卡工作区.md)。
+
+### 🔴 1. 打开某些卡直接卡死（正则灾难性回溯，PK-13）
+- **现象**（用户报告）：「读取某张卡卡死软件」→ 打开 `鬼 1.2版.png` 主线程阻塞 **43.9~71.9s**。
+- **根因**：卡内状态栏脚本用 `replaceString` 把 738 字符的开场白放大成 **137,469 字符**，再把这份
+  137KB 文本丢给预设里的正则；这些正则存在**灾难性回溯** → 单条正则跑几十秒。
+- **修复**（`js/composables/chat/useChatRegex.js`）：① 正则**编译缓存**（上限 500，避免每条消息重编译）；
+  ② **大替换延迟物化**：`replacement` ≥ 8192 字符时先埋 token，全部脚本跑完后一次性 `split/join` 替换；
+  ③ **预算**：单脚本 120ms / 整体 1500ms，超时记录跳过并 `console.warn`（`opts.onSkip`）；④ 缓存实例每次
+  `lastIndex = 0` 复位。
+- **实测**：dev 首开 43.9s → **热开 20ms**；生产同一张卡主线程最长阻塞 **64ms**；全库 75 张连打开无卡顿。
+- ⚠️ **测量方法教训**：`requestAnimationFrame` 在窗口非前台被节流，曾把 64ms 读成 28s —— 主线程阻塞要用
+  50ms `setInterval` 的**最大间隔**来量（同 CT-13 补充坑）。
+
+### 🔴 2. 卡内世界书条目增删改「要切卡才出现」（AR-30）
+- **根因**：`worldbookEntries` computed 写作 `safeData.value.character_book || cardData.value?.character_book || {}`，
+  左半存在时**短路不求值** → 该 computed 完全不依赖 `cardData`；`shallowRef` 深改后走 `triggerRef(cardData)`，
+  而 `safeData` 重算返回**同一对象**（Vue 3.4+ computed 值未变不向下传播）→ 缓存永不失效。
+- **修复**：显式读取 `const cd = cardData.value` 后再取 `safeData.value.character_book || (cd && cd.character_book) || {}`。
+- **实测**：`splice` + `refreshCardData()` 后 computed 88→87、DOM 行数 4→3（修复前恒 88，切卡才变）。
+
+### 🔴 3. 卡文件里的内部字段被写进卡片（DF-14 / DF-15）
+- **DF-14**：`uid` / `_collapsed` 等编辑器内部字段混进卡文件。修复：新增 `main/cardFieldSanitizer.js`
+  （**白名单**式剥离，绝不递归删 `_` 字段 —— 11,045 卡审计里 `_` 字段有 7 类 131 个是卡作者真数据），
+  覆盖全部 **5 条写盘路径**（PNG chara 块、`file:saveCard` JSON 分支、`wb:save`、`wb:create`、导出整合包），
+  其中「换卡图」是此前漏掉的第五条（`embedCardJSONIntoPNG` 统一收口）。渲染层另建 `js/utils/cardFields.js`
+  （与主进程同一套字段清单，测试里做漂移比对）。
+- **DF-15**：从「库」导入词条进卡内嵌世界书时，写的是**库格式字段**（`key` / `keysecondary` / `order` / `disable`），
+  酒馆按卡格式读取 → 词条不触发。修复：新增 `js/utils/wbEntryFormat.js` 的 `toEmbeddedEntry()`
+  （`keys←key`、`secondary_keys←keysecondary`、`insertion_order←order`、`enabled←!disable`、`use_regex←useRegex`、
+  position 归一化 + 数值进 `extensions.position`；未知字段原样保留、深拷贝）。
+- **实测**：真实导入条目 38 字段 → 12 字段，与卡内原生条目逐字段比对 **多 0 / 缺 0**；换卡图后再解析 PNG，
+  `uid`/`_collapsed` 计数为 0 且正文数据完整。
+
+### 🔴 4. 测卡区「状态栏」永远空白（CT-13，三层原因叠加）
+1. **生产 CSP 拦死内联脚本**：界面段走 `srcdoc`，而 srcdoc iframe **继承父页 CSP**（`script-src 'self' app:`）
+   → 卡内 webpack SPA 的模块脚本不执行。修法：新增主进程内存路由 `chat:setHtmlSegment` →
+   `app://index.html/__jsk_seg__/N-xxxx.html`（该路由跳过 CSP 注入，与插件预览同机制、store 分开）。
+2. **缺 iframe 全局库**：酒馆助手（JSR）靠 `third_party_message.html` + `predefine.js` 给每个消息 iframe 注入
+   `Vue` / `jQuery` / `_` / `z`(zod)。新增 `js/chatHost/iframeGlobals.js` + vite 插件 `jsk-chat-host-bundle`
+   打成单文件 IIFE（构建 `web/vendor/chat-host.js`、开发 `<root>/vendor/chat-host.js`），
+   界面段一行 `<script src>` 引用（固定 URL → 跨 iframe 共用缓存，570KB 不进每份文档）。
+3. **缺 iframe 宿主 API**：`buildHtmlSrcdoc` 桥接补齐 `getCurrentMessageId`（注入消息序号）、`updateVariablesWith`、
+   `replaceVariables`、`errorCatched`，以及 `localStorage/sessionStorage` 内存实现（沙箱无同源权限时原生访问抛
+   `SecurityError`）；预置注入位置改为 `<head>` **开头**（模板用普通内联脚本时也必须先拿到全局）。
+- **参考实现**：用户本地预览工程 `H:\01\北派盗墓笔记\tavern_helper_gui\preview-frame.html`（同款 mock 环境），
+  按其语义 `waitGlobalInitialized` **立即 resolve**（挂着等会让没有 `Mvu` 的环境卡住初始化链）。
+- **补充坑（高度上报）**：iframe 量高依赖 `load` 后几次定时器，而后台窗口定时器被节流（~1s 一跳）→ 面板长时间停在
+  默认 60px。补「回前台重新量高」：父层 `focus` / `visibilitychange` → `postMessage({type:'jsx-panel-height-request'})`
+  → 桥接补报（实测 60 → 76 折叠态；展开 593px）。
+- **实测**：修复前恒 60px + 控制台依次报 CSP 违规 / `Vue is not defined` / `z is not defined` /
+  `getCurrentMessageId is not defined`；修复后 iframe 内 `#app` 挂载出 `ghost-root`、展开 593px、异常 **0 条**。
+
+### 🟡 5. 测卡区翻页点了没反应 / 只有 1 个候选（CT-14、CT-15）
+- **CT-14**：① `pushFirstMessage()` 只取 `first_mes`，**没读 `alternate_greetings`**（库内 41 张卡有 12 张带附加问候语）
+  → 恒单候选；② 模板写 `@click="ctx.chatPrevSwipe/chatNextSwipe"`，而 `EditorPanel` 是纯 `setup()` 组件、
+  `ctx` 未交给模板作用域 → 点击抛 `Cannot read properties of undefined`（**这才是「摆设」真因**）。
+  修法：新增 `greetingTexts()`（`first_mes` + `alternate_greetings`，首个候选跑完整管线含 MVU 初始化、其余仅展示）、
+  翻页只切 index（对齐移动版 `CardDetailView`）；模板改走本地包装函数 `onChatPrevSwipe` / `onChatNextSwipe`。
+- **CT-15**：同源缺陷 —— 「清空记录」按钮 `ctx.chatClear` 一直是死的；改本地包装 `onChatClear`。
+- **实测**：清空 → `1/2` → ▶ → `2/2`（正文换成附加问候语）→ ◀ → `1/2`；控制台错误 0。
+
+### 📚 6. 文档
+- 新增「卡内 HTML 渲染形态与已知缺口」总表：`docs/规格与计划/桌面版测卡工作区-实现规格.md` §4.1/§4.2
+  （7 类渲染形态覆盖情况 + 云端 loader / 变量写回 / Mvu / 事件 API 四类已知缺口）。
+- 缺陷总表 91 → **94 条**（CT-13/14/15），四个入口文件同步；`check-doc-links` ALL RESOLVE。
+
+### 🔬 验证
+- `npm test` **256/256**（新增 `test/cardFieldSanitizer.test.mjs` 14 例、`test/wbEntryFormat.test.mjs` 12 例、
+  `test/chatRegexBudget.test.mjs` 7 例、`test/chatRender.test.mjs` 9 例）。
+- `npx vite build` ✅（含 `web/vendor/chat-host.js`）；生产实例冒烟：状态栏展开 593px、翻页来回切、异常 0 条。
+
+---
+
 ## ✨ v2.2.6 —— 预设缝合中心 + 四处条目批量操作
 
 > 背景：预设之间搬运提示词条目此前只能「复制整份预设再手改」。新增 **缝合中心**：把 1~N 本源预设的条目 + 手写自定义条目，缝进任意目标预设，支持 **新建 / 覆盖 / 写回当前** 三种输出。

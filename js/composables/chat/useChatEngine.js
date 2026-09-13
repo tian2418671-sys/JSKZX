@@ -378,6 +378,11 @@ export function useChatEngine(deps = {}) {
     const cardName = () => ((safeData && safeData.value) || {}).name || '';
 
     // ==================== swipe ====================
+    /**
+     * 翻页 = 纯切 index（对齐移动版 nextSwipe / prevSwipe）。
+     * 候选在「生成时」就已渲染完毕（开场白的多个候选由 pushFirstMessage 一次备好），
+     * 翻页只换显示，不重跑管线——重跑会把该候选里的变量初始化再应用一次。
+     */
     function nextSwipe(i) {
         const m = chatMessages.value[i];
         if (!m || !Array.isArray(m.swipes) || m.swipes.length < 2) return;
@@ -514,17 +519,46 @@ export function useChatEngine(deps = {}) {
     }
 
     // ==================== 开场白 ====================
+    /**
+     * 卡内全部开场白：`first_mes` + `alternate_greetings`（附加问候语，顺序即候选顺序）。
+     * 酒馆的「开场白滑动」就是这个数组；只取 first_mes 的话，带多开场白的卡永远只有 1 个候选。
+     */
+    function greetingTexts() {
+        const sd = (safeData && safeData.value) || {};
+        const alts = Array.isArray(sd.alternate_greetings) ? sd.alternate_greetings : [];
+        return [sd.first_mes, ...alts]
+            .map((g) => (typeof g === 'string' ? g : ''))
+            .filter((g) => g.trim().length > 0);
+    }
+
+    /**
+     * 单条开场白走完整管线：EJS → 宏 → MVU → AI 正则。
+     * @param {string} raw 原始文本
+     * @param {boolean} applyVars 是否应用其中的变量指令（只有「当前生效的候选」应用，
+     *        其余仅剥掉指令块用于显示，避免多个候选的初始化互相覆盖）
+     */
+    function renderGreeting(raw, applyVars) {
+        let text = renderTpl(raw, '开场白');
+        text = applyMacros(text, fullMacros.value);
+        if (mvuEnabled() && varEngine.value) {
+            text = applyVars ? varEngine.value.onAiMessage(text) : extractMvu(text).display;
+        }
+        return applyRegexScripts(text, mergedRegex.value, 'AI', fullMacros.value);
+    }
+
     /** 开场白：EJS → 宏 → MVU 初始化 → AI 正则（对齐移动版 pushFirstMessage） */
     function pushFirstMessage() {
-        const sd = (safeData && safeData.value) || {};
-        const first = sd.first_mes || '';
-        if (!first) return;
-        let text = renderTpl(first, '开场白');
-        text = applyMacros(text, fullMacros.value);
-        if (mvuEnabled() && varEngine.value) text = varEngine.value.onAiMessage(text);
-        text = applyRegexScripts(text, mergedRegex.value, 'AI', fullMacros.value);
-        chatMessages.value = [{ role: 'assistant', swipes: [text], index: 0 }];
+        const raws = greetingTexts();
+        if (!raws.length) return;
+        // 首个候选走完整管线（含 MVU 初始化）；附加问候语仅做展示（剥掉变量指令块，不重复初始化）
+        const swipes = raws.map((raw, n) => renderGreeting(raw, n === 0));
+        chatMessages.value = [{ role: 'assistant', swipes, index: 0 }];
     }
+
+    /**
+     * 开场白翻页（对齐移动版）：候选在 pushFirstMessage 时**一次备好**，翻页只切 index、不重跑管线
+     * —— 重跑会把该候选里的变量初始化再应用一次；移动版刻意只给首个候选跑 MVU，其余仅做展示。
+     */
 
     /** 初始化：恢复上次会话 / 新建；无消息则补开场白 */
     function initChat() {

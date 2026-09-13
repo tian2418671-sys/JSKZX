@@ -27,8 +27,18 @@ export function useEmbeddedWorldbook({ cardData, safeData, cardTokensCache }) {
 
     // 世界书条目（兼容 V1/V2 层级与 comment 字段）
     const worldbookEntries = computed(() => {
+        // 🔔🔔 必须**显式读取** cardData（就是下面这行 `const cd = cardData.value`）——
+        //    不能依赖下一个“短路回退”：`safeData.value.character_book || cardData.value?.character_book`
+        //    在 character_book 存在时**不会求值右半**，于是本 computed **完全不依赖 cardData**。
+        //    而增/删/克隆/移动词条后走的是 refreshCardData() → triggerRef(cardData)，
+        //    且 safeData 重算后返回**同一个对象**（Vue 3.4+ computed 值未变不再向下传播）
+        //    → 本 computed 永远不会被标脏，增删结果不刷新，
+        //    必须切卡（换掉 cardData 对象）才更新。
+        //    用户实测现象（2026-09-14）：删除词条后列表无变化，“切换别的卡再切回去”才出现。
+        //    ⚠️ 后果不止列表：状态栏模板预览的数据源也会跟着变陈旧（它读本 computed）。
+        const cd = cardData ? cardData.value : null;
         // 兼容 V1 和 V2 的存放位置
-        const book = safeData.value.character_book || cardData.value?.character_book || {};
+        const book = safeData.value.character_book || (cd && cd.character_book) || {};
         // 🛡️ 全形态安全提取（entries 数组 / entries 字典 / book 本身为数组），
         // 修复字典形态 entries 与数组形态 book 导致 .filter 崩溃（编辑器白屏）
         const entries = extractBookEntries(book);

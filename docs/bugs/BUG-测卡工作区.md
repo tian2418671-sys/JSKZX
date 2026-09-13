@@ -117,6 +117,91 @@
 
 ---
 
+## 三·2、桌面测卡区渲染（CT-13、CT-14，版本 v2.2.7 补丁）
+
+### CT-13 ｜ 🔴 测卡区「状态栏」永远空白（三层原因：CSP → 全局库 → 宿主 API）
+- **现象**（用户报告 2026-09-14）：「鬼卡的状态栏无法渲染」——测卡聊天区里卡内 HTML 面板（状态栏）为空白，
+  iframe 有框但高度恒在默认 60px。
+- **根因**（三层，逐层包住，只看第一层会得出错误结论）：
+  1. **生产 CSP 拦死内联脚本**：界面段走 `srcdoc`，而 `srcdoc` iframe **继承父页 CSP**
+     （生产为 `script-src 'self' app:`，无 `unsafe-inline`）→ 卡内 webpack SPA 的 `<script type="module">`
+     根本不执行（与 AR-28 同类病，只是换了位置）。
+  2. **缺 iframe 全局库**：酒馆助手（JSR）是靠 `third_party_message.html` + `predefine.js` 往每个消息 iframe
+     注入 `Vue` / `jQuery` / `_`(lodash) / `z`(zod) 这批全局的；卡内状态栏直接引用自由变量
+     （webpack externals：`const Go=z`、`o=Vue`）→ 缺一个就 `ReferenceError`，模块顶层就死，面板整块不渲染。
+  3. **缺 iframe 宿主 API**：还依赖 `getCurrentMessageId()` / `updateVariablesWith()` / `errorCatched()` /
+     `waitGlobalInitialized()`（JSR 的 `@types/iframe/*`）——沙箱里拿不到父页对象，必须由我们提供。
+- **修复**：
+  1. 界面段改走**主进程内存路由**（与插件预览同机制）：`setChatHtmlSegment` →
+     `app://index.html/__jsk_seg__/N-xxxx.html`，该路由跳过 CSP 注入 → 内联脚本可执行；
+     两份 store 分开（`segStore` 60 份 / `previewStore` 32 份），避免聊天里的段把正在看的插件预览挤掉。
+  2. 新增 `js/chatHost/iframeGlobals.js` + vite 插件 `jsk-chat-host-bundle`：把 **Vue、jQuery、lodash、zod**
+     打成**单个 IIFE**（构建期 `web/vendor/chat-host.js`、开发期 `<root>/vendor/chat-host.js`），
+     界面段用一行 `<script src="app://index.html/vendor/chat-host.js">` 引用 —— 固定 URL → 跨 iframe 共用缓存，
+     不把几百 KB 内联进每份文档。
+  3. `buildHtmlSrcdoc` 的桥接脚本补齐 JSR 侧 API：`getCurrentMessageId`（注入消息序号）、`updateVariablesWith`、
+     `replaceVariables`、`errorCatched`，以及 `localStorage/sessionStorage` 内存实现
+     （沙箱无同源权限时原生访问会抛 `SecurityError`）。
+  4. 注入位置改为 `<head>` **开头**：模板 bundle 是模块脚本（默认 defer），但若模板里混有普通内联脚本，
+     预置全局必须先到位。
+- **实测证据**（生产实例 + CDP）：修复前 iframe 高度恒为 60px，控制台依次报
+  `Executing inline script violates … 'script-src 'self' app:'` → `Vue is not defined` → `z is not defined` →
+  `getCurrentMessageId is not defined`；修复后同一张卡：iframe 内部 `#app` 已挂载
+  （`ghost-root` / `ghost-title` 均在），异常/错误 **0 条**；把面板展开后高度上报到 460px 级。
+- **补充坑（高度上报）**：iframe 里的量高依赖 `load` 后几次 `setTimeout`，而后台窗口的定时器会被节流
+  （实测 ~1s 一跳）→ 面板可能长时间停在默认 60px。补了「回前台重新量高」：父层监听
+  `focus` / `visibilitychange` → 向 iframe `postMessage({type:'jsx-panel-height-request'})` → 桥接脚本补报高度。
+  实测：触发后高度 **60 → 76**（该面板默认是折叠态，展开态更高）。
+  ⚠️ 另记：CDP 探针在这种场景下**不能信**「卡顿/高度」读数——窗口在后台时定时器被节流，会出现 ~1000ms 的
+  「假卡顿」与「高度不更新」，必须先 `Page.bringToFront` 或让窗口可见再测（同 PK-13 的测量方法教训）。
+- **参考**：用户本地预览工程 `H:\01\北派盗墓笔记\tavern_helper_gui` —— `preview-frame.html` 就是同款 mock 环境
+  （`Vue/jQuery/lodash` 外链 + `getVariables/updateVariablesWith/getCurrentMessageId/errorCatched/
+  waitGlobalInitialized` + `z=zod`），`状态栏踩坑记录.md` 记录该状态栏链路已踩过的坑。
+  本次实现按它对齐了全局清单，并采其 `waitGlobalInitialized` **立即 resolve** 的语义
+  （挂着等会让没有 `Mvu` 的环境卡住初始化链）。
+- **未做（已知边界）**：沙箱内 `updateVariablesWith` 只在 iframe 本地快照上生效，**不写回**宿主变量树
+  （与预览帧同一取舍：防表单/数据源脱钩）；需要真正写回时再按字段 merge 设计。
+- **来源**：用户报告 + 生产实例/CDP 复现（v2.2.7 补丁，2026-09-14）
+
+### CT-14 ｜ 🟡 测卡区「翻页（候选回复）」点了没反应 / 只有 1 个候选
+- **现象**（用户报告 2026-09-14，两次）：「测卡聊天区域没有出现翻页功能」→ 首轮修完后仍是
+  「翻页功能现在还是摆设，有的卡有开场白翻页只有一个不能来回翻动」。
+- **根因**（两条叠加，第一轮只修掉了一半）：
+  1. **开场白候选只取了 `first_mes`**：`pushFirstMessage()` 恒 `swipes: [text]`，
+     **完全没读 `alternate_greetings`（附加问候语）** → 带备用开场白的卡也只有 1 个候选，
+     ◀/▶ 因 `swipes.length < 2` 恒为 disabled（「只有一个，不能来回翻动」）。
+     另：工具条曾整体 `v-if="swipes.length > 1"` → 单候选时**连工具条都不渲染**。
+  2. **按钮点击直接抛异常**（真因，用户看到的「摆设」）：模板写 `@click="ctx.chatPrevSwipe(idx)"`，
+     而 `EditorPanel` 是**纯 setup 组件**，`ctx = inject('appCtx')` 只是 setup 内的局部变量、
+     **没有交给模板作用域** → 渲染代理上 `ctx` 为 `undefined` → 点击即
+     `Cannot read properties of undefined (reading 'chatPrevSwipe')`，什么都不会发生。
+- **修复**：
+  1. 新增 `greetingTexts()` = `[first_mes, ...alternate_greetings]`（过滤空串）；
+     `pushFirstMessage()` 一次备好全部候选（**首个候选走完整管线含 MVU 初始化，其余仅展示**：
+     剥掉变量指令块、不重复初始化）——与移动版 `CardDetailView.pushFirstMessage(withAlt)` 同语义；
+  2. 模板不再访问 `ctx.*`，改为组件内本地包装函数转发（`onChatPrevSwipe` / `onChatNextSwipe`），
+     与既有 `onChatSend` / `onChatMoreSwipe` 同一手法；工具条改为**常显**、单候选时 ◀/▶ 置灰。
+- **实测证据**（生产实例 + CDP，两次修复后）：清空记录 → 工具条 `1/2`（first_mes + 1 条附加问候语）
+  → 点 ▶ → `2/2` 且正文换为附加问候语（"刹车声，是我这辈子听到的最后一声响…"）→ 再点 ▶ 循环回 `1/2`，
+  ◀ 同样有效；控制台错误 **0 条**（修复前每次点击必抛 ctx 未定义）。
+- **防再犯**：本组件模板**禁止写 `ctx.*`**（同类坑已连中 3 处：清空记录、◀、▶）——
+  一律在 setup 里包一层本地函数再 return；新增模板方法时先搜 `ctx\.` 自检。
+- **来源**：用户报告 + 生产实例/CDP 验证（v2.2.7 补丁，2026-09-14）
+
+### CT-15 ｜ 🟡 「清空记录」按钮一直是死的（模板访问不到 setup 局部的 `ctx`）
+- **现象**：聊天区右上角「清空记录」点不动，无任何反馈（用户没专门报过，是 CT-14 排查时顺带发现的同源缺陷）。
+- **根因**：同 CT-14 根因 2 —— `@click="ctx.chatClear"`，而 `ctx` 只存在于 setup 作用域；
+  Vue 渲染代理取到 `undefined` → 抛 `Cannot read properties of undefined (reading 'chatClear')`。
+- **修复**：新增本地包装 `const onChatClear = () => { if (ctx.chatClear) ctx.chatClear(); }`，
+  模板改绑 `onChatClear`。
+- **实测证据**：点击后开场白重置且工具条回到 `1/2`、控制台零错误（修复前必抛异常）。
+- **同类排查**：全仓 `grep -n 'ctx\.' js/components/*.vue` 逐条确认是否为模板使用；
+  ChatTestSidebar 等组件同样只应经 props/本地函数访问上下文。
+- **来源**：CT-14 排查顺带发现（v2.2.7 补丁，2026-09-14）
+
+
+---
+
 ## 四、本领域改动前的自检清单
 
 1. 侧栏模板里访问任何**可能为 undefined 的列表/对象** → 必须走 `arr()` / `objKeys()` 兜底（[CT-01]）。
@@ -125,3 +210,7 @@
 4. 新增任何「按卡片 path 派生」的键 → 必须在移动/重命名路径上迁移（[CT-10]）。
 5. 引擎改动后跑：`npm test` + `scripts/chat-sidebar-test.mjs`（生产 `app://`）+ `scripts/chat-engine-test.mjs`（dev + 调试句柄）。
 6. 端到端测试**驱动真实 UI**，不要自己 import 引擎模块（[CT-03]）。
+7. 改动**卡内 HTML 面板（状态栏/界面型段）**或 `buildHtmlSrcdoc` → 对照 [CT-13]：
+   ① 文档必须走 `app://` 内存路由（不然生产 CSP 会拦内联脚本）；
+   ② 模板依赖的全局（`Vue`/`z`/`_`/`$`）由 `web/vendor/chat-host.js` 提供，新增依赖改 `js/chatHost/iframeGlobals.js`；
+   ③ 验证方式：生产实例 + CDP 读 `iframe.seg-iframe` 高度（>60px 才说明脚本跑起来了）+ 控制台异常数应为 0。

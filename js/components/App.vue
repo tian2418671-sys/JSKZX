@@ -564,6 +564,8 @@ import { processFile, extractBookEntries, compileAutoTagRules, defaultAutoTagRul
 // normalizeCardData / isCharacterCardData / autoTagRules（cardLoader）与 parsePNGChunk / deepScanForJSON（pngParser）
 // 已随导入入库域迁移至 useCardCrud 组合式函数，由其自行 import
 import { estimateTokens } from '../utils/tokenEstimate.js'; // Token 估算（与 TextModal 共享）
+import { stripInternalFields, dropInternalFields, worldbookEntryList } from '../utils/cardFields.js'; // 🧹 导出/转存前剥离前端内部字段（白名单 + 限定位置，见 DF-14）
+import { toEmbeddedEntry } from '../utils/wbEntryFormat.js'; // 🌍 库格式 → 卡内嵌 V2 字段口径转换（见 DF-15）
 import { useSnapshots } from '../composables/useSnapshots.js'; // 📸 历史快照功能（拆分出的组合式函数）
 import { useCardCrud } from '../composables/useCardCrud.js'; // 🃏 卡片 CRUD（导入入库/删除回收/持久化保存/导出重命名，从 App.vue 拆分）
 import { useConfigPersistence } from '../composables/useConfigPersistence.js'; // 🛡️ 统一配置持久化中枢（app_config.json 收集/加密/落盘/防抖，从 App.vue 拆分）
@@ -2153,8 +2155,12 @@ export default {
         // 导出 JSON
         const downloadJson = () => {
             if (!cardData.value) return;
-            // 【修复】深拷贝时用 replacer 递归剔除 Vue 前端专属字段（_collapsed 折叠状态 / uid 列表防错位 ID），避免污染酒馆标准 JSON 格式
-            const cleanData = JSON.parse(JSON.stringify(cardData.value, (k, v) => (k === '_collapsed' || k === 'uid') ? undefined : v));
+            // 🧹 导出前剥离前端内部字段（uid / _collapsed），走统一白名单规则。
+            // ⚠️ 这里以前是 `JSON.stringify(cardData.value, (k,v) => (k==='_collapsed'||k==='uid') ? undefined : v)`
+            //    —— **递归**剔到了 extensions 里，会删掉第三方扩展的真实 uid
+            //    （实测 extensions/chatSheets/sheet_*/uid 24 处、TavernHelper_scripts 的 change_log 11 处）。
+            //    现改为只清「世界书词条对象自身的直接键」，见 js/utils/cardFields.js。
+            const cleanData = stripInternalFields(cardData.value);
             const jsonStr = JSON.stringify(cleanData, null, 2);
             const blob = new Blob([jsonStr], { type: "application/json" });
             const a = document.createElement("a");
@@ -3436,15 +3442,10 @@ export default {
             addLog(`准备落盘保存世界书: ${wb.name}...`);
 
             // 脱离 Proxy 代理进行序列化（避免 IPC "An object could not be cloned"），
-            // 并剔除 IDE 展示字段 _collapsed 与前端临时 UID（酒馆原生世界书格式无 uid 字段）防污染
+            // 并剔除词条级前端内部字段（uid / _collapsed / _srcIndex / _srcUid）防污染
+            // 🧹 统一走白名单助手：只删词条对象自身的直接键，绝不递归进 extensions（见 DF-14）
             const plainData = JSON.parse(JSON.stringify(wb.data));
-            if (Array.isArray(plainData.entries)) {
-                plainData.entries.forEach(e => {
-                    if (!e) return;
-                    if (e._collapsed !== undefined) delete e._collapsed;
-                    if (e.uid !== undefined) delete e.uid;
-                });
-            }
+            for (const e of worldbookEntryList(plainData) || []) dropInternalFields(e);
 
             // 【修复】内存态世界书（path 为空，如网址导入后未落盘）先补齐物理文件再保存
             if (!wb.path) {
@@ -3470,17 +3471,12 @@ export default {
             }
         };
 
-        // 提供独立的世界书本地导出功能（方便开发测试时脱离环境发给别人；导出前剔除 _collapsed 防污染）
+        // 提供独立的世界书本地导出功能（方便开发测试时脱离环境发给别人；导出前剔除前端内部字段防污染）
+        // ⚠️ 这条路径是纯前端 Blob 下载，**不经过主进程清洗** —— 这里是唯一一道防线，故同样走白名单助手
         const exportActiveWorldbook = () => {
             if (!activeWorldbook.value) return;
             const plainData = JSON.parse(JSON.stringify(activeWorldbook.value.data));
-            if (Array.isArray(plainData.entries)) {
-                plainData.entries.forEach(e => {
-                    if (!e) return;
-                    if (e._collapsed !== undefined) delete e._collapsed;
-                    if (e.uid !== undefined) delete e.uid;
-                });
-            }
+            for (const e of worldbookEntryList(plainData) || []) dropInternalFields(e);
             const blob = new Blob([JSON.stringify(plainData, null, 2)], { type: 'application/json' });
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
@@ -3505,8 +3501,10 @@ export default {
             const suffix = entrySearchQuery.value ? `_${entrySearchQuery.value.trim()}篇` : '_完整导出';
             const newWbName = (activeWorldbook.value.data.name || '拆分世界书') + suffix;
 
-            // 清洗 UI 字段（剥离 _ 前缀临时字段、前端临时 UID 与 Vue Proxy）
-            const cleanEntries = JSON.parse(JSON.stringify(currentEntries, (key, val) => (key.startsWith('_') || key === 'uid') ? undefined : val));
+            // 🧹 清洗前端内部字段（只剔词条自身的 uid/_collapsed/_srcIndex/_srcUid + 顶层库项元数据）
+            // ⚠️ 不能用 `key.startsWith('_') || key === 'uid'` 递归剔 —— 会删掉第三方扩展的真实数据
+            //    （entries[].extensions._filename 28 张、extensions/chatSheets/*/uid 24 处等，见 DF-14）。
+            const cleanEntries = stripInternalFields(currentEntries);
 
             const exportData = {
                 name: newWbName,
@@ -3626,7 +3624,7 @@ export default {
             cardWbSelectedEntries.value = [];
         };
 
-        // 确认导入：深拷贝勾选词条 → 库字段转换为内嵌字段 → 追加到 character_book.entries
+        // 确认导入：深拷贝勾选词条 → **库字段 → 内嵌字段转换**（见 DF-15）→ 追加到 character_book.entries
         const confirmCardWbImport = () => {
             if (!cardWbImportSource.value) { nativeAlert('请先选择源世界书。', 'warning'); return; }
             if (cardWbSelectedEntries.value.length === 0) { nativeAlert('请至少勾选一个词条。', 'warning'); return; }
@@ -3636,8 +3634,14 @@ export default {
             let count = 0;
             cardWbImportCandidates.value.forEach(c => {
                 if (!cardWbSelectedEntries.value.includes(c._srcUid)) return;
-                // 深拷贝并剔除 _ 前缀临时字段（_collapsed/_srcIndex/_srcUid），重新生成前端 uid
-                const clean = JSON.parse(JSON.stringify(c, (k, v) => k.startsWith('_') ? undefined : v));
+                // 🌍 字段口径转换（DF-15）：库的 key/keysecondary/order/disable → 内嵌的
+                //    keys/secondary_keys/insertion_order/enabled，ST 选项搬进 extensions，
+                //    position 归一为 before_char/after_char 且数值真相进 extensions.position。
+                //    ⚠️ 不转换的话，酒馆按 V2 规范读不到 keys → 导入的词条**触发词不生效**
+                //    （本应用自己读时 keys || key 双向回退，所以看着正常，只有导出到酒馆才暴露）。
+                // 🧹 再剔一遍前端内部字段（_srcIndex/_srcUid 临时勾选键、uid 与 _collapsed），
+                //    之后重新生成前端 uid 供 v-for 做 key。
+                const clean = dropInternalFields(toEmbeddedEntry(c, targetEntries.length));
                 clean.uid = `${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
                 clean._collapsed = false;
                 targetEntries.push(clean);
@@ -3898,7 +3902,9 @@ export default {
         // 🧠 内存守门员（P0 容量专项，2026-09-13）
         //    Chromium 默认老生代上限仅 4.19GB，而 22k 卡实测已用 3.05~3.26GB（73~78%），
         //    刷新/索引重建的瞬时峰值极易顶穿 → 渲染进程崩溃（用户看到界面突然重来一遍）。
-        //    main.js 已把上限抬到 6GB 并开 --expose-gc；这里在逼近阈值时**主动**释放可重算缓存
+        //    ⚠️ 上限**抬不上去**：main.js 实测两条路径（js-flags / additionalArguments）均无效，
+        //       jsHeapSizeLimit 恒为 4192MB（详见 main.js 顶部「渲染进程 V8 开关」结论，勿重试）。
+        //    这里保留 --expose-gc 仅供本守门员主动 GC；逼近阈值时**主动**释放可重算缓存
         //    并强制 GC，仍高就提示用户，而不是静默崩掉。
         //    （真正把内存降下来的是 P1「列表只留元数据 + 正文懒加载」，本守门员是安全网。）
         const memGuard = createMemoryGuard({
@@ -4421,8 +4427,10 @@ export default {
 
                     if (!seenMap.has(signature)) {
                         seenMap.add(signature);
-                        // 剔除 _collapsed 等临时 UI 字段
-                        const cleanEntry = JSON.parse(JSON.stringify(e, (k, v) => k.startsWith('_') ? undefined : v));
+                        // 🧹 深拷贝并只剔**词条自身**的前端内部字段
+                        // ⚠️ 不能用 `k.startsWith('_')` 递归剔 —— 会删掉词条 extensions 里的
+                        //    `_filename`（实测 28 张真实卡片）。见 js/utils/cardFields.js 与 DF-14。
+                        const cleanEntry = dropInternalFields(JSON.parse(JSON.stringify(e)));
                         cleanEntry.uid = `${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
                         mergedEntries.push(cleanEntry);
                     }
@@ -4501,8 +4509,11 @@ export default {
             let count = 0;
             importCandidates.value.forEach(c => {
                 if (!selectedImportEntries.value.includes(c._srcUid)) return;
-                // 深拷贝并剔除 _ 前缀临时字段（_collapsed/_srcIndex/_srcUid），重新生成前端 uid
-                const clean = JSON.parse(JSON.stringify(c, (k, v) => k.startsWith('_') ? undefined : v));
+                // 🧹 深拷贝并只剔除**词条自身**的前端内部字段（_srcIndex/_srcUid 临时勾选键、
+                //    uid 与 _collapsed），重新生成前端 uid。
+                // ⚠️ 不能用 `k.startsWith('_')` 递归剔 —— 会删掉词条 extensions 里的
+                //    `_filename`（实测 28 张真实卡片）。见 js/utils/cardFields.js 与 DF-14。
+                const clean = dropInternalFields(JSON.parse(JSON.stringify(c)));
                 clean.uid = `${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
                 clean._collapsed = false;
                 targetEntries.push(clean);

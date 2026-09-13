@@ -105,6 +105,13 @@ try {
   }
 } catch (e) { /* 忽略 */ }
 
+// ================= 🧹 落盘前剥离「前端内部字段」 =================
+// 实现与完整来龙去脉见 main/cardFieldSanitizer.js（含 11,045 张真实卡片的审计结论：
+// 为什么**不能**递归剔除所有 `_` 前缀键 —— 第三方扩展里有 7 类、131 处真实数据是 `_` 开头）。
+// 这里只做引入；卡片保存（PNG chara / JSON）、世界书保存、整合包导出共用同一套清洗规则。
+const { stripInternalFields } = require('./main/cardFieldSanitizer.js');
+
+
 // ================= [ 📸 历史快照配置与节流阀（可在设置面板动态更新） ] =================
 // snapshotConfig 默认值；前端通过 settings:updateSnapshotConfig IPC 实时同步
 let snapshotConfig = {
@@ -336,7 +343,7 @@ function writeTavernPNGChunk(buffer, updatedJson) {
   // 校验 PNG 签名
   if (!buffer || buffer.length < 8 || buffer.readUInt32BE(0) !== 0x89504E47) return null;
 
-  const base64 = Buffer.from(JSON.stringify(updatedJson), 'utf-8').toString('base64');
+  const base64 = Buffer.from(JSON.stringify(stripInternalFields(updatedJson)), 'utf-8').toString('base64');
   const sig = buffer.subarray(0, 8);
   let offset = 8;
   let chunks = [];
@@ -431,10 +438,14 @@ function isPNGBuffer(buf) {
 }
 
 // 将角色卡 JSON 内嵌为 PNG 的 chara 块（插入 IHDR 之后；清理旧 chara/ccv3，避免幽灵数据残留）
+// 🧹 落盘前统一剥离前端内部字段（uid / _collapsed / 库项元数据）—— 与 file:saveCard 的
+//    PNG 分支同一套规则（main/cardFieldSanitizer.js）。换卡图（card:replaceImage）是第 5 条
+//    写盘路径：前面若用「从世界书库导入词条」给卡内世界书写过 uid/_collapsed，
+//    漏了这里就会把它们一起嵌进新 PNG（DF-14 的漏网路径）。
 function embedCardJSONIntoPNG(pngBuf, cardJson) {
   if (!isPNGBuffer(pngBuf)) return null;
 
-  const base64 = Buffer.from(JSON.stringify(cardJson), 'utf-8').toString('base64');
+  const base64 = Buffer.from(JSON.stringify(stripInternalFields(cardJson)), 'utf-8').toString('base64');
   const chunkData = Buffer.concat([
     Buffer.from('chara', 'latin1'),
     Buffer.from([0]),
@@ -771,6 +782,24 @@ function setPluginPreview(html) {
   return id;
 }
 
+// 🧩 聊天 HTML 段（状态栏界面等）：与插件预览**同因**——生产 CSP 只放行 `'self' app:`，
+//    `srcdoc` iframe 会继承父页 CSP，界面里的内联 `<script>`（JS-Slash-Runner 状态栏正是
+//    webpack SPA 模板）会被全部拦截 → 状态栏根本渲染不出来。
+//    改为主进程内存 store + `app://` 独立 URL（该路由跳过 CSP 注入），内联脚本即可执行。
+//    与预览分开一份 store，避免聊天里大量段把正在看的插件预览挤掉。
+const segStore = new Map(); // id -> { html, ts }
+let segSeq = 0;
+const SEG_PATH_PREFIX = '/__jsk_seg__/';
+function setChatHtmlSegment(html) {
+  const id = String(++segSeq) + '-' + crypto.randomBytes(4).toString('hex');
+  segStore.set(id, { html, ts: Date.now() });
+  if (segStore.size > 60) {
+    const oldest = [...segStore.entries()].sort((a, b) => a[1].ts - b[1].ts)[0];
+    if (oldest) segStore.delete(oldest[0]);
+  }
+  return id;
+}
+
 /**
  * 注册自定义协议
  * - app://        -> 项目根目录下的文件（页面、JS、CSS） + 内存中的插件预览页
@@ -779,6 +808,13 @@ function setPluginPreview(html) {
 function registerAppProtocol() {
   protocol.handle('app', (request) => {
     const url = new URL(request.url);
+    // 🧩 聊天界面段（状态栏界面等）：同一套内存路由，不落盘
+    if (url.pathname.startsWith(SEG_PATH_PREFIX)) {
+      const id = url.pathname.slice(SEG_PATH_PREFIX.length).replace(/\.html$/, '');
+      const entry = segStore.get(id);
+      if (!entry) return new Response('Not Found', { status: 404 });
+      return new Response(entry.html, { headers: { 'content-type': 'text/html; charset=utf-8' } });
+    }
     // 🧩 插件预览页：命中内存路由直接返回，不落盘、不受路径越界校验限制
     if (url.pathname.startsWith(PREVIEW_PATH_PREFIX)) {
       const id = url.pathname.slice(PREVIEW_PATH_PREFIX.length).replace(/\.html$/, '');
@@ -1064,7 +1100,7 @@ app.whenReady().then(() => {
       // sandbox="allow-scripts" iframe 内加载、无同源访问、无 Node 能力，风险可控。
       let url = details.url;
       try { url = new URL(details.url).pathname; } catch (e) { /* 非标准 URL 忽略 */ }
-      if (typeof url === 'string' && url.startsWith(PREVIEW_PATH_PREFIX)) {
+      if (typeof url === 'string' && (url.startsWith(PREVIEW_PATH_PREFIX) || url.startsWith(SEG_PATH_PREFIX))) {
         return callback({ responseHeaders: details.responseHeaders });
       }
       callback({
@@ -2388,7 +2424,7 @@ app.whenReady().then(() => {
         if (ext === '.json') {
           // 原子写入：tmp + rename（tmp 唯一命名防并发互踩）
           tmpPath = `${filePath}.${process.pid}.${++saveTmpSeq}.tmp`;
-          await fs.promises.writeFile(tmpPath, JSON.stringify(updatedJson, null, 2), 'utf-8');
+          await fs.promises.writeFile(tmpPath, JSON.stringify(stripInternalFields(updatedJson), null, 2), 'utf-8');
           await fs.promises.rename(tmpPath, filePath);
           const st = await fs.promises.stat(filePath);
           return { success: true, mtime: st.mtimeMs, size: st.size };
@@ -2590,10 +2626,7 @@ app.whenReady().then(() => {
       if (!fs.existsSync(filePath)) return { success: false, error: '原文件不存在，无法保存。' };
 
       // 1. 数据清洗 (剔除 _collapsed 等临时 UI 字段 + 前端临时 uid，保证落盘 JSON 100% 符合酒馆原生规范)
-      const cleanData = JSON.parse(JSON.stringify(data, (key, value) => {
-        if (key.startsWith('_') || key === 'uid') return undefined;
-        return value;
-      }));
+      const cleanData = stripInternalFields(data);
 
       const fileContent = JSON.stringify(cleanData, null, 4);
 
@@ -2727,10 +2760,7 @@ app.whenReady().then(() => {
       if (!isPathAllowed(filePath)) return forbidden();
       if (fs.existsSync(filePath)) return { success: false, error: '目标文件已存在，请换一个文件名。' };
       await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
-      const cleanData = JSON.parse(JSON.stringify(data, (key, value) => {
-        if (key.startsWith('_') || key === 'uid') return undefined;
-        return value;
-      }));
+      const cleanData = stripInternalFields(data);
       await fs.promises.writeFile(filePath, JSON.stringify(cleanData, null, 4), 'utf-8');
       return { success: true };
     } catch (err) {
@@ -3345,6 +3375,18 @@ app.whenReady().then(() => {
     }
   });
 
+  // 🧩 聊天 HTML 段（状态栏界面）：存主进程内存 → 独立 app:// URL（跳过 CSP 注入，内联脚本可执行）
+  ipcMain.handle('chat:setHtmlSegment', async (event, html) => {
+    try {
+      if (typeof html !== 'string' || html.length === 0) return { success: false, error: '内容为空' };
+      if (html.length > 5 * 1024 * 1024) return { success: false, error: '内容过大' };
+      const id = setChatHtmlSegment(html);
+      return { success: true, url: 'app://index.html' + SEG_PATH_PREFIX + id + '.html' };
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  });
+
   // 打开全局回收站（世界书删除/查重清洗移入的 userData/jsTavern_Trash；不存在则先创建）
   ipcMain.handle('sys:openGlobalTrash', async () => {
     try {
@@ -3742,7 +3784,7 @@ app.whenReady().then(() => {
       const book = d.character_book;
       if (book && ((book.entries && book.entries.length > 0) || Array.isArray(book))) {
         const wbPath = path.join(exportDir, 'worldbook.json');
-        fs.writeFileSync(wbPath, JSON.stringify(book, null, 2), 'utf-8');
+        fs.writeFileSync(wbPath, JSON.stringify(stripInternalFields(book), null, 2), 'utf-8');
       }
       
       // 3. 如果卡片中内嵌了正则脚本，自动将其单独导出为 regex_scripts.json

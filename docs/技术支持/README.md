@@ -72,6 +72,30 @@
 | `ai-category-modal-smoke.mjs` | AI 归类「自动建类」UI 冒烟（🆕 新建徽标与 optgroup 渲染） |
 | `sanitize-live.mjs` | `sanitizeImportedTags` 开关的**真实导入**热测试（`probe` / `set` / `import` / `check` 四步） |
 | `live-vector-test.cjs` | 在真实 Electron 主进程里验 `vectorManager`（标签展开 + 0.35 阈值）：`npx electron scripts/live-vector-test.cjs` |
+| `prod-library-regression.mjs` | **生产模式**（`app://`，无调试句柄）卡库回归：首屏＋刷新×5＋搜索×5＋搜索中刷新，断言「真重复组恒为 0 / 计数不归零」（防 PK-01、PK-02、DF-08、DF-09 复活）。用法：`npx electron . --disable-gpu --remote-debugging-port=9350` + `$env:CDP_PORT="9350"` |
+| `prod-ui-regression.mjs` | 生产模式 UI 回归（AR-18 正则·状态栏新增首条 / AR-19 添加要切 Tab）。⚠️ 卡片行选择器**尚未校准，当前未跑通**，仅作待修工具保留 |
+
+### 落盘清洗验证（保存路径回归）
+
+> 针对 `main/cardFieldSanitizer.js`（落盘前剥离前端内部字段）。**这套脚本的价值主要在反向用例**：
+> 证明「递归剔除所有 `_` 前缀键」会删掉第三方真实数据（实测 7 类、131 处），因此实现改成了白名单。
+
+| 脚本 | 用途 |
+|---|---|
+| `audit-card-underscore-fields.py` | 全库审计：列出真实卡片里**非前端内部**的 `_` 前缀字段与所有 `uid` 的位置和数量（`python scripts/audit-card-underscore-fields.py <库根> [张数]`）。改清洗规则前**先跑它**——这是判断「会不会误删用户数据」的唯一依据 |
+| `audit-preset-worldbook-underscore.py` | 同上，但扫**预设 / 独立世界书**类 JSON（判据：`prompts`+`prompt_order` 或 `entries`）。结论：预设与独立世界书里无 `_` 前缀字段，但**独立世界书 `entries[i].uid` 大量存在**（DF-14「遗留待决」的依据） |
+| `save-strip-live-ui.mjs` | **渲染层 4 处清洗点**的真实运行验证：`downloadJson` / 卡片内嵌世界书导入 / 独立世界书导入；反向断言第三方 `extensions._filename` 与扩展内部 `uid` 不被误删。全程只动内存，结束还原 |
+| `save-strip-real-cards.mjs` | **离线**批量验证：抽真实卡片 → 注入 `uid`/`_collapsed` → 过清洗 → 断言注入字段被剔除、第三方字段 0 丢失、其余内容逐字段不变。`node scripts/save-strip-real-cards.mjs "I:\03\角色色卡"`（无需 Electron） |
+| `save-strip-prep-samples.mjs` | 从库里挑出含第三方 `_` 字段的真实卡片，复制成样本到指定目录（给下面两个热测试用） |
+| `save-strip-live-card.mjs` | **真实 IPC 链路**验证 PNG 卡片保存：渲染层 `readBuffer` → 注入污染 → `saveCard()` 真存 → 读回断言（含 PNG 结构完好、字节数一致）。前置：dev server + `--remote-debugging-port=9222` |
+| `save-strip-live-worldbook.mjs` | 同上，覆盖另外 3 条落盘路径：`saveCard(.json)` / `wb:create` / `wb:save`（结束自动删样本，不动用户卡片库） |
+
+⚠️ 跑热测试的两个坑（都实际踩过）：
+1. 样本目录必须放 **`%APPDATA%\sillytavern-card-manager\`**（= `productName` 派的 userData），
+   放 `%APPDATA%\JSK管理\` 会被 `isPathAllowed` 判「路径越界」——那不是功能 bug。
+2. 脚本里的 Windows 路径**一律在 Node 侧用 `JSON.stringify` 生成字面量**，
+   手工拼 `\\\\` 会产出双反斜杠路径，同样误报越界。
+
 
 ### 数据分析（多为一次性，保留备查）
 

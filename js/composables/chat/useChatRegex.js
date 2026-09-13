@@ -51,19 +51,31 @@ export const PLACEMENT_LABELS = { 0: '全局', 1: '用户', 2: 'AI', 3: '斜杠'
 /**
  * 安全编译正则表达式（兼容酒馆 findRegex 格式）
  * 酒馆正则可能是 /pattern/flags 格式或纯 pattern
+ *
+ * 🚀 编译结果缓存：同一 pattern 不再逐次重编译（引擎一条消息要跑几十条脚本、
+ *    发送时还要对全历史再跑一遍，重复编译开销可观）。
+ *    ⚠️ 只在 String.replace 场景使用，replace 对 /g 正则会在结束时重置 lastIndex，
+ *    故复用实例是安全的（调用处仍会显式重置一次 lastIndex 以策万全）。
  */
+const REGEX_CACHE_MAX = 500;
+const regexCache = new Map();   // pattern → RegExp | null（null = 已知编译失败，不重复 warn）
 function compileRegex(pattern) {
     if (!pattern || typeof pattern !== 'string') return null;
+    if (regexCache.has(pattern)) return regexCache.get(pattern);
     const trimmed = pattern.trim();
     if (!trimmed) return null;
     const match = trimmed.match(/^\/(.+)\/([gimsuy]*)$/s);
+    let re = null;
     try {
-        if (match) return new RegExp(match[1], match[2]);
-        return new RegExp(trimmed, 'gm');
+        if (match) re = new RegExp(match[1], match[2]);
+        else re = new RegExp(trimmed, 'gm');
     } catch (e) {
         console.warn('[Regex] 正则编译失败:', pattern, e.message);
-        return null;
+        re = null;
     }
+    if (regexCache.size >= REGEX_CACHE_MAX) regexCache.clear();
+    regexCache.set(pattern, re);
+    return re;
 }
 
 /** 宏替换：{{user}} {{char}} 及自定义宏 */
@@ -116,13 +128,59 @@ function placementMatches(placements, node) {
  *   - promptOnlyExclusive=true 仅应用 promptOnly 脚本(构建发给 AI 的提示词历史用,对齐酒馆"对AI隐藏")
  * @returns {string} 处理后的文本
  */
+/**
+ * 单条脚本 / 单次调用的时间预算（毫秒）
+ * ─ 防用户预设里的灾难性回溯把界面冻死（实测：`([\s\S]*)<\/konatan_planning~>` 在
+ *   137KB 文本上单条就要 11.7s，整条管线 20s+ → 打开卡就“卡死”）。
+ *   注：JS 无法中途打断已在执行的正则，预算是**累计守卫**（超预算就不再跑剩余脚本）。
+ */
+export const REGEX_SCRIPT_BUDGET_MS = 120;
+export const REGEX_TOTAL_BUDGET_MS = 1500;
+/** 替换串 ≥ 该长度视为「界面注入型」→ 延后物化（见 BIG_REPLACEMENT 注释） */
+export const BIG_REPLACEMENT_THRESHOLD = 8192;
+/** 延后物化的占位符（用控制字符开头，用户文本里几乎不可能出现） */
+const TOKEN_PREFIX = '\u0000\u0001JSKBIG';
+
+/**
+ * 对单条文本应用一组正则脚本
+ * @param {string} text - 原始文本
+ * @param {Array} scripts - 正则脚本数组（已归一或未归一均可）
+ * @param {string} stage - 应用阶段 'AI' | 'USER'
+ * @param {object} macros - 宏字典（{{user}} {{char}} 及插件宏）
+ * @param {object} [opts] 选项:
+ *   - promptOnlyExclusive=true 仅应用 promptOnly 脚本(构建发给 AI 的提示词历史用,对齐酒馆"对AI隐藏")
+ *   - scriptBudgetMs / totalBudgetMs  覆盖默认预算
+ *   - deferBigReplacements=false  关闭「巨型替换串延后物化」（默认开启）
+ *   - onSkip(list)  超预算被跳过的脚本回调（UI 可据此提示用户）
+ *
+ * 🧠 巨型替换串为何要「延后物化」：
+ *   酒馆助手类卡片会把 `<StatusPlaceHolderImpl/>` 替成**整包状态栏 HTML（100~280KB）**，
+ *   这是**显示层注入**。旧实现把它当成普通文本立即写入，于是
+ *   ① 后续几十条脚本（含用户预设里的宽松贪婪正则）全部在膨胀后的文本上跑 → 灾难性回溯、卡死；
+ *   ② 置入 `chatMessages` 后还会写进聊天存档。
+ *   改为：匹配与计算照旧（`$1`/`{{match}}` 行为不变），但**注入文本用占位符代替**，
+ *   等本趟管线全部跑完再统一回填 → 后续脚本始终面对小文本（实测 20s+ → 毫秒级）。
+ *   ⚠️ 已知语义边界（极罕见）：若某条后期脚本需要匹配前面脚本注入的 HTML 正文，本方案下它看到的是占位符。
+ * @returns {string} 处理后的文本
+ */
 export function applyRegexScripts(text, scripts, stage, macros, opts = {}) {
     if (!text || !scripts || !Array.isArray(scripts) || scripts.length === 0) return text || '';
     const promptOnlyExclusive = opts.promptOnlyExclusive === true;
     const node = STAGE_NODE[stage] || 2;
+    const scriptBudget = Number.isFinite(opts.scriptBudgetMs) ? opts.scriptBudgetMs : REGEX_SCRIPT_BUDGET_MS;
+    const totalBudget = Number.isFinite(opts.totalBudgetMs) ? opts.totalBudgetMs : REGEX_TOTAL_BUDGET_MS;
+    const bigThreshold = Number.isFinite(opts.bigThreshold) ? opts.bigThreshold : BIG_REPLACEMENT_THRESHOLD;
+    const deferBig = opts.deferBigReplacements !== false;
+    const now = (typeof performance !== 'undefined' && performance && typeof performance.now === 'function')
+        ? () => performance.now() : () => Date.now();
+    const skipped = [];
+    const pendingBig = [];   // [占位符, 真实替换结果]
+    let tokenSeq = 0;
+    let spent = 0;
     let out = String(text);
 
-    for (const raw of scripts) {
+    for (let si = 0; si < scripts.length; si++) {
+        const raw = scripts[si];
         if (!raw || raw.disabled === true) continue;
         const isPromptOnly = raw.promptOnly === true;
         // promptOnly = 仅作用于发给模型的提示词;markdownOnly = 仅显示层
@@ -142,8 +200,13 @@ export function applyRegexScripts(text, scripts, stage, macros, opts = {}) {
         // 替换串宏替换（对齐酒馆：替换结果最后还会跑一次宏替换）
         const replacement = substituteMacros(String(raw.replaceString || raw.replace_string || ''), macros);
         const trimStrings = Array.isArray(raw.trimStrings) ? raw.trimStrings.filter((t) => typeof t === 'string' && t) : [];
+        // 🧠 界面注入型（替换串巨大）→ 本趟用占位符代替，管线末尾统一回填
+        const deferThis = deferBig && replacement.length >= bigThreshold;
+        const scriptName = raw.scriptName || raw.script_name || raw.findRegex || raw.find_regex || '(未命名)';
 
+        const t0 = now();
         try {
+            re.lastIndex = 0;   // 缓存复用同一实例，显式重置（/g 状态）
             out = out.replace(re, (...m) => {
                 const full = m[0];
                 const groups = (typeof m[m.length - 1] === 'object' && m[m.length - 1] !== null) ? m[m.length - 1] : {};
@@ -169,11 +232,36 @@ export function applyRegexScripts(text, scripts, stage, macros, opts = {}) {
                 });
                 // $<name> → 命名捕获组
                 rep = rep.replace(/\$<([^>]+)>/g, (_, name) => (groups[name] !== undefined ? groups[name] : ''));
+                if (deferThis) {
+                    const token = TOKEN_PREFIX + (tokenSeq++) + '\u0001';
+                    pendingBig.push([token, rep]);
+                    return token;
+                }
                 return rep;
             });
         } catch (e) {
             console.warn('[Regex] 替换失败:', raw.scriptName || raw.findRegex, e.message);
         }
+
+        // ⏱️ 时间预算：单条超预算记一笔；累计超总预算 → 剩余全部跳过（宁可少美化，不可冻界面）
+        const cost = now() - t0;
+        spent += cost;
+        if (cost > scriptBudget) {
+            skipped.push({ name: scriptName, ms: Math.round(cost), reason: 'single' });
+        }
+        if (spent > totalBudget && si < scripts.length - 1) {
+            skipped.push({ name: scriptName, ms: Math.round(spent), reason: 'total', remaining: scripts.length - si - 1 });
+            break;
+        }
+    }
+
+    // 🧠 回填延后物化的巨型替换（保持脚本顺序语义：它们的内容最终位置上仍与旧实现一致）
+    if (pendingBig.length) {
+        for (const [token, value] of pendingBig) out = out.split(token).join(value);
+    }
+    if (skipped.length) {
+        console.warn('[Regex] 预设/正则在当前文本上过重，已跳过部分脚本:', skipped);
+        if (typeof opts.onSkip === 'function') { try { opts.onSkip(skipped); } catch (e) { /* 忽略 */ } }
     }
     return out;
 }

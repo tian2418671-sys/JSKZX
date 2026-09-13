@@ -652,7 +652,7 @@
                                     :title="chatSegEnabled ? '分段渲染已开：HTML 面板走沙箱 iframe，文本段走 Markdown' : '分段渲染已关：全部按纯文本显示'">
                                 {{ chatSegEnabled ? '🧩 分段渲染' : '📄 纯文本' }}
                             </button>
-                            <button @click="ctx.chatClear" class="text-red-400 hover:text-red-300 font-bold" title="清空当前会话并重载开场白">清空记录</button>
+                            <button @click="onChatClear" class="text-red-400 hover:text-red-300 font-bold" title="清空当前会话并重载开场白">清空记录</button>
                         </div>
                     </div>
                     <div ref="chatContainer" class="flex-1 overflow-y-auto p-4 space-y-4 bg-zinc-950 custom-scrollbar">
@@ -671,14 +671,17 @@
                                         <chat-panel-seg
                                             :segments="segmentsOfMsg(msg)"
                                             :vars-json="chatVarsJsonSafe"
+                                            :message-id="idx"
                                             :render-text="renderChatHtml"
                                         />
                                     </div>
-                                    <!-- 🔄 swipe 工具条（仅 assistant 且有候选时显示） -->
+                                    <!-- 🔄 swipe 工具条（常显：只有 1 个候选时 ◀▶ 置灰，让人看得出有候选机制） -->
                                     <div v-if="msg.role === 'assistant'" class="mt-1 flex items-center gap-1.5 text-[10px] text-zinc-500">
-                                        <button v-if="(msg.swipes || []).length > 1" @click="ctx.chatNextSwipe(idx)" class="hover:text-cyan-400" title="上一个候选">◀</button>
-                                        <span v-if="(msg.swipes || []).length > 1">{{ (msg.index || 0) + 1 }}/{{ (msg.swipes || []).length }}</span>
-                                        <button v-if="(msg.swipes || []).length > 1" @click="ctx.chatNextSwipe(idx)" class="hover:text-cyan-400" title="下一个候选">▶</button>
+                                        <button @click="onChatPrevSwipe(idx)" :disabled="(msg.swipes || []).length < 2"
+                                                class="hover:text-cyan-400 disabled:opacity-30 disabled:hover:text-zinc-500" title="上一个候选（开场白也走这里）">◀</button>
+                                        <span class="tabular-nums">{{ (msg.index || 0) + 1 }}/{{ (msg.swipes || []).length || 1 }}</span>
+                                        <button @click="onChatNextSwipe(idx)" :disabled="(msg.swipes || []).length < 2"
+                                                class="hover:text-cyan-400 disabled:opacity-30 disabled:hover:text-zinc-500" title="下一个候选（开场白也走这里）">▶</button>
                                         <button @click="onChatMoreSwipe(idx)" :disabled="chatSending" class="hover:text-emerald-400 disabled:opacity-40" title="再生成一个候选">＋</button>
                                         <button @click="onChatRegenerate(idx)" :disabled="chatSending" class="hover:text-amber-400 disabled:opacity-40" title="整组重新生成">↻</button>
                                         <button @click="onChatContinue(idx)" :disabled="chatSending" class="hover:text-indigo-400 disabled:opacity-40" title="以此为起点续写">↳续</button>
@@ -1912,6 +1915,18 @@ export default {
             await (ctx.chatSend ? ctx.chatSend(sidebarParamOverrides.value) : Promise.resolve());
             scrollChatToBottom();
         };
+        // ⚠️ 模板里写 `ctx.xxx` 会报 "Cannot read properties of undefined" —— 本组件是纯 setup 组件，
+        //    ctx 是 setup 内部的局部变量，**没有交给模板作用域**（之前被这个坑挡住的一共 3 处：
+        //    清空记录 / ◀ / ▶，点了都没反应）。一律走本地包装函数转发（与 onChatSend 同一手法）。
+        const onChatClear = () => { if (ctx.chatClear) ctx.chatClear(); };
+        const onChatPrevSwipe = (i) => {
+            if (ctx.chatPrevSwipe) ctx.chatPrevSwipe(i);
+            scrollChatToBottom();
+        };
+        const onChatNextSwipe = (i) => {
+            if (ctx.chatNextSwipe) ctx.chatNextSwipe(i);
+            scrollChatToBottom();
+        };
         const onChatMoreSwipe = async (i) => {
             await (ctx.chatMoreSwipe ? ctx.chatMoreSwipe(i, sidebarParamOverrides.value) : Promise.resolve());
             scrollChatToBottom();
@@ -1936,6 +1951,7 @@ export default {
             chatMessages, chatDraft, chatSending, cardName,
             segmentsOfMsg, renderChatHtml, chatVarsJsonSafe, chatContainer,
             onChatSend, onChatMoreSwipe, onChatRegenerate, onChatContinue,
+            onChatClear, onChatPrevSwipe, onChatNextSwipe,
             scrollChatToBottom, chatSegEnabled, toggleChatSeg,
             // ⚙ 测卡工作区侧边栏（7 分区）
             sidebarVisible, sidebarWidth, chatStorageReady,

@@ -54,6 +54,95 @@
 - **现象**：导出的 JSON 里混入 `_collapsed` 等 UI 状态；SillyTavern 原生无 `uid`。
 - **修复**：`JSON.stringify` replacer 双层防线，剔除 `_` 前缀字段 + `uid`。
 - **来源**：早期坑清单（数据/文件）；v1.8.9
+- **⚠️ 2026-09-13 追补（重要）**：本条当时的实现「**递归**剔除所有 `_` 前缀键 + 所有 `uid`」
+  本身是**危险的**——第三方扩展把 `_` 开头字段当真实数据用。实测 11,045 张真实卡片里
+  有 **7 类、131 处**会被它删掉（详见本文件下一节 **DF-14**）。
+  现已改为**白名单字段名 + 限定位置**（`main/cardFieldSanitizer.js`）。
+  **不要**再按本条旧描述回退成前缀递归实现。
+
+### DF-14 ｜ 🔴 卡片保存路径未清洗（DF-03 覆盖不全）+ 旧清洗规则会**误删第三方真实数据**
+- **现象 A（污染）**：`App.vue` 的「从世界书库导入词条到角色卡内嵌世界书」先剔 `_`、
+  紧接着又写回前端用的 `uid` 与 `_collapsed` 再 push 进卡内世界书的**活引用**；
+  而卡片保存走 `getPlainCardData()`（纯 `JSON.parse(JSON.stringify(...))`，**无 replacer**）
+  → 保存后 PNG 的 `chara` JSON / 卡片 `.json` / 整合包的 `worldbook.json` 里混进这两个字段。
+  DF-03 只覆盖了世界书 `wb:save` / `wb:create` 两条路径，**漏了卡片侧 4 条**
+  （PNG `chara` 块、卡片 `.json`、整合包 `worldbook.json`，以及**换卡图** `card:replaceImage`
+  —— 后者会把内存里的 `uid`/`_collapsed` 一起嵌进新 PNG）。
+- **现象 B（误删，更严重）**：DF-03 的递归前缀剔除会把第三方扩展的真实数据删掉。
+  2026-09-13 用 `scripts/audit-card-underscore-fields.py` 对 11,045 张真实卡片实测：
+
+  | 被误删的真实字段 | 命中卡片数 |
+  |---|---|
+  | `character_book/entries[].extensions._filename` | 28 |
+  | `extensions/juqingtuijin/apiSettings/_legacyEntriesMigrated` | 26 |
+  | `extensions/tavern_helper/variables/phone_data/_exportMeta` | 13 |
+  | `extensions/quick-response-force/apiSettings/_legacyEntriesMigrated` | 4 |
+  | `extensions/tavern_helper/variables/phone_character_images/__common__`（**键名本身就是 `_` 开头**） | 3 |
+  | `extensions/TavernHelper_scripts[].value.data.change_log[].uid` | 11 处 |
+  | `extensions/chatSheets/sheet_<表名>/uid` | 24 处 |
+
+  同一份审计确认：真实卡片的 `character_book` 词条上**没有** `uid`（0 张），故删词条级 uid 无损失。
+- **根因**：把「前端内部字段」这一**语义问题**当成了「`_` 前缀」这一**命名巧合**问题。
+  前缀不是契约 —— 第三方扩展同样会用 `_` 开头。
+- **修复**：抽出 `main/cardFieldSanitizer.js`，规则改为
+  **白名单字段名（`uid` / `_collapsed` / `_srcIndex` / `_srcUid`，顶层再加 `_mtime` 等库项元数据）
+  + 限定位置（只删世界书**词条对象自身的直接键**，绝不递归进词条内部）**，
+  5 条落盘路径共用：卡片 PNG `chara` 块、卡片 `.json`、`wb:save` / `wb:create`、整合包 `worldbook.json`、
+  换卡图 `card:replaceImage`（清洗放在 `embedCardJSONIntoPNG()` 内部，单点覆盖全部调用方）。
+  返回深拷贝，**不就地改内存活对象**（内存里的 `uid` 仍供 v-for 做 key；`_mtime` 仍供增量刷新比对）。
+- **验证**：`test/cardFieldSanitizer.test.mjs`（14 例，含反向用例：第三方 `_` / `uid` 不误删、内存活对象不被就地修改）；
+  `scripts/save-strip-real-cards.mjs`（真实卡片批量离线复跑：注入污染 → 清洗 → 第三方字段 0 丢失、其余逐字段一致）；
+  `scripts/save-strip-live-card.mjs` + `save-strip-live-worldbook.mjs`（**真实 IPC 落盘链路**）。
+  ⚠️ 换卡图路径因需原生「选图」对话框，无法脚本化，只做代码级核对（清洗点唯一）。
+- **来源**：v2.2.7 回归审计（2026-09-13）
+- **遗留待决（⬜ 本次**未改**，需用户决策）**：同一审计（`scripts/audit-preset-worldbook-underscore.py`，
+  扫 5,894 个 JSON）发现 **独立世界书的 `entries[i].uid` 是普遍存在的真实字段**
+  （330 个世界书文件里，最长条目上出现 285 次）—— 这说明 DF-03 注释里
+  「SillyTavern 原生无 uid」**对独立世界书并不成立**（只有角色卡**内嵌** `character_book` 的词条才没有 uid）。
+  而 `wb:save` / `wb:create` 从 v1.8.9 起就会在保存时**删掉这些 uid**。
+  - **为什么本次不动它**：这是 v1.8.9 起的**既有既定行为**，且实测影响很轻 ——
+    uid 在本项目里只作世界书条目排序的**三级 tie-breaker**
+    （`useWorldbookEntries.js:127`，注释明确「仅影响展示顺序，不改变底层数组顺序」），
+    条目标识走 `WeakMap`；SillyTavern 导入时也会自行分配 uid。
+    在**已发布版本**上改「保存时保留 uid」属于未经验证的行为变更（可能影响 ST 互操作），
+    不宜混在本次修复里。
+  - **若要改**：把 `main/cardFieldSanitizer.js` 的 `WB_ENTRY_INTERNAL_FIELDS` 里 `uid` 去掉即可
+    （渲染层 `js/utils/cardFields.js` 的同名常量要一起改 —— 有「两份实现白名单必须一致」的防漂移测试盯着；
+    `App.vue` 的 `saveActiveWorldbook` / `exportActiveWorldbook` 已改为调用同一助手，**无需单独改**），
+    但**改完必须重跑** `scripts/audit-preset-worldbook-underscore.py` +
+    `test/cardFieldSanitizer.test.mjs`。
+  - 同批审计的另一面：**预设（19 个）与独立世界书里未发现任何 `_` 前缀字段** → 无观察到的受害者。
+    故 `preset:save` / `preset:create` 上的同款递归规则（`main.js:2979` / `main.js:3012`）
+    **本次一并未动** —— 没有证据、也不清楚预设编辑器注入了哪些 `_` 字段，盲改可能反而把 UI 垃圾留在盘上。
+
+### DF-15 ｜ 🔴 「库 → 卡内嵌」导入不做字段口径转换 → 酒馆侧触发词失效
+- **现象**：在角色卡内经「📥 导入词条」把世界书库的词条导进卡内嵌世界书后，
+  该词条在**本应用里看着完全正常**（卡内编辑器 `keys || key` 双向回退），
+  但存进卡片文件的是**库/旧世界书格式**，与卡里原有词条（V2 内嵌格式）**两种口径并存**。
+- **实测证据**（2026-09-14，`星月私立高等学院 MVU 3.9.9_copy_*.png`）：
+  导入的那条词条字段 = `key, keysecondary, comment, content, constant, selective, order,
+  disable, position(数字), vectorized, displayIndex, excludeRecursion, …`；
+  而同一张卡原有的 46 条 = `id, keys, secondary_keys, comment, content, constant, selective,
+  insertion_order, enabled, position(字符串 before_char/after_char), use_regex, extensions`。
+- **根因**：`App.vue` 的 `confirmCardWbImport` 注释写着「字段转换：库（`key/keysecondary/order`）
+  → 内嵌（`keys/secondary_keys/insertion_order`）」，但实现只有
+  「深拷贝 → 剔前端内部字段 → 写 `uid`/`_collapsed` → push」——**零字段映射**（注释与实现不符）。
+  反方向的 `extractWorldbookFromCard`（`useWorldbookExtras.js:63-72`）是**做了**映射的，
+  说明项目本就要求双向映射，只是回去的方向漏了。
+- **危害**：酒馆读卡内嵌世界书按 V2 规范取 `keys`/`secondary_keys`/`insertion_order`/`enabled`
+  ⇒ 该词条的**触发词很可能不生效**（`disable` 与 `enabled` 语义相反，开关状态也会与 ST 不一致）；
+  数值型 `position` 也丢了与 `extensions.position` 的对应关系。属「用了就中」而非存量普遍
+  （本库实测：63 张带内嵌世界书的卡 / 3808 条词条里，**1 张 1 条**）。
+- **修复**：新增 `js/utils/wbEntryFormat.js` 的 `toEmbeddedEntry()`，在 push 之前做互逆映射 ——
+  `keys ← key`、`secondary_keys ← keysecondary`、`insertion_order ← order`、`enabled ← !disable`，
+  顶层 `position` 由数字（或字符串）归一为 V2 的 `before_char` / `after_char` 并把**数值真相**放进
+  `extensions.position`（与真实卡一致）；ST 选项字段（`excludeRecursion`/`displayIndex`/`groupOverride`/
+  `match*` 等）搬进 `extensions` 并按真实卡的命名（`exclude_recursion`/`display_index`/…，
+  `selectiveLogic` 与 `useProbability` 保持驼峰）；消费掉的库字段（`key`/`keysecondary`/`order`/
+  `disable`/`useRegex`）删除；**未知字段保守保留**（不白名单式丢弃第三方数据）。
+- **验证**：`test/wbEntryFormat.test.mjs`（含「已是内嵌格式再转一次幂等」「不就地改入参」
+  「真实卡条目字段结构断言」「未知第三方字段保留」）；并对**真实卡里那条导入词条**离线复跑转换确认字段到位。
+- **来源**：v2.2.7 换卡图端到端验证时的连带发现（DF-14 修复后的对照扫描）
 
 ### DF-05 ｜ 🔴 分类/标签未同步写原生 `data.tags` → 重启重扫丢失
 - **修复**：`persistCardUpdate` 三保险 —— 内存 + 覆盖层（`appConfig.cardOverlays[path]`）+ 写回卡片文件。
@@ -196,6 +285,9 @@
 
 1. **取字段一律带跨来源回退**：`comment || name`、`order ?? insertion_order`、`keys || key`、`Object.values(entries)`。
 2. **新增「按 path 派生」的存储键**：路径会变（移动分组 / 重命名 / 换卡图）→ 必须同步迁移（参考 `chat/chatStorage.js` 的 `migrateChatKeys`，见 [CT-10](BUG-测卡工作区.md)）。
-3. **导出/落盘前**必须剔除 `_` 前缀字段与 `uid`。
+3. **导出/落盘前**必须清洗前端内部字段 —— 但**只能用 `main/cardFieldSanitizer.js`**，
+   ⚠️ **禁止**自己写「递归剔除所有 `_` 前缀键」或「递归剔所有 `uid`」：
+   第三方扩展把这两类名字当真实数据用，会**删用户数据**（见本文件 **DF-14**，实测 7 类 131 处）。
+   改清洗规则前**先跑** `python scripts/audit-card-underscore-fields.py <库根>` 看真实数据里有什么。
 4. **扫描结果永远先判 `error`**，并且**拒绝用 0 文件结果覆盖非空库**（见 [PK-02](BUG-性能与大库.md)）。
 5. **过滤临时文件**时，除自家产生的后缀，还要覆盖外部工具的 `<卡名>.<pid>.<tid>.tmp` 模式。

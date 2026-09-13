@@ -23,7 +23,7 @@
 | 仓库 | `https://github.com/tian2418671-sys/JSKZX.git`（远端 `origin`） |
 | 分支 | 本地 `master`（与 origin 同步） |
 | 构建产物 | `sillytavern-card-manager-<版本>.exe`（NSIS 安装版）+ `latest.yml` + `.exe.blockmap` + zip 绿色版 |
-| 测试 | `npm test` = `node --test "test/**/*.test.mjs"` → 当前 **214 用例全绿**（21 个测试文件） |
+| 测试 | `npm test` = `node --test "test/**/*.test.mjs"` → 当 前 **256 用例全绿**（25 个测试文件） |
 | 规模 | `js/components/` 41 个 SFC、`js/composables/` 36 个模块（含 `chat/` 引擎 16 个）、`js/utils/` 解析与索引工具 |
 | 用户习惯 | 说「**一条龙服务**」= 升版本号 → 更新文档三件套 → 打包 → 提交推送 → 发 GitHub Release（含 `latest.yml` 保 OTA） |
 | 典型库 | 日常小库 `E:\AI\酒馆工具\角色卡`（75 张）；压测大库 `I:\03\角色色卡`（11,186 张 / 9.76GB）；2 万卡副本由脚本现造 |
@@ -82,7 +82,7 @@ js/utils/          cardLoader.js（卡解析/规范化）、pngParser.js、searc
 main/              vectorManager.js / vectorWorker.js / memoryStore.js（向量与长期记忆存储层）
 css/               tailwind.css（源）/ style.css（自定义）
 web/               vite build 产物（生产加载，gitignore）
-test/              21 个测试文件 / 214 用例（node:test，`npm test`）
+test/              25 个测试文件 / 256 用例（node:test，`npm test`）
 scripts/           压测与探针（library-dup-*、capacity-check.ps1、measure-startup.mjs、
                    release-check.mjs、_cdp-*.mjs 等）
 ```
@@ -176,7 +176,7 @@ node --check <file>                            # 语法检查
 
 | 门禁 | 命令 | 通过标准 |
 |---|---|---|
-| 单测 | `npm test` | 214/214 |
+| 单测 | `npm test` | 256/256 |
 | 构建 | `npm run build:web` | 无错误 |
 | 运行时 | `npx electron . --disable-gpu --enable-logging` | 无 `[Vue 错误]`、`crash.log` 无新增 |
 | 发版自查 | `node scripts/release-check.mjs` | `✅ 无阻塞项，可进入打包` |
@@ -210,7 +210,7 @@ node --check <file>                            # 语法检查
 ## 六、给下一任 AI 的开工清单
 
 1. 读本文件（已读完）→ 按需读 `docs/bugs/` 对应领域 → 接口/实测数据细节看 `docs/技术支持/`。
-2. `git status -sb` + `git log --oneline -5`，确认基线；跑 `npm test` 确认 214/214。
+2. `git status -sb` + `git log --oneline -5`，确认基线；跑 `npm test` 确认 256/256。
 3. 问清用户这一轮的目标是「修 bug / 加功能 / 发版」中的哪一类；**不要自行打包或推送**。
 4. 动手前 grep 现状；改完过 4.2 的门禁；涉及路径的操作同步迁移派生键。
 5. 若发现新缺陷：**先在 `docs/bugs/` 对应领域加一条**（带编号、版本、现象/根因/修复/验证），再写代码修复 —— 这样才不会重复踩坑。

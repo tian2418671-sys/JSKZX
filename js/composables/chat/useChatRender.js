@@ -85,38 +85,69 @@ function pushTextSegments(out, raw) {
 
 /**
  * HTML 段 → iframe srcdoc 完整文档（对齐方案 ensureDocument：片段包壳，完整文档直用）
- * 注入变量桥（getVariables/getMessageVar）+ 高度上报桥（postMessage，
- * sandbox 无同源权限时的量高回写等价实现，方案第 4 节 onPageFinished 量高）
+ * 注入第三方库（Vue/jQuery/lodash，见 useChatVendor）+ 变量桥（getVariables/getMessageVar）
+ * + 高度上报桥（postMessage，sandbox 无同源权限时的量高回写等价实现，方案第 4 节 onPageFinished 量高）
+ *
+ * ⚠️ 注入位置必须在 `<head>` **开头**：卡内状态栏是 webpack SPA，其 bundle 是模块脚本，
+ *    模块脚本默认 defer（解析完才执行），但同一份文档里若有**普通**内联脚本，就会抢在预置库前跑。
  * @param {string} html 面板 HTML（片段或完整文档）
  * @param {string} varsJson 变量树 JSON 字符串（注入 getVariables；须为 JSON 文本）
  * @param {string} panelId 面板唯一 id（高度上报配对用）
+ * @param {string} [vendorTagsRaw] 第三方库 `<script src>` 片段（空串则不加）
+ * @param {object} [opts] 附加参数：`{ messageId }` → getCurrentMessageId() 返回值
  */
-export function buildHtmlSrcdoc(html, varsJson, panelId) {
+export function buildHtmlSrcdoc(html, varsJson, panelId, vendorTagsRaw, opts) {
     const body = String(html || '');
     // 🔧 修复双重序列化:varsJson 已是 JSON 文本,直接内联为 JS 表达式(getVariables 必须返回对象)。
     //   另防变量/面板内容里的 </script 破出桥接脚本标签。
     const varsLiteral = String(varsJson || '{"stat_data":{}}')
         .replace(/<\/(script)/gi, '<\\/$1');
     const pid = String(panelId || '');
+    const msgId = Number(opts && opts.messageId) || 0;
     // 🚀 高度上报增强:load 多次重测 + MutationObserver 持续监听(SPA 模板 mount 后高度才稳定)
     const bridge = '<script>window.getVariables=function(){try{return ' + varsLiteral +
         ';}catch(e){return {stat_data:{}};}};' +
         'window.getMessageVar=function(p){var v=window.getVariables();var c=v;' +
         'try{p.split(".").forEach(function(s){c=(c==null)?undefined:c[s];});}catch(e){c=undefined;}' +
         'return c;};' +
+        // 🧩 酒馆助手 iframe API（对齐本地预览 preview-frame.html 的 mock 集合）：
+        //    · getCurrentMessageId —— 状态栏用来分辨自己属于哪一层消息
+        //    · updateVariablesWith —— 模板改完变量后由它接管；沙箱里没有酒馆变量后端，
+        //      仅在 iframe 本地快照上生效（与预览帧一致：不写回宿主，避免表单/数据源脱钩）
+        'window.getCurrentMessageId=function(){return ' + msgId + ';};' +
+        'window.errorCatched=function(f){return f;};' +
+        'window.updateVariablesWith=function(fn,opt){try{var v=window.getVariables(opt);' +
+        'if(typeof fn==="function")fn(v);return v;}catch(e){' +
+        'try{console.warn("[chat-seg] updateVariablesWith 失败:",e&&e.message);}catch(_){}}' +
+        'return window.getVariables(opt);};' +
+        'window.replaceVariables=function(vars){try{var cur=window.getVariables();' +
+        'Object.keys(cur).forEach(function(k){delete cur[k];});Object.assign(cur,vars||{});}catch(e){}' +
+        'return Promise.resolve();};' +
+        // 🧩 sandbox 无同源权限时访问 localStorage/sessionStorage 会抛 SecurityError（卡内状态栏
+        //    模板常拿它存状态），给一层内存实现兜底 —— 保住 sandbox 不放 allow-same-origin
+        'function __mkStore(){var m={};return{getItem:function(k){k=String(k);return Object.prototype.hasOwnProperty.call(m,k)?m[k]:null;},' +
+        'setItem:function(k,v){m[String(k)]=String(v);},removeItem:function(k){delete m[String(k)];},' +
+        'clear:function(){m={};},key:function(i){return Object.keys(m)[i]||null;},get length(){return Object.keys(m).length;}};}' +
+        'function __fixStore(n){try{window[n].getItem("__probe");}catch(e){try{Object.defineProperty(window,n,{configurable:true,value:__mkStore()});}catch(e2){}}}' +
+        'try{__fixStore("localStorage");__fixStore("sessionStorage");}catch(e){}' +
         'function __rh(){try{var h=Math.max(document.body?document.body.scrollHeight:0,' +
         'document.documentElement?document.documentElement.scrollHeight:0);' +
         'if(h>0)parent.postMessage({type:"jsx-panel-height",id:' + JSON.stringify(pid) + ',h:h},"*");}catch(e){}}' +
         'window.addEventListener("load",function(){__rh();setTimeout(__rh,200);setTimeout(__rh,800);setTimeout(__rh,2000);});' +
         'setTimeout(__rh,100);setTimeout(__rh,600);' +
+        // 🪟 窗口回前台时父层会 ping 一下重新量高：后台标签/窗口的定时器会被节流，
+        //    光靠上面的几次定时可能一直量不到，面板就会停在默认 60px
+        'window.addEventListener("message",function(e){var d=e&&e.data;if(d&&d.type==="jsx-panel-height-request"){__rh();}});' +
         'if(window.MutationObserver){new MutationObserver(function(){__rh();}).observe(' +
         'document.documentElement||document.body,{childList:true,subtree:true,attributes:true});}' +
         '<\/script>';
+    const prelude = bridge;
+    const vendorTags = String(vendorTagsRaw || '');
     // 完整文档/准完整文档(head/body 片段,如 JS-Slash-Runner 状态栏的 webpack SPA 模板) → 原位注入桥
     if (/<html[\s>]/i.test(body)) {
-        if (/<\/head>/i.test(body)) return body.replace(/<\/head>/i, bridge + '</head>');
-        if (/<body[^>]*>/i.test(body)) return body.replace(/<body[^>]*>/i, (mm) => mm + bridge);
-        return bridge + body;
+        if (/<\/head>/i.test(body)) return injectIntoHead(body, vendorTags + prelude);
+        if (/<body[^>]*>/i.test(body)) return body.replace(/<body[^>]*>/i, (mm) => mm + vendorTags + prelude);
+        return vendorTags + prelude + body;
     }
     if (/<head[\s>]/i.test(body) || /<body[\s>]/i.test(body)) {
         // 🚀 准完整文档:补 <html> 包裹,head/body 各归其位(不能整段塞进 body——head 失效/body 嵌套)
@@ -126,7 +157,7 @@ export function buildHtmlSrcdoc(html, varsJson, panelId) {
             const he = body.search(/<\/head>/i);
             const pre = body.slice(0, hi);
             doc += '<head>' + body.slice(hi + body.slice(hi).match(/<head[^>]*>/i)[0].length, he >= 0 ? he : body.length);
-            doc += bridge + '</head>';
+            doc += '</head>';
             const rest = he >= 0 ? body.slice(he + 7) : '';
             if (/<body[\s>]/i.test(rest)) {
                 doc += rest.replace(/<body[^>]*>/i, (mm) => mm + '');
@@ -135,15 +166,35 @@ export function buildHtmlSrcdoc(html, varsJson, panelId) {
             }
             doc += '</html>';
             if (pre.trim()) doc = pre + doc;
-            return doc;
+            // 模板自带 <head>：预置插到 head 开头（charset 已在模板或下面的合成分支里）
+            return injectIntoHead(doc, (vendorTags || '') + prelude);
         }
-        return '<!DOCTYPE html><html><head><meta charset="utf-8">' + bridge + '</head>' + body + '</html>';
+        return injectIntoHead('<!DOCTYPE html><html><head></head>' + body + '</html>', META_TAGS + prelude);
     }
-    return '<!DOCTYPE html><html><head><meta charset="utf-8">' +
-        '<meta name="viewport" content="width=device-width,initial-scale=1">' +
-        '<style>html,body{margin:0;padding:0;background:transparent;}</style>' +
-        bridge + '</head><body>' + body + '</body></html>';
+    return injectIntoHead('<!DOCTYPE html><html><head></head><body>' + body + '</body></html>', META_TAGS + prelude);
 }
+
+// 合成文档的基础 meta（放在预置前，保证 charset 声明仍在文档最前）
+const META_TAGS = '<meta charset="utf-8">' +
+    '<meta name="viewport" content="width=device-width,initial-scale=1">' +
+    '<style>html,body{margin:0;padding:0;background:transparent;}</style>';
+
+/** 把预置内容插到 `<head>` 开头（无 head 则先补一个）；保证早于模板自带脚本执行 */
+function injectIntoHead(doc, snippet) {
+    if (!snippet) return doc;
+    const head = doc.match(/<head[^>]*>/i);
+    if (head) {
+        const at = head.index + head[0].length;
+        return doc.slice(0, at) + snippet + doc.slice(at);
+    }
+    const html = doc.match(/<html[^>]*>/i);
+    if (html) {
+        const at = html.index + html[0].length;
+        return doc.slice(0, at) + '<head>' + snippet + '</head>' + doc.slice(at);
+    }
+    return snippet + doc;
+}
+
 
 /**
  * 🚀 分段升级（对齐酒馆 messageFormatting:正则输出的完整 HTML 模板无 ```html 围栏,直接渲染）

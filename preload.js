@@ -154,6 +154,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     writePluginFile: (params) => ipcRenderer.invoke('plugin:writeFile', params),
     // 🧩 插件「效果」预览：预览 HTML 存主进程内存，返回独立 app:// 预览 URL（绕过父页 CSP 对内联脚本的拦截）
     setPluginPreview: (html) => ipcRenderer.invoke('plugin:setPreview', html),
+    // 🧩 聊天界面段（状态栏界面）：生成 HTML → 主进程 app:// 独立路由 → 内联脚本可执行
+    setChatHtmlSegment: (html) => ipcRenderer.invoke('chat:setHtmlSegment', html),
     // 🗑️ 智能查重清洗：将冗余文件移动到 userData 下的全局回收站（绝不物理删除）
     trashFiles: (paths) => ipcRenderer.invoke('sys:trashFiles', paths),
     // 🗑️ 打开全局回收站（世界书删除/查重清洗的 userData/jsTavern_Trash）
