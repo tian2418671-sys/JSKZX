@@ -22,7 +22,7 @@
 |---|---|
 | [大库重复卡-压测数据记录.md](大库重复卡-压测数据记录.md) | 真实大库（`I:\03\角色色卡` 11,186 卡 / 9.76GB）的重复卡、OOM、加载提速、正则交互修复全记录（§1~§11，含 P0/P1/P2 与内嵌缓存 A/B） |
 | [测试日志-2026-09-13.md](测试日志-2026-09-13.md) | 桌面版当日专项：9 个 Bug 的现象/根因/验证、性能数据、冷启动 I/O 量化、发版清单 |
-| 工具 | `scripts/measure-startup.mjs`（启动分项测量）、`scripts/png-head-io-probe.mjs`（读取量探针）、`scripts/library-dup-*.mjs`（重复卡压测） |
+| 工具 | `scripts/measure-startup.mjs`（启动分项测量）、`scripts/png-head-io-probe.mjs`（读取量探针）、`scripts/library-dup-*.mjs`（重复卡压测）、`scripts/release-check.mjs`（发版前置检查） |
 | 探针 | `scripts/_cdp-eval.mjs`（CDP 取值）、`scripts/_probe-regex-ui.mjs`（正则增删 UI）、`scripts/_probe-index*.mjs`（索引状态） |
 
 ## 三、插件工作区
@@ -36,6 +36,7 @@
 
 | 文档 | 说明 |
 |---|---|
+| [发布一条龙-执行清单.md](发布一条龙-执行清单.md) | **发版必读**：自查→打包→装包自测→tag→push→Release→OTA 验证→回滚，含配套脚本与判定标准 |
 | [自动更新说明与常见问题.md](自动更新说明与常见问题.md) | OTA 机制、`latest.yml` 要求、常见问题 |
 | `CHANGELOG.md`（仓库根） | 版本变更总表（当前：**v2.2.7**） |
 | `RELEASE_NOTES.md`（仓库根） | 面向用户的发行说明 |

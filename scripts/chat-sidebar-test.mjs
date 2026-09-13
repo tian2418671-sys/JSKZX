@@ -147,11 +147,17 @@ const READ_PRESET_SELECT = `(() => {
  *    抽屉各分区是 v-show/v-if 切换的，停在别的分区时设置项根本不在 DOM 里。
  */
 const READ_CHAT_HEADER = `(() => {
-    const inputs = [...document.querySelectorAll('input')];
+    // ⚠️ 必须**排除测卡侧栏自身**：侧栏「设置」分区里有 API Endpoint / Key（type=password）/
+    //    模型等输入框，它们是“功能已搬到侧栏”的证据，不是“旧头部没删干净”。
+    //    （旧写法全文档计数 → 抽屉停在「设置」分区时 oldPasswordInputs=1，误报失败）
+    const drawer = document.querySelector('div.border-l.bg-zinc-950');
+    const inDrawer = (el) => !!(drawer && drawer.contains(el));
+    const inputs = [...document.querySelectorAll('input')].filter(i => !inDrawer(i));
     const endpointInputs = inputs.filter(i => (i.placeholder || '').includes('127.0.0.1:1234'));
     const passwordInputs = inputs.filter(i => i.type === 'password');
-    const pullButtons = [...document.querySelectorAll('button')].filter(b => (b.textContent || '').includes('拉取模型'));
+    const pullButtons = [...document.querySelectorAll('button')].filter(b => (b.textContent || '').includes('拉取模型') && !inDrawer(b));
     const oldLabels = [...document.querySelectorAll('span')]
+        .filter(s => !inDrawer(s))
         .map(s => (s.textContent || '').trim())
         .filter(t => t === 'API:' || t === 'Key:' || t === 'Model:');
     return JSON.stringify({
@@ -174,6 +180,8 @@ const READ_DRAWER_SETTINGS = `(() => {
         hasEndpointInput: inputs.some(i => (i.value || '').startsWith('http') || (i.placeholder || '').includes('http')),
         hasModelInput: inputs.some(i => /model/i.test(i.className) || (i.value || '') === '') && text.includes('模型'),
         hasTypeSelect: selects.some(s => [...s.options].some(o => (o.textContent || '').includes('Anthropic'))),
+        // 长期记忆面板（二期）：应显示条数统计与存储文件说明，而不再是「尚未实现」占位提示
+        hasMemPanel: text.includes('已存') && text.includes('memory_store.json'),
         hasMemNotice: text.includes('记忆') || text.includes('长期记忆')
     });
 })()`;
@@ -247,11 +255,17 @@ async function main() {
     await send('Runtime.enable');
 
     const errors = [];
+    let cspImgBlocked = 0;   // 按设计拦截的外链图（CSP img-src 不放行 http(s)，防追踪像素/内网探测）
     sock.addEventListener('message', (ev) => {
         try {
             const m = JSON.parse(ev.data);
-            if (m.method === 'Runtime.exceptionThrown') errors.push(String(m.params?.exceptionDetails?.exception?.description || '').slice(0, 150));
-            if (m.method === 'Log.entryAdded' && m.params?.entry?.level === 'error') errors.push(String(m.params.entry.text).slice(0, 150));
+            const pushErr = (t) => {
+                const s = String(t || '').slice(0, 150);
+                if (/Content Security Policy/.test(s) && /img-src/.test(s)) { cspImgBlocked++; return; }
+                errors.push(s);
+            };
+            if (m.method === 'Runtime.exceptionThrown') pushErr(m.params?.exceptionDetails?.exception?.description);
+            if (m.method === 'Log.entryAdded' && m.params?.entry?.level === 'error') pushErr(m.params.entry.text);
         } catch (e) { /* 忽略 */ }
     });
     await send('Log.enable').catch(() => {});
@@ -281,6 +295,7 @@ async function main() {
     }
 
     out.steps.footer = await run(READ_FOOTER);
+    out.cspImgBlocked = cspImgBlocked;   // 外链图拦截数（按设计，不计入 errors）
     out.errors = errors.slice(0, 8);
 
     const tabsOk = out.tabs.length === 7
@@ -290,7 +305,7 @@ async function main() {
     const ds = out.steps.drawerSettings;
     const headerOk = h.oldEndpointInputs === 0 && h.oldPasswordInputs === 0
         && h.oldPullButtons === 0 && h.oldLabels.length === 0
-        && ds.drawerAlive && ds.hasEndpointInput && ds.hasTypeSelect;
+        && ds.drawerAlive && ds.hasEndpointInput && ds.hasTypeSelect && ds.hasMemPanel;
     const pass = out.steps.enter.ok
         && out.steps.sections.count === 7
         && out.steps.presetSelect.found && out.steps.presetSelect.optionCount > 1
@@ -302,6 +317,7 @@ async function main() {
         && out.errors.length === 0;
 
     console.log(JSON.stringify(out, null, 2));
+    if (cspImgBlocked > 0) console.log(`\nℹ️ 有 ${cspImgBlocked} 条外链图片被 CSP 拦截（属安全设计：不放行 http(s) 外联图），不计为错误`);
     console.log(pass ? '\n✅ 测卡工作区侧边栏端到端实测通过（7/7 分区）' : '\n❌ 存在未通过项');
     process.exit(pass ? 0 : 1);
 }

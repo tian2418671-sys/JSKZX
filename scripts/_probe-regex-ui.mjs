@@ -77,7 +77,15 @@ async function run(expr) {
         });
         if (tab) tab.click();
         ss.currentTab = 'regex';   // 兜底：确保 Tab 内容已展开（本用例验证的是增删后的刷新，不是切 Tab）
-        await new Promise(r => setTimeout(r, 700));
+        // 🔧 轮询等待正则分区真正渲染：大库（万卡）下卡片数据/卡内扩展要走 IPC，
+        //    固定 700ms 不够 → 会误报「未找到新增按钮（Tab 未展开？）」。
+        const deadline = Date.now() + 6000;
+        while (Date.now() < deadline) {
+            const ready = document.querySelectorAll('.regex-input-find').length > 0
+                || [...document.querySelectorAll('button')].some(b => /添加正则脚本|立即新增一条正则脚本/.test(b.textContent));
+            if (ready) break;
+            await new Promise(r => setTimeout(r, 200));
+        }
         const cd = ss.cardData;
         const sd = cd && (cd.data || cd);
         return JSON.stringify({

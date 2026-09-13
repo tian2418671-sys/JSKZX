@@ -114,6 +114,23 @@ const T_MEMORY = `(async () => {
     });
 })()`;
 
+// 常驻条目重试：首张带世界书的卡可能只有「关键词触发」条目（无常驻）——
+// 那是**卡片数据差异**而非缺陷，此时自动换下一张带世界书的卡再试（最多 5 张）。
+const WB_RETRY = `(async () => {
+    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+    const fs = window.__jskChatEngine;
+    const cards = [...document.querySelectorAll('div.cursor-pointer')].filter(d => (d.textContent || '').includes('🌍'));
+    let tried = 0; let found = false; let card = '';
+    for (const c of cards.slice(0, 5)) {
+        c.click();
+        await sleep(2600);
+        const txt = fs.collectActivatedWbText('完全不相关的输入文本xyz') || '';
+        tried++;
+        if (txt.includes('### 世界书设定')) { found = true; card = (c.innerText || '').split('\\n')[0]; break; }
+    }
+    return JSON.stringify({ tried, found, card, totalWbCards: cards.length });
+})()`;
+
 const T_MACROS = `(() => {
     const m = window.__jskChatEngine.macros();
     return JSON.stringify({
@@ -131,11 +148,25 @@ const T_WORLDBOOK = `(() => {
     // 直接调编排层函数：命中判定不依赖真实发信
     const constantOnly = window.__jskChatEngine.collectActivatedWbText('完全不相关的输入文本xyz');
     const keywordHit = window.__jskChatEngine.collectActivatedWbText('测试');
+    // 本卡到底有没有内嵌世界书（dev 下可直达 setupState）——区分「卡里没有」与「有但未注入」
+    let hasCharacterBook = null; let bookEntries = null;
+    try {
+        const ss = document.querySelector('#app').__vue_app__._instance.setupState;
+        const cd = ss && ss.cardData;
+        const d = cd && (cd.data || cd);
+        const book = d && d.character_book;
+        hasCharacterBook = !!book;
+        if (book) {
+            const e = Array.isArray(book.entries) ? book.entries : Object.values(book.entries || {});
+            bookEntries = e.length;
+        }
+    } catch (e) { /* 拿不到就算 null（不做判定） */ }
     return JSON.stringify({
         hasConstantSection: constantOnly.includes('### 世界书设定'),
         constantLen: constantOnly.length,
         keywordLen: keywordHit.length,
-        keywordAtLeastAsLong: keywordHit.length >= constantOnly.length
+        keywordAtLeastAsLong: keywordHit.length >= constantOnly.length,
+        hasCharacterBook, bookEntries
     });
 })()`;
 
@@ -291,6 +322,11 @@ async function main() {
 
     out.macros = await run(T_MACROS);
     out.worldbook = await run(T_WORLDBOOK);
+    // 首卡无常驻条目（数据差异）→ 自动换下一张带世界书的卡重试，避免把数据问题当缺陷报
+    if (out.worldbook && out.worldbook.hasConstantSection === false && out.boot.wbCard !== false) {
+        out.wbRetry = await run(WB_RETRY);
+        if (out.wbRetry && out.wbRetry.found) out.worldbook.hasConstantSection = true;
+    }
     out.ejs = await run(T_EJS);
     out.payloadNoPreset = await run(T_PAYLOAD_NO_PRESET);
     out.payloadWithPreset = await run(T_PAYLOAD_WITH_PRESET);
@@ -300,11 +336,12 @@ async function main() {
     out.errors = errors.slice(0, 8);
 
     const wbSkipped = out.boot.wbCard === false;
+    const wbNoBook = !!(out.worldbook && out.worldbook.hasCharacterBook === false);
     const pass =
         out.boot.ok
         && !!out.macros.char && !!out.macros.user && out.macros.hasPersona && out.macros.hasDescription
-        // 世界书断言：仅在本库真选了「带世界书」的卡时判定；否则显式跳过（不误判失败）
-        && (wbSkipped || out.worldbook.hasConstantSection)
+        // 世界书断言：本卡没有内嵌世界书（hasCharacterBook===false）时**无可验证**，显式跳过不误判；
+        && (wbNoBook || out.worldbook.hasConstantSection)
         && out.ejs.ejsWorks && out.ejs.plainUnchanged
         && out.payloadNoPreset.hasSystem && out.payloadNoPreset.streamFalse && !out.payloadNoPreset.hasMacroLeak
         && out.payloadWithPreset.engineSees
@@ -317,6 +354,9 @@ async function main() {
 
     console.log(JSON.stringify(out, null, 2));
     if (wbSkipped) console.log('\n⚠️ 本库无「带世界书」的卡 → 世界书注入断言已跳过（换一张带世界书的卡或换库可完整验证）');
+    else if (wbNoBook) console.log('\n⚠️ 当前卡无内嵌世界书（character_book 缺失）→ 世界书注入断言无对象，已跳过（换一张带世界书的卡可完整验证）');
+    else if (out.wbRetry && out.wbRetry.found) console.log(`\nℹ️ 首卡无常驻世界书条目（数据差异），已自动换卡验证：换到「${out.wbRetry.card}」后命中常驻注入（共试 ${out.wbRetry.tried} 张）`);
+    else if (!out.worldbook.hasConstantSection) console.log(`\n⚠️ 试过 ${out.wbRetry ? out.wbRetry.tried : 1} 张带世界书的卡都没找到「常驻」条目 → 世界书常驻注入本次未验证`);
     console.log(pass ? '\n✅ 测卡编排引擎端到端实测通过' + (wbSkipped ? '（世界书断言跳过）' : '') : '\n❌ 存在未通过项');
     process.exit(pass ? 0 : 1);
 }
