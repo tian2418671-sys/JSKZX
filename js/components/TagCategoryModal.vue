@@ -81,7 +81,7 @@
           <div class="flex-1 min-w-0 p-3 flex flex-col gap-2">
             <!-- 🤖 AI 归类入口/进度条（常驻顶部） -->
             <div class="flex items-center gap-2 rounded border border-violet-500/30 bg-violet-500/5 px-2 py-1.5">
-              <span class="text-xs font-bold text-violet-300 shrink-0">� AI 智能归类</span>
+              <span class="text-xs font-bold text-violet-300 shrink-0">🤖 AI 智能归类</span>
               <span v-if="!aiBusy" class="text-[10px] text-zinc-500 flex-1 leading-tight">把全部「其他」交给大模型按分类规则语义归类，结果请逐条核对后应用；未命中现有分组时可自拟类名、应用自动建大分类承接。</span>
               <template v-if="!aiBusy">
                 <button @click="runAIClassify"
@@ -138,7 +138,7 @@
             <!-- 视图 B：AI 归类建议（逐条核对后应用） -->
             <template v-else>
               <div class="flex items-center justify-between gap-2">
-                <span class="text-xs font-bold text-violet-300">� AI 归类建议（核对后可应用） <span class="text-zinc-500 font-normal">({{ aiSuggestions.length }} 条 · 下拉可修正)</span></span>
+                <span class="text-xs font-bold text-violet-300">🤖 AI 归类建议（核对后可应用） <span class="text-zinc-500 font-normal">({{ aiSuggestions.length }} 条 · 下拉可修正)</span></span>
                 <div class="flex items-center gap-1.5">
                   <button @click="backToManual" class="px-2 py-1 bg-zinc-700 hover:bg-zinc-600 text-zinc-200 text-[11px] rounded transition font-bold">↩ 返回手动</button>
                   <button @click="applyAISuggestions" :disabled="aiSuggestions.length === 0"
