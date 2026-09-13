@@ -1,3 +1,6 @@
+> 🗄️ **已归档（2026-09-13 文档整理）**：本文件是历史原文，内容已抽取归并进新文档体系，此处仅作存档与细节回查。
+> 归属：总纲已并入 AI交接指导.md（仓库根）；缺陷与坑已按领域并入 docs/bugs/**；第二部分（AI 打标代码）→ docs/技术支持/代码片段-AI打标.md；第三部分（世界书条目名修复）→ docs/技术支持/代码片段-世界书条目名修复与导入.md
+
 # 🤖 AI 交接指导合集 — SillyTavern 角色卡管理器（JSK管理）
 
 > **本文件是给下一个 AI 接手时阅读的完整总纲**，由三份交接文档合并而成，一次读完即可无缝续写：
@@ -1498,7 +1501,7 @@ App.vue（顶层状态 + 注入）
 | 角色卡内嵌世界书（卡内编辑器） | `comment`，**兼容回退 `name`**（V1 旧卡 / RisuAI 等第三方卡用 `name`） | `EditorPanel.vue` L238：`{{ entry.comment \|\| entry.name \|\| '未命名条目' }}`；L261 输入框 `:value="entry.comment \|\| entry.name \|\| ''"` |
 | 世界书库 Entry IDE（独立世界书） | **只读 `comment`**，无 `name` 回退 | `EditorPanel.vue` L571：`v-if="entry.comment"`；L599 `v-model="currentEntry.comment"`；`useWorldbookEntries.js` L97/L116；`WbImportModal.vue` L35 |
 
-而导出函数 [useWorldbookExtras.js](file:///workspace/js/composables/useWorldbookExtras.js) 的 `extractWorldbookFromCard` 只转换了触发词字段，**没有做名字字段的映射**：
+而导出函数 `js/composables/useWorldbookExtras.js` 的 `extractWorldbookFromCard` 只转换了触发词字段，**没有做名字字段的映射**：
 
 ```js
 // 现状（L61-69）：只转换了 keys → key、secondary_keys → keysecondary

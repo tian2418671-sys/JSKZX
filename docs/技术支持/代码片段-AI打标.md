@@ -1,3 +1,7 @@
+> 📎 位置说明（2026-09-13 文档整理）：本文件原为 `docs/history/AI打标代码汇总.md`，现归入**技术支持**文档，作为 AI 打标相关代码的**片段汇总**（便于查阅 / 移植 / 审查）。
+> 相关缺陷记录：AI 打标导致渲染进程崩溃见 `docs/bugs/BUG-性能与大库.md`（PK-13）；响应式与索引相关见 `docs/bugs/BUG-架构与渲染.md`。
+> ⚠️ 本文件是导出时的代码快照，**不保证与当前源码逐行同步**；以 `js/composables/useAITools.js`、`js/components/AITagModal.vue`、`js/utils/autoTagRules.js` 等实际源码为准。
+
 # AI 打标相关代码汇总
 
 > 导出自 SillyTavern 角色卡管理器（Electron + Vue 3）
