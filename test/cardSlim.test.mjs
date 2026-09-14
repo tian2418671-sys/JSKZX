@@ -136,6 +136,18 @@ test('ensureCardFull：已完整的卡直接返回，不触发加载', async () 
     assert.equal(called, 0, '未压缩的卡不该产生一次磁盘读取');
 });
 
+test('ensureCardFull：loader 必须收到 (path, item) 两参（PK-14 契约 —— 调用方要用 item._size 读 PNG 内嵌）', async () => {
+    const item = makeHeavyCard(6);
+    const disk = clone(item.data);
+    slimCard(item);
+    let gotPath = null, gotItem = null;
+    const ok = await ensureCardFull(item, async (p, it) => { gotPath = p; gotItem = it; return clone(disk); });
+    assert.equal(ok, true);
+    assert.equal(gotPath, item.path);
+    assert.equal(gotItem, item, '第二参必须是库条目本体（取 _size/_mtime 用）');
+    assert.equal(gotItem._size, 5006);
+});
+
 test('ensureCardFull：加载失败时保持压缩态、不破坏现有数据', async () => {
     const item = makeHeavyCard(5);
     slimCard(item);

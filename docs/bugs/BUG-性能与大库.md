@@ -100,7 +100,7 @@
 
 ---
 
-## 四、容量专项：三个真问题（PK-10 ~ PK-12）
+## 四、容量专项及后续修复（PK-10 ~ PK-16）
 
 > 背景：2 万卡库专项（22,372 张 / 19.85GB 副本）第一轮就抓到 3 个真问题。
 
@@ -166,6 +166,45 @@
   显示层在渲染时物化 / 或对界面型消息做折叠懒渲染（iframe 沙箱）；同时能量上修掉
   「发送给 AI 的提示词里可能混入界面 HTML」与存档膨胀。
 - **来源**：用户实测报告 + dev/CDP 追踪（2026-09-14，v2.2.7 补丁）
+
+### PK-14 ｜ 🔴 瘦身卡（PNG）正文回读**必败** —— 窗口隐藏期间索引建完触发瘦身 → 切回后点卡弹「读取卡片正文失败」
+- **现象**：软件切后台再切回后，点击任意 PNG 角色卡弹出「读取卡片正文失败：XX（文件可能已被移动/删除，或不是有效角色卡）」；**切换前点同一张卡正常**。JSON 卡不受影响（走 `readText` 另一条路）。
+- **根因**（两层，缺一不可）：
+  1. **直接根因（代码缺陷）**：P1a 瘦身回读路径 `App.vue loadFullCardFromDisk` 调 `files:readEmbeddedBatch` 时**写死 `{ path, size: 0, mtime: 0 }`**（cf60b37 引入），而主进程 `readPngEmbeddedFromFile` 首行 `if (!filePath || !size) return null`（40b68f8 引入，早于 P1a）→ 任何 PNG 瘦身卡回读**必返 null** → `ensureCardFull` 失败 → 拒绝打开并弹窗。旁证：`useCardCrud` 的导入路径传的是真实 `f.size`，同一 API 一直正常 —— 只有瘦身回读这条路径坏了。
+  2. **触发条件（为什么表现为"切后台后才坏"）**：瘦身只在「索引构建 + token 预热**完成后**」执行（`slimLibraryIfNeeded('index-built')`）。PK-05 修复后（`yieldToMain` 隐藏时改走 MessageChannel），索引能在**窗口隐藏期间建完** → 瘦身在后台完成 → 用户切回时所有卡已 `_slim`，点击即走坏路径。修复前隐藏时构建停摆、切回时卡还未瘦身（走内存直读），所以「切换前能用、切换后不能用」。
+- **修复**：
+  1. `main.js` `readPngEmbeddedFromFile`：删除 `!size` 硬拒；size 未知（0）时按 1MB→8MB 窗口渐扩试探（文件小于窗口且未解析出卡直接判非卡），仍无则 `stat` 拿真实大小整读兜底；已知 size 路径行为不变；
+  2. `js/components/App.vue` `loadFullCardFromDisk`：改签 `(path, item)`，传真实 `item._size / item._mtime`；批量提取拿不到时回退 `file:readBuffer` 整读 + `parsePNGChunk / deepScanForJSON` 前端解析（兑现 `readPngEmbeddedFromFile` 注释里承诺的兜底）；
+  3. `js/utils/cardSlim.js` `ensureCardFull`：loader 契约改传 `(item.path, item)` —— 调用方需要 `_size` 才能正确回读。
+- **验证**：
+  - 单测 `test/cardSlim.test.mjs` 新增「loader 必须收到 (path, item) 两参」契约用例（PK-14 回归），`npm test` 全绿；
+  - `npm run build:web` 构建成功；
+  - ⬜ 大库端到端待复测：22k 卡库 → 窗口隐藏等索引后台建完 → 切回点任意 PNG 卡正文正常回读（`.json` 卡对照组不受影响）。
+- **来源**：用户反馈（2026-09-14，v2.2.7 补丁后）
+
+### PK-15 ｜ 🔴 瘦身卡每次打开都触发**全库索引重建 + Token 预热 + 再瘦身** → 隐藏后连点几张卡明显卡顿
+- **现象**（用户反馈 2026-09-14，PK-14 修复后复测）：1 万卡库（加载 30s）隐藏→恢复后卡能正常打开了，但**连点几张角色卡后明显卡顿**。
+- **根因**：`openFromLibrary` 对瘦身卡还原成功后执行 `triggerRef(library)`。`library` 是 **shallowRef**（App.vue），而 Vue 注册 watch 时对 shallow 源 `forceTrigger = isShallow(source)`（reactivity 源码 1843 行）——**不比较引用是否变化，trigger 必触发回调**。于是每开一张卡就走完整链条：
+  `triggerRef(library) → watch(library)（deep:false 但 forceTrigger）→ rebuildSearchIndex → buildAsync 全库索引重建（10k 卡分词，约数秒 CPU）+ tokenCache.warmupAsync 全量预热 + slimLibraryIfNeeded 再压缩`。
+  连点时 `indexBuilding/indexDirty` 合并机制把「每点一次」串成「一次接一次的全量重建」，卡顿持续不断。AI 打标路径曾踩过同一坑（为此加了 `isAITagging` 守卫 + 延迟补建）；开卡路径在 PK-14 修复前因读卡必败提前 return、从未走到 triggerRef，所以此坑一直潜伏到 PK-14 被修好。
+- **附带危害**：① 重建后跟跑 `slimLibraryIfNeeded` 会把**刚打开的其它卡重新压缩**——未保存的世界书编辑从内存抹掉；② 重建时全库正处于瘦身态，`extractCardSearchableText` 索引到的世界书正文为空（词条 content 已被清空）→ **全库世界书搜索静默降级**。
+- **修复**（`js/components/App.vue`）：
+  1. **删除**还原成功后的 `triggerRef(library)` —— 还原不改动任何列表可见字段（名称/标签/分类/token/`_hasBook`/`_descShort` 均在压缩时就地留存），列表/索引/Token 缓存无需重算；编辑器走 `cardData.value` 赋值刷新。契约已写入 `cardSlim.ensureCardFull` 的 JSDoc（PK-15 契约：调用方还原成功后不得 triggerRef(library)）；
+  2. 顺带优化：`loadFullCardFromDisk` 三处 `normalizeCardData(..., true)`（noClone）——IPC/JSON.parse 产物本就是渲染进程独占副本，省掉每次开卡一次全卡 `structuredClone`。
+- **验证**：
+  - `npm test` 全绿；`npm run build:web` 构建成功；
+  - ⬜ 待复测：10k 卡库隐藏→恢复后连点多张 PNG/JSON 卡，不应再有持续卡顿；打开的卡内容完整、搜索/排序/世界书搜索正常。
+- **来源**：用户反馈（2026-09-14，v2.2.7 补丁后）
+
+### PK-16 ｜ 🔴 瘦身完成后的 `triggerRef(library)` 引发**第二轮全量索引重建** —— 启动双倍负载 + 世界书搜索被「洗掉」
+- **现象**（用户启动日志 2026-09-14，11,188 张卡）：启动日志出现**两轮**「⚡ 搜索索引构建完成 / ⚡ Token 缓存预热完成」，第二轮紧跟在「[slim] 已压缩 9557 张卡的正文」之后。
+- **根因**：`slimLibraryIfNeeded` 压缩成功后执行 `triggerRef(library)`。`library` 是 shallowRef、watch 为 forceTrigger 语义（PK-15 同源），立刻再走一轮 `rebuildSearchIndex`：全库索引重建 + 全量 Token 预热。而这轮重建发生时全库已是瘦身态 —— `extractCardSearchableText` 的世界书词条正文（`content` 已被清空）索引不到 → **把压缩前刚建好的「含世界书正文」的索引覆盖成降级版**，世界书关键词搜索静默失效；启动还多付一整轮全量重建的 CPU。全局资产库面板的关闭路径同病（关闭 → slim → 重建）。
+- **修复**（`js/components/App.vue` `slimLibraryIfNeeded`）：删除 slim 成功分支里的 `triggerRef(library)`。压缩不改任何列表可见字段（SidebarPanel 的 `hasLorebook`/`cardDesc` 在 `_hasBook`/`_descShort` 缺失时都有实时兜底计算），列表/索引/Token 缓存均无需重算。附带收益：资产库面板**关闭后**不再触发重建，索引保持「面板打开时从完整态重建」的版本，无降级。
+- **遗留（后续可做）**：全局资产库面板**打开时**的进度回调仍会 `triggerRef(library)`（「边还原边出现」靠它刷新 `globalAllWorldbooks` 计算属性），一次打开仍伴随 1~2 轮全量重建（最终索引为完整态、不降级，纯 CPU 浪费）——把面板数据源换成独立 tick ref 后即可消除。
+- **验证**：
+  - `npm test` 全绿（257）；`npm run build:web` 构建成功；
+  - ⬜ 待复测：启动日志应只剩**一轮**索引构建 + 预热；世界书词条正文关键词在瘦身库上仍可被搜索命中。
+- **来源**：用户日志 + 代码走查（2026-09-14，v2.2.7 补丁后）
 
 ---
 

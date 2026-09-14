@@ -562,7 +562,9 @@ import SnapshotModal from './SnapshotModal.vue'; // 📸 历史快照列表与�
 import PushModal from './PushModal.vue'; // 🚀 推送目标选择与执行对话框
 import { processFile, extractBookEntries, compileAutoTagRules, defaultAutoTagRules, normalizeCardData } from '../utils/cardLoader.js';
 // normalizeCardData / isCharacterCardData / autoTagRules（cardLoader）与 parsePNGChunk / deepScanForJSON（pngParser）
-// 已随导入入库域迁移至 useCardCrud 组合式函数，由其自行 import
+// 已随导入入库域迁移至 useCardCrud 组合式函数，由其自行 import；
+// App.vue 仍需要 parsePNGChunk / deepScanForJSON（🔧 PK-14：瘦身卡正文回读的 readBuffer 兜底解析）
+import { parsePNGChunk, deepScanForJSON } from '../utils/pngParser.js';
 import { estimateTokens } from '../utils/tokenEstimate.js'; // Token 估算（与 TextModal 共享）
 import { stripInternalFields, dropInternalFields, worldbookEntryList } from '../utils/cardFields.js'; // 🧹 导出/转存前剥离前端内部字段（白名单 + 限定位置，见 DF-14）
 import { toEmbeddedEntry } from '../utils/wbEntryFormat.js'; // 🌍 库格式 → 卡内嵌 V2 字段口径转换（见 DF-15）
@@ -2638,7 +2640,13 @@ export default {
                     nativeAlert(`读取卡片正文失败：${item.name || item.path}\n（文件可能已被移动/删除，或不是有效角色卡）`, 'error');
                     return;
                 }
-                try { triggerRef(library); } catch (e) { /* 忽略 */ }
+                // 🔧 PK-15：还原成功后**不能** triggerRef(library) —— library 是 shallowRef，
+                //    对它的 watch 是 forceTrigger 语义（Vue 对 shallow 源不比较引用是否变化，
+                //    见 reactivity 源码 `forceTrigger = isShallow(source)`），任何 triggerRef
+                //    都会触发「全库搜索索引重建 + Token 预热 + 再瘦身」（10k 卡 ≈ 数秒 CPU）。
+                //    每开一张卡来一轮 → 点击后的持续卡顿，还会把未保存的世界书编辑重新压缩掉。
+                //    还原不改动任何列表可见字段（名称/标签/分类/token/世界书规模/截断描述都在
+                //    压缩时就地留存），列表无需重算；编辑器走下方 cardData.value 赋值刷新。
             }
             // 🧹 切换卡片时释放上一张卡的 blob 预览（仅 blob: 引用需 revoke；local-file 永久路径无需）
             if (imgUrl.value && imgUrl.value.startsWith('blob:') && imgUrl.value !== (item && item.avatar)) {
@@ -3954,20 +3962,43 @@ export default {
         //    刷新时未变动卡靠 P2 的 token 沿用重建索引，所以压缩不会让刷新失效。
         // =========================================================
 
-        /** 按 path 把卡的完整正文读回（PNG 走主进程内嵌提取，JSON 直接读文本） */
-        const loadFullCardFromDisk = async (path) => {
+        /**
+         * 按 path 把卡的完整正文读回（PNG 走主进程内嵌提取，JSON 直接读文本）
+         * @param {string} path 卡文件绝对路径
+         * @param {object} [item] 库条目（取 _size/_mtime 供主进程自适应窗口；缺省时主进程自行 stat）
+         */
+        const loadFullCardFromDisk = async (path, item) => {
             if (!path || !window.electronAPI) return null;
             try {
                 if (/\.json$/i.test(path)) {
                     const txt = await window.electronAPI.readText(path);
                     if (typeof txt !== 'string' || !txt.trim()) return null;
-                    return normalizeCardData(JSON.parse(txt));
+                    // noClone：JSON.parse 产物是全新对象，无共享引用，原地规范化省一次全卡深拷贝
+                    return normalizeCardData(JSON.parse(txt), true);
                 }
-                if (typeof window.electronAPI.readEmbeddedBatch !== 'function') return null;
-                const res = await window.electronAPI.readEmbeddedBatch([{ path, size: 0, mtime: 0 }]);
-                const row = Array.isArray(res) ? res[0] : null;
-                if (!row || !row.ok || !row.data || typeof row.data !== 'object') return null;
-                return normalizeCardData(row.data);
+                // 🔧 PK-14 修复：把真实 _size 传过去（旧版写死 size: 0，主进程 readPngEmbeddedFromFile
+                //    见 !size 直接拒读 → 瘦身卡 PNG 正文回读 100% 失败）
+                if (typeof window.electronAPI.readEmbeddedBatch === 'function') {
+                    const res = await window.electronAPI.readEmbeddedBatch([{
+                        path,
+                        size: (item && Number.isFinite(item._size) && item._size > 0) ? item._size : 0,
+                        mtime: (item && Number.isFinite(item._mtime)) ? item._mtime : 0
+                    }]);
+                    const row = Array.isArray(res) ? res[0] : null;
+                    // noClone：row.data 经 IPC structured clone 已是渲染进程独占副本
+                    if (row && row.ok && row.data && typeof row.data === 'object') return normalizeCardData(row.data, true);
+                }
+                // 🛡️ 兜底：批量内嵌提取没拿到（内嵌块超窗口 / 非标准结构 / 批量通道缺失）→
+                //    整读文件用前端解析器救回（readBuffer 返回 { buffer: ArrayBuffer }）
+                if (typeof window.electronAPI.readBuffer === 'function') {
+                    const res = await window.electronAPI.readBuffer(path);
+                    const buf = res && typeof res === 'object' ? res.buffer : null;
+                    if (buf instanceof ArrayBuffer) {
+                        const parsed = parsePNGChunk(buf) || deepScanForJSON(buf);
+                        if (parsed && typeof parsed === 'object') return normalizeCardData(parsed, true);
+                    }
+                }
+                return null;
             } catch (e) {
                 console.warn('[slim] 读卡正文失败:', path, e && e.message);
                 return null;
@@ -3995,7 +4026,13 @@ export default {
                 if (slimCard(item)) slimmed++;
             }
             if (slimmed) {
-                try { triggerRef(library); } catch (e) { /* 忽略 */ }
+                // 🔧 PK-16：这里**不能** triggerRef(library) —— shallowRef 的 watch 是
+                //    forceTrigger 语义，压缩完再 trigger 会立刻触发一轮「全库索引重建 +
+                //    Token 预热」；而压缩是不该进索引的操作：索引必须保留压缩**前**的
+                //    世界书正文（铁律②：索引建完才允许压缩），重建反而把世界书关键词
+                //    从索引里洗掉（静默降级），还让启动多跑一整轮全量重建。
+                //    压缩不改任何列表可见字段（SidebarPanel 的 _hasBook/_descShort 都
+                //    有实时兜底计算），无需列表重算。
                 console.log(`[slim] 已压缩 ${slimmed} 张卡的正文（${reason}，保留字段：名称/标签/token/有无世界书）`);
                 try { addLog(`🪶 大库瘦身：已释放 ${slimmed} 张卡的正文（世界书词条按需加载）`, 'info'); } catch (e) { /* 忽略 */ }
                 memGuard.checkNow('slimmed');

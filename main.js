@@ -3940,21 +3940,41 @@ async function extractPngEmbedded(pngFiles) {
 //    现按 1MB 头 → 8MB 头 → 整文件 三级窗口重试：大卡不丢、小卡不慢。
 //    返回 null 时由前端回退完整 readBuffer 兜底，绝不漏卡。
 async function readPngEmbeddedFromFile(filePath, size) {
-  if (!filePath || !size) return null;
+  // 🔧 PK-14 修复：size 未知（调用方传 0）时不再直接拒读 —— 瘦身卡回读路径
+  //    （files:readEmbeddedBatch）只有 path 没有 size，旧版 `if (!size) return null`
+  //    导致所有被 P1a 压缩过的 PNG 卡正文回读 100% 失败（「读取卡片正文失败」弹窗）。
+  if (!filePath) return null;
   const WINDOWS = [1024 * 1024, 8 * 1024 * 1024]; // 1MB → 8MB
   let fh = null;
   try {
     fh = await fsp.open(filePath, 'r');
-    for (const win of WINDOWS) {
-      if (size <= win) break; // 文件不超过该窗口 → 直接走整文件兜底
-      const head = Buffer.alloc(win);
-      await fh.read(head, 0, win, 0);
-      const data = readTavernPNGChunk(head);
-      if (data) return data;
+    const knownSize = Number.isFinite(size) && size > 0;
+    if (knownSize) {
+      for (const win of WINDOWS) {
+        if (size <= win) break; // 文件不超过该窗口 → 直接走整文件兜底
+        const head = Buffer.alloc(win);
+        await fh.read(head, 0, win, 0);
+        const data = readTavernPNGChunk(head);
+        if (data) return data;
+      }
+      // 整文件兜底：大卡内嵌数据超 8MB 时全量读取，保证不丢
+      const full = Buffer.alloc(size);
+      await fh.read(full, 0, size, 0);
+      return readTavernPNGChunk(full) || null;
     }
-    // 整文件兜底：大卡内嵌数据超 8MB 时全量读取，保证不丢
-    const full = Buffer.alloc(size);
-    await fh.read(full, 0, size, 0);
+    // size 未知：按窗口渐扩试探；文件比窗口小且未解析出卡 → 直接判非角色卡，
+    // 否则 stat 拿真实大小整读兜底（与已知 size 路径同保证「绝不漏卡」）
+    for (const win of WINDOWS) {
+      const head = Buffer.alloc(win);
+      const n = await fh.read(head, 0, win, 0);
+      const data = readTavernPNGChunk(n < win ? head.subarray(0, n) : head);
+      if (data) return data;
+      if (n < win) return null;
+    }
+    const st = await fh.stat();
+    if (!st || !st.size) return null;
+    const full = Buffer.alloc(st.size);
+    await fh.read(full, 0, st.size, 0);
     return readTavernPNGChunk(full) || null;
   } catch (e) {
     return null; // 读取失败 → 前端自动回退完整 readBuffer，绝不漏卡

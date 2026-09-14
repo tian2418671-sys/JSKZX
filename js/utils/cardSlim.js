@@ -99,7 +99,11 @@ export function slimCard(item, { keepDetail = false } = {}) {
 /**
  * 把压缩过的卡还原成完整数据（按 path 重新读文件 → **原地填充** item.data）
  * @param {object} item 库条目
- * @param {(path:string) => Promise<object|null>} loader 由调用方注入（App.vue 用 electronAPI 读 PNG/JSON）
+ * @param {(path:string, item?:object) => Promise<object|null>} loader 由调用方注入
+ *        （App.vue 用 electronAPI 读 PNG/JSON；第二参为库条目本体，供读取时取 _size/_mtime）
+ * ⚠️ PK-15 契约：还原**不改动任何列表可见字段**（名称/标签/分类/token/_hasBook/_descShort
+ *    都在压缩时就地留存），调用方还原成功后**不得** `triggerRef(library)` ——
+ *    library 是 shallowRef，对它的 watch 是 forceTrigger 语义，会触发全库索引重建。
  * @returns {Promise<boolean>} true=已完整（含本来就完整的）
  */
 export async function ensureCardFull(item, loader) {
@@ -108,7 +112,7 @@ export async function ensureCardFull(item, loader) {
     if (typeof loader !== 'function' || !item.path) return false;
     let full = null;
     try {
-        full = await loader(item.path);
+        full = await loader(item.path, item);
     } catch (e) {
         full = null;
     }
@@ -167,7 +171,7 @@ export async function ensureCardFull(item, loader) {
  * ⚠️ 会一次性把全库正文拉回内存（22k 卡约 1.3GB）—— 只应在用户主动打开面板时调用，
  *    面板关闭后立即重新压缩（`slimLibraryIfNeeded`）把内存交回去。
  * @param {Array} items 库条目数组
- * @param {(path:string)=>Promise<object|null>} loader
+ * @param {(path:string, item?:object) => Promise<object|null>} loader
  * @param {number} [concurrency] 并发（默认 8，与扫描期一致）
  * @returns {Promise<number>} 实际还原的卡数
  */
