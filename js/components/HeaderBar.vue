@@ -107,11 +107,20 @@
 
                 <div class="relative group">
                     <button class="px-2 py-1 rounded hover:bg-zinc-800 hover:text-zinc-100 transition">设置(S)</button>
-                    <div class="hidden group-hover:flex flex-col absolute top-full left-0 min-w-[230px] bg-zinc-800 border border-zinc-700 rounded shadow-xl py-1 z-50 text-xs">
+                    <div class="hidden group-hover:flex flex-col absolute top-full left-0 min-w-[200px] bg-zinc-800 border border-zinc-700 rounded shadow-xl py-1 z-50 text-xs">
                         <button @click="showApiModal = true" class="px-3 py-2 text-left hover:bg-indigo-600 hover:text-white font-medium flex items-center justify-between border-b border-zinc-700/50">
                             <span>⚡ API 引擎与模型设置...</span>
                             <span class="text-[10px] text-indigo-300">配置</span>
                         </button>
+                        <button @click="resetApiSettings" class="px-3 py-1.5 text-left hover:bg-rose-600 hover:text-white text-rose-400 border-b border-zinc-700/50">🔄 重置 API 接口参数</button>
+
+                        <!-- 🎨 外观与字号（二级子菜单，避免整条设置菜单过长） -->
+                        <div class="relative group/appearance">
+                            <div class="px-3 py-1.5 flex items-center justify-between hover:bg-indigo-600 hover:text-white cursor-pointer">
+                                <span>🎨 外观与字号</span>
+                                <span class="text-zinc-500 group-hover/appearance:text-white">▸</span>
+                            </div>
+                            <div class="hidden group-hover/appearance:flex flex-col absolute left-full top-0 -mt-1 min-w-[280px] bg-zinc-800 border border-zinc-700 rounded shadow-2xl py-1 z-[60]">
                         <div class="px-3 py-2 border-b border-zinc-700/50">
                             <span class="block text-zinc-400 mb-1.5">🎨 界面主题风格</span>
                             <div class="grid grid-cols-3 gap-1">
@@ -120,6 +129,31 @@
                                 <button @click="setTheme('light')" :class="theme === 'light' ? 'border-amber-500 font-bold' : ''" class="px-1.5 py-1 bg-zinc-100 border text-[10px] rounded text-zinc-800">明亮白昼</button>
                             </div>
                         </div>
+                        <div class="px-3 py-2 border-b border-zinc-700/50">
+                            <div class="flex items-center justify-between text-zinc-300 mb-1">
+                                <span>🖼️ 界面 UI 字号</span>
+                                <span class="text-indigo-400 font-mono font-bold">{{ uiFontSizeDraft }}px</span>
+                            </div>
+                            <input type="range" v-model.number="uiFontSizeDraft" min="10" max="28" step="1" @change="commitUiFontSize" class="w-full h-1.5 bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-indigo-500">
+                        </div>
+                        <div class="px-3 py-2 border-b border-zinc-700/50">
+                            <div class="flex items-center justify-between text-zinc-300 mb-1">
+                                <span>📝 工作区编辑字号</span>
+                                <span class="text-amber-400 font-mono font-bold">{{ fontSizeDraft }}px</span>
+                            </div>
+                            <input type="range" v-model.number="fontSizeDraft" min="10" max="36" step="1" @change="commitFontSize" class="w-full h-1.5 bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-amber-500">
+                        </div>
+                        <button @click="resetPersonalizationSettings" class="px-3 py-2 w-full text-left hover:bg-zinc-700 text-zinc-300 border-t border-zinc-700/50">🎨 重置界面外观与字号</button>
+                            </div>
+                        </div>
+
+                        <!-- 🧹 标签与导入（二级子菜单） -->
+                        <div class="relative group/tags">
+                            <div class="px-3 py-1.5 flex items-center justify-between hover:bg-indigo-600 hover:text-white cursor-pointer">
+                                <span>🧹 标签与导入</span>
+                                <span class="text-zinc-500 group-hover/tags:text-white">▸</span>
+                            </div>
+                            <div class="hidden group-hover/tags:flex flex-col absolute left-full top-0 -mt-1 min-w-[300px] bg-zinc-800 border border-zinc-700 rounded shadow-2xl py-1 z-[60]">
                         <div class="px-3 py-2 border-b border-zinc-700/50">
                             <div class="flex items-center justify-between">
                                 <span class="text-zinc-300">🧹 导入时忽略卡片自带标签</span>
@@ -151,6 +185,16 @@
                             </button>
                             <span class="block text-[10px] text-zinc-500 mt-1">清除开关开启前已收编进卡片的外来标签（保留系统标签库/自动规则/已归类标签），物理落盘</span>
                         </div>
+                            </div>
+                        </div>
+
+                        <!-- 📸 历史快照（二级子菜单） -->
+                        <div class="relative group/snapshot">
+                            <div class="px-3 py-1.5 flex items-center justify-between hover:bg-indigo-600 hover:text-white cursor-pointer">
+                                <span>📸 历史快照</span>
+                                <span class="text-zinc-500 group-hover/snapshot:text-white">▸</span>
+                            </div>
+                            <div class="hidden group-hover/snapshot:flex flex-col absolute left-full top-0 -mt-1 min-w-[300px] bg-zinc-800 border border-zinc-700 rounded shadow-2xl py-1 z-[60]">
                         <div class="px-3 py-2 border-b border-zinc-700/50">
                             <div class="flex items-center justify-between mb-1">
                                 <span class="text-zinc-300">📸 历史快照自动备份</span>
@@ -191,22 +235,8 @@
                                 🗑️ 清理孤儿快照（已删卡残留）
                             </button>
                         </div>
-                        <div class="px-3 py-2 border-b border-zinc-700/50">
-                            <div class="flex items-center justify-between text-zinc-300 mb-1">
-                                <span>🖼️ 界面 UI 字号</span>
-                                <span class="text-indigo-400 font-mono font-bold">{{ uiFontSizeDraft }}px</span>
                             </div>
-                            <input type="range" v-model.number="uiFontSizeDraft" min="10" max="28" step="1" @change="commitUiFontSize" class="w-full h-1.5 bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-indigo-500">
                         </div>
-                        <div class="px-3 py-2 border-b border-zinc-700/50">
-                            <div class="flex items-center justify-between text-zinc-300 mb-1">
-                                <span>📝 工作区编辑字号</span>
-                                <span class="text-amber-400 font-mono font-bold">{{ fontSizeDraft }}px</span>
-                            </div>
-                            <input type="range" v-model.number="fontSizeDraft" min="10" max="36" step="1" @change="commitFontSize" class="w-full h-1.5 bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-amber-500">
-                        </div>
-                        <button @click="resetPersonalizationSettings" class="px-3 py-1.5 text-left hover:bg-zinc-700 text-zinc-300 mt-1">🎨 重置界面外观与字号</button>
-                        <button @click="resetApiSettings" class="px-3 py-1.5 text-left hover:bg-rose-600 hover:text-white text-rose-400">🔄 重置 API 接口参数</button>
                         <div class="h-px bg-zinc-700/50 my-1 mx-2"></div>
                         <button @click="checkForUpdatesManual" class="px-3 py-1.5 text-left hover:bg-emerald-600 hover:text-white flex items-center justify-between text-emerald-400 font-bold transition">
                             <span>🔄 检查应用更新...</span>

@@ -9,28 +9,36 @@
            ref="sidebarEl"
            class="bg-zinc-900 border-r border-zinc-800 flex flex-col shrink-0 relative"
            :style="sidebarStyle">
-        <!-- ⚡ 双引擎模式切换（🔧 UI 修复：按钮加 whitespace-nowrap + min-w-0 + 徽标 shrink-0，
-            窄侧边栏/万级数量下不再换行错乱，文字超出省略） -->
-        <div class="px-3 py-2.5 border-b border-zinc-800 bg-zinc-900 flex gap-2 select-none">
+        <!-- ⚡ 双引擎模式切换（📐 2×2 网格 + 计数徽标：侧边栏最窄 220px 时四个按钮单行会被挤到截断，
+             改为「长标签占宽列、短标签占窄列」的不等宽双列（1.3fr / 1fr）避免裁字；数量 ≥ 1 万显示为 x.x万） -->
+        <div class="sb-tabs px-3 py-2.5 border-b border-zinc-800 bg-zinc-900 grid grid-cols-[1.3fr_1fr] gap-1.5 select-none">
             <button @click="appMode = 'characters'"
+                    :title="`角色卡库（${library.length} 张）`"
                     :class="appMode === 'characters' ? 'bg-indigo-600 text-white shadow-md shadow-indigo-900/30' : 'bg-zinc-800 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700'"
-                    class="flex-1 py-1.5 text-xs font-bold rounded-lg shadow transition flex items-center justify-center gap-1.5 whitespace-nowrap min-w-0 overflow-hidden">
-                🎎 角色卡库 <span class="opacity-70 font-normal shrink-0">({{ library.length }})</span>
-            </button>
-            <button @click="appMode = 'worldbooks'"
-                    :class="appMode === 'worldbooks' ? 'bg-amber-600 text-white shadow-md shadow-amber-900/30' : 'bg-zinc-800 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700'"
-                    class="flex-1 py-1.5 text-xs font-bold rounded-lg shadow transition flex items-center justify-center gap-1.5 whitespace-nowrap min-w-0 overflow-hidden">
-                🌍 世界书库 <span class="opacity-70 font-normal shrink-0">({{ worldbooks.length }})</span>
+                    class="w-full px-2.5 py-1.5 text-xs font-bold rounded-lg shadow transition flex items-center justify-between gap-1.5 min-w-0">
+                <span class="truncate"><span class="tab-emoji">🎎 </span>角色卡库</span>
+                <span class="tab-count shrink-0 text-[10px] font-mono px-1.5 py-0.5 rounded-full bg-black/25">{{ modeCountText(library.length) }}</span>
             </button>
             <button @click="appMode = 'presets'"
+                    :title="`预设（${presets.length} 份）`"
                     :class="appMode === 'presets' ? 'bg-sky-600 text-white shadow-md shadow-sky-900/30' : 'bg-zinc-800 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700'"
-                    class="flex-1 py-1.5 text-xs font-bold rounded-lg shadow transition flex items-center justify-center gap-1.5 whitespace-nowrap min-w-0 overflow-hidden">
-                ⚙️ 预设 <span class="opacity-70 font-normal shrink-0">({{ presets.length }})</span>
+                    class="w-full px-2.5 py-1.5 text-xs font-bold rounded-lg shadow transition flex items-center justify-between gap-1.5 min-w-0">
+                <span class="truncate"><span class="tab-emoji">⚙️ </span>预设</span>
+                <span class="tab-count shrink-0 text-[10px] font-mono px-1.5 py-0.5 rounded-full bg-black/25">{{ modeCountText(presets.length) }}</span>
+            </button>
+            <button @click="appMode = 'worldbooks'"
+                    :title="`世界书库（${worldbooks.length} 本）`"
+                    :class="appMode === 'worldbooks' ? 'bg-amber-600 text-white shadow-md shadow-amber-900/30' : 'bg-zinc-800 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700'"
+                    class="w-full px-2.5 py-1.5 text-xs font-bold rounded-lg shadow transition flex items-center justify-between gap-1.5 min-w-0">
+                <span class="truncate"><span class="tab-emoji">🌍 </span>世界书库</span>
+                <span class="tab-count shrink-0 text-[10px] font-mono px-1.5 py-0.5 rounded-full bg-black/25">{{ modeCountText(worldbooks.length) }}</span>
             </button>
             <button @click="appMode = 'plugins'"
+                    :title="`插件（${plugins.length} 个）`"
                     :class="appMode === 'plugins' ? 'bg-violet-600 text-white shadow-md shadow-violet-900/30' : 'bg-zinc-800 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700'"
-                    class="flex-1 py-1.5 text-xs font-bold rounded-lg shadow transition flex items-center justify-center gap-1.5 whitespace-nowrap min-w-0 overflow-hidden">
-                🧩 插件 <span class="opacity-70 font-normal shrink-0">({{ plugins.length }})</span>
+                    class="w-full px-2.5 py-1.5 text-xs font-bold rounded-lg shadow transition flex items-center justify-between gap-1.5 min-w-0">
+                <span class="truncate"><span class="tab-emoji">🧩 </span>插件</span>
+                <span class="tab-count shrink-0 text-[10px] font-mono px-1.5 py-0.5 rounded-full bg-black/25">{{ modeCountText(plugins.length) }}</span>
             </button>
         </div>
 
@@ -670,6 +678,14 @@ export default {
             }, 0);
         };
 
+        // 📐 [模式标签页计数] 万级以上的库（实测 1.1 万张卡）把 5 位数字压成「1.1万」，
+        //    否则 220px 窄侧边栏下徽标会挤掉按钮文字
+        const modeCountText = (n) => {
+            const v = Number(n) || 0;
+            if (v >= 10000) return `${(v / 10000).toFixed(1).replace(/\.0$/, '')}万`;
+            return String(v);
+        };
+
         // 🧩 插件类型徽标文案
         const pluginKindLabel = (plugin) => {
             if (!plugin) return '';
@@ -759,6 +775,7 @@ export default {
             hasActiveFilters,
             showWbAdvanced,
             handleSortChange,
+            modeCountText,
             showListTags,
             toggleListTags,
             expandedTagIds,
@@ -915,3 +932,25 @@ export default {
     }
 };
 </script>
+
+<style scoped>
+/* 📐 [模式标签页] 侧边栏可被拖到 220px，此时「🎎 角色卡库 + 计数徽标」放不下会被裁字。
+   用容器查询（Chromium 105+，Electron 43 = Chromium 150）按实测宽度分两级降级：
+   ≤251px 收起 emoji（仅装饰，颜色已区分）；≤214px 再收起计数（hover 提示里仍能看到）。
+   ⚠ 阈值口径为容器「内容盒」（不含本行 px-3 的 24px 内边距），实测：
+     内容盒 252px（侧边栏 276px）起可同时容纳「emoji + 4 字标签 + 1.1万」；
+     内容盒 215px（侧边栏 239px）起可容纳「4 字标签 + 1.1万」。 */
+.sb-tabs {
+    container-type: inline-size;
+}
+@container (max-width: 251px) {
+    .sb-tabs .tab-emoji {
+        display: none;
+    }
+}
+@container (max-width: 214px) {
+    .sb-tabs .tab-count {
+        display: none;
+    }
+}
+</style>

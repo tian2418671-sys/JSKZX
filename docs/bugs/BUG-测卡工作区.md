@@ -202,8 +202,31 @@
 
 ---
 
-## 四、本领域改动前的自检清单
+---
 
+### CT-16 ｜ 🟡 卡内面板顶部/底部各露出一行「```」（裸围栏被当正文带进面板）
+- **现象**（用户报告 2026-09-14，附截图）：测卡聊天区里卡内状态栏正常渲染，但**面板上沿（和下沿）各多出一行反引号**，看起来像「三个点」。
+- **复现**：`剧情卡\魔法少女是不会败北恶堕的吧！.png` 的 `first_mes`（12,855 字符）形状为：
+  ` ``` ` + CRLF + `<!DOCTYPE html>` … `</html>` + ` ``` `（卡作者把**完整文档**整段放进裸围栏）。
+- **根因**（两步叠加）：
+  1. `fenceLooksLikeHtml()` 的前缀白名单只列了 `<html/<head/<body/<style/<script/<div/<table/<section>`，
+     **不认 `<!DOCTYPE html>`** → 这段被判成「普通文本」，并**把围栏原样包回**（`'```\n' + inner + '\n```'`）；
+  2. 紧接着 `promoteHtmlSegments()` 又发现该文本段含 `<html` → 升级为 iframe 段，**但围栏已经粘在内容里了**
+     → 面板文档内容变成 ` ``` … ``` `，浏览器把顶部/尾部的反引号当正文渲染。
+- **修复**：`fenceLooksLikeHtml` 的标签前缀白名单补上 `!doctype\s+html`（同时兼容 LF/CRLF）；
+  注释里写明这个真实卡形状，防后人又收窄回去。
+- **实测证据**（生产实例 + CDP）：修复前该卡分段结果为 `[0] text len=12853 head="```\n<!DOCTYPE html>…"`，
+  面板文档 `tickCount=2`、`tickAtStart/tickAtEnd` 均 true；修复后为 `[0] html len=12845 head="<!DOCTYPE html>"`，
+  页面里 `iframe.seg-iframe` 高度 **1643px**、`tickCount=0`、无残留文本段。
+- **回归**：`test/chatRender.test.mjs` 新增 2 例（CRLF + `<!DOCTYPE html>`、LF + 小写 `<!doctype html>`），
+  断言「判为 html 段且内容不含 ```」；合计 11 例。
+- **防再犯**：新增「裸围栏识别」判据时必须同时覆盖 `<!DOCTYPE html>`（卡作者寄进裸围栏时最常见的开头），
+  改完用真实卡跑 `segmentMessage` 看首尾字符，而不是只看 `type === 'html'`。
+- **来源**：用户截图报告 + 真实卡复现（2026-09-14，v2.2.9）
+
+---
+
+## 四、本领域改动前的自检清单
 1. 侧栏模板里访问任何**可能为 undefined 的列表/对象** → 必须走 `arr()` / `objKeys()` 兜底（[CT-01]）。
 2. 读 **localStorage / IPC 存储**的 `computed` → 必须有响应式依赖（`void xxxVersion.value`），否则永久缓存（[CT-02]）。
 3. **写回预设**时，`prompt_order` 与 `prompt.enabled` **两处都要写**（[CT-09]）。
@@ -214,3 +237,6 @@
    ① 文档必须走 `app://` 内存路由（不然生产 CSP 会拦内联脚本）；
    ② 模板依赖的全局（`Vue`/`z`/`_`/`$`）由 `web/vendor/chat-host.js` 提供，新增依赖改 `js/chatHost/iframeGlobals.js`；
    ③ 验证方式：生产实例 + CDP 读 `iframe.seg-iframe` 高度（>60px 才说明脚本跑起来了）+ 控制台异常数应为 0。
+8. 改 `segmentMessage` / 围栏识别（`fenceLooksLikeHtml` / `promoteHtmlSegments`）→ 对照 [CT-16]：
+   裸围栏里常见「`<!DOCTYPE html>` 开头的完整文档」，白名单漏了它就会把围栏当正文带进面板；
+   改完必须用**真实卡**的 `first_mes` 跑一遍，检查首尾字符而不是只看段类型。

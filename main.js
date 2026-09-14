@@ -3964,9 +3964,14 @@ async function readPngEmbeddedFromFile(filePath, size) {
     }
     // size 未知：按窗口渐扩试探；文件比窗口小且未解析出卡 → 直接判非角色卡，
     // 否则 stat 拿真实大小整读兜底（与已知 size 路径同保证「绝不漏卡」）
+    // ⚠️ PK-17：`fs.promises.FileHandle.read` 返回的是 `{ bytesRead, buffer }`（**对象**），
+    //    不是数字 —— 旧写法直接拿返回值比 `n < win`，ToPrimitive 转换失败抛 TypeError，
+    //    被外层 catch 吃掉 → 这条分支恒返 null（PK-14 看起来修了其实没生效）。
+    //    取「读了多少字节」一律走 `.bytesRead`。
     for (const win of WINDOWS) {
       const head = Buffer.alloc(win);
-      const n = await fh.read(head, 0, win, 0);
+      const readRes = await fh.read(head, 0, win, 0);
+      const n = (readRes && typeof readRes === 'object') ? Number(readRes.bytesRead) : Number(readRes);
       const data = readTavernPNGChunk(n < win ? head.subarray(0, n) : head);
       if (data) return data;
       if (n < win) return null;

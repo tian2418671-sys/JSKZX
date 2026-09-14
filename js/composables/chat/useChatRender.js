@@ -32,7 +32,10 @@ export function htmlNeedsIframe(html) {
 /** 围栏内容是否像 HTML 面板(裸围栏升级为 html 段的判定) */
 function fenceLooksLikeHtml(content) {
     const t = String(content || '').trim();
-    return /^<(html|head|body|style|script|div|table|section)[\s>]/i.test(t);
+    // 标签开头（含 `<!DOCTYPE html>`——实测卡把**完整文档**整段放进裸围栏时就是这种开头；
+    // 旧白名单只列了 <html/<head/<div…，漏了 doctype → 被判成普通文本并**把围栏原样带回**，
+    // 随后又被 promoteHtmlSegments 升级成 iframe 段 → 面板顶部/底部各露出一行 ``` ）
+    return /^<(!doctype\s+html|html|head|body|style|script|div|table|section)[\s>]/i.test(t);
 }
 
 /**

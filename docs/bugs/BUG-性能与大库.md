@@ -206,6 +206,40 @@
   - ⬜ 待复测：启动日志应只剩**一轮**索引构建 + 预热；世界书词条正文关键词在瘦身库上仍可被搜索命中。
 - **来源**：用户日志 + 代码走查（2026-09-14，v2.2.7 补丁后）
 
+### PK-17 ｜ 🔴 **PK-14 其实没修好**：未知 `size` 分支把 `fh.read()` 的返回对象当数字比较 → 恒返 null
+- **现象**（2026-09-14 复查 2.2.9 改动时发现）：同一张卡走 `files:readEmbeddedBatch` 时
+  **`size: 0` 读不到正文，给真实 `size` 就能读到** —— 即 PK-14 声称修好的「瘦身卡回读」路径仍然失效。
+- **实测数据**（生产实例 + CDP，随机 5 张库内 PNG）：
+
+  | 文件 | 大小 | `size=0` → data | 真实 `size` → data |
+  |---|---|---|---|
+  | 写卡工作台.png | 323KB | ❌ | ✅ |
+  | World Builder 2.0.png | 1053KB | ❌ | ✅ |
+  | 谎言系统.png | 778KB | ❌ | ✅ |
+  | ddfb7968d7720a78.png | 126KB | ❌ | ✅ |
+  | 全裸登校…png | 540KB | ❌ | ❌（该卡本身无 chara 数据） |
+
+  另测「鬼 1.2版.png」（1,398,105 B）：`size=0` → `{ok:true,hasData:false}`；`size=1398105` → `{ok:true,hasData:true,name:'鬼 1.2版'}`。
+- **根因**：`main.js readPngEmbeddedFromFile` 的未知 size 分支写成
+  ```js
+  const n = await fh.read(head, 0, win, 0);                 // ← promise 版返回 { bytesRead, buffer }
+  const data = readTavernPNGChunk(n < win ? head.subarray(0, n) : head);
+  if (data) return data;
+  if (n < win) return null;
+  ```
+  `n` 是**对象**，`n < win` 触发 ToPrimitive 转换失败 → 抛 `TypeError: Cannot convert object to primitive value`
+  （复刻脚本 `pk14-repro.mjs` 在 Node v25.2.1 上即在第 42 行抛出）→ 被外层 `catch { return null }` 静默吞掉
+  → 该分支**永远返回 null**，后面的 `fh.stat()` 整读兜底一行都走不到。
+  旁证：已知 size 分支同样调用 `fh.read` 但**不比较返回值**，所以一直正常 —— 坏的只有这一条新加的分支。
+- **影响**：`App.vue loadFullCardFromDisk` 在 `item._size` 缺失（传 0）时拿不到数据；目前靠同一提交新增的
+  `readBuffer → parsePNGChunk/deepScanForJSON` 兜底救回，所以用户侧症状被掩盖，但该"快路径"是死代码，
+  且一旦兜底被移除/失败即复现 PK-14 的「读取卡片正文失败」弹窗。
+- **修复**：未知 size 分支改为取字节数 `const n = (await fh.read(head, 0, win, 0)).bytesRead;`（保留越界/截断语义），
+  并在补上后复测 `size=0` 必须能返回 `data`。
+- **防再犯**：**`fs.promises.FileHandle.read` 返回 `{ bytesRead, buffer }`**，凡要拿「读了多少」必须取 `.bytesRead`；
+  代码评审时看到 `await fh.read(...)` 的返回值被直接参与算术/比较，一律视为缺陷。
+- **来源**：2.2.9 改动复查（用户要求「检查 2.2.9 源码改动是否有 BUG」）+ CDP 多卡实测（2026-09-14）
+
 ---
 
 ## 五、本领域的「护栏」（改动性能相关代码前先看）

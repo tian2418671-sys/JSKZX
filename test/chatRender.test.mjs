@@ -25,6 +25,24 @@ test('裸 ``` 围栏里是 HTML 内容 → 同样升级为 html 段（CT-14 提�
     assert.equal(segs[0].type, 'html');
 });
 
+test('裸围栏里是「完整文档」（<!DOCTYPE html> 开头，CRLF 换行）→ html 段且不带围栏（CT-16）', () => {
+    // 实测卡「魔法少女是不会败北恶堕的吧！」开场白就是这个形状：
+    // ``` + CRLF + <!DOCTYPE html> … </html> + CRLF + ```
+    const raw = '```\r\n<!DOCTYPE html>\r\n<html lang="zh-CN">\r\n<head><meta charset="UTF-8"></head>\r\n<body><div id="app"></div></body>\r\n</html>\r\n```';
+    const segs = segmentMessage(raw);
+    assert.equal(segs.length, 1, '应只产生 1 段');
+    assert.equal(segs[0].type, 'html', '完整文档应判为 html 段');
+    assert.ok(!segs[0].content.includes('```'), '面板内容不得含围栏标记');
+    assert.ok(segs[0].content.startsWith('<!DOCTYPE html>'), '应以 doctype 开头');
+});
+
+test('同上但 LF 换行 + 小写 doctype → 同样识别为 html 段', () => {
+    const raw = '```\n<!doctype html>\n<html>\n<head><title>t</title></head><body><span>x</span></body>\n</html>\n```';
+    const segs = segmentMessage(raw);
+    assert.equal(segs[0].type, 'html');
+    assert.ok(!segs[0].content.includes('```'));
+});
+
 test('裸 ``` 围栏里是普通代码 → 保持文本（不误判成面板）', () => {
     const segs = segmentMessage('```\nconst a = 1;\nconsole.log(a);\n```');
     assert.equal(segs[0].type, 'text');
