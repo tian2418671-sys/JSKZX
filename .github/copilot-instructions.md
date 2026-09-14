@@ -1,7 +1,7 @@
 # 项目协作指令 · JSK管理（SillyTavern 角色卡管理器）
 
 > 本文件由 AI 助手**自动加载**。开工前请**先读 [`START-HERE.md`](../START-HERE.md) → [`AI交接指导.md`](../AI交接指导.md)**。
-> 当前版本 **v2.2.7**（Electron 43 + Vue 3 + Vite 8；`npm test` = 256 用例）。
+> 当前版本 **v2.2.10**（Electron 43 + Vue 3 + Vite 8；`npm test` = 259 用例）。
 
 ## 铁律（违反会出事）
 
@@ -19,7 +19,7 @@
 | 找什么 | 去哪 |
 |---|---|
 | 接手须知、架构、标准工作流、高频缺陷地图 | [`AI交接指导.md`](../AI交接指导.md) |
-| 历史缺陷与坑（**94 条**，按领域） | [`docs/bugs/README.md`](docs/bugs/README.md) |
+| 历史缺陷与坑（**99 条**，按领域） | [`docs/bugs/README.md`](docs/bugs/README.md) |
 | 代码片段 / 实测技术数据 / 外部 API 参考 / 脚本清单 | [`docs/技术支持/README.md`](docs/技术支持/README.md) |
 | 发版流程（产物校验、OTA 验证、回滚、检查单） | [`docs/发布/一条龙-发布流程.md`](docs/发布/一条龙-发布流程.md) |
 | 实现规格与后续计划 | [`docs/规格与计划/`](docs/规格与计划/README.md) |
@@ -29,7 +29,7 @@
 ## 常用命令
 
 ```bash
-npm test                      # 256 用例
+npm test                      # 259 用例
 npm run build:web             # 构建渲染层
 npm start                     # 源码版运行（= build:web + electron .）—— 运行时验证用它
 npx electron . --disable-gpu --enable-logging    # 生产代码直接启动，看 [Vue 错误]

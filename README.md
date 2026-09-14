@@ -9,11 +9,11 @@
 
 **🖥️ 推荐 · 安装版**（双击安装，自动生成桌面/开始菜单快捷方式，免管理员权限，支持 OTA 自动更新）：
 
-[⬇️ 下载安装包 `sillytavern-card-manager-2.2.9.exe`](https://github.com/tian2418671-sys/JSKZX/releases/latest)
+[⬇️ 下载安装包 `sillytavern-card-manager-2.2.10.exe`](https://github.com/tian2418671-sys/JSKZX/releases/latest)
 
 **📦 绿色免安装版**（解压即用，无需安装）：
 
-[⬇️ 下载绿色版 `sillytavern-card-manager-2.2.9.zip`](https://github.com/tian2418671-sys/JSKZX/releases/latest)
+[⬇️ 下载绿色版 `sillytavern-card-manager-2.2.10.zip`](https://github.com/tian2418671-sys/JSKZX/releases/latest)
 
 > 💡 两个版本功能完全相同，任选其一即可。支持 Windows 10/11（64 位）。
 > 安装版内置 OTA 自动更新（检测 → 下载 → 静默安装 → 自动重启）；绿色版需手动下载新版覆盖。
@@ -195,7 +195,7 @@ npm run build
 
 产物输出到 `dist/`：
 - `dist/win-unpacked/` —— 免安装绿色版（可压缩为 zip 分发）
-- `dist/sillytavern-card-manager-2.2.9.exe` —— NSIS 安装包
+- `dist/sillytavern-card-manager-2.2.10.exe` —— NSIS 安装包
 - `dist/latest.yml` —— **OTA 更新必需**（与 exe 一起上传 GitHub Release）
 
 ---
@@ -227,7 +227,7 @@ npm run build
 │       ├── cardLoader.js   # 卡片读取、数据规范化（V1/V2/V3 兼容）、extractBookEntries 安全提取
 │       ├── pngParser.js    # PNG/WebP tEXt/iTXt 块解析、深度扫描提取 JSON
 │       └── tokenEstimate.js# Token 估算工具（App 与 TextModal 共享）
-├── test/                   # node:test 单元测试（256 用例 / 25 个文件）
+├── test/                   # node:test 单元测试（259 用例 / 25 个文件）
 ├── build/                  # 打包资源（icon.ico、generate-icon.ps1）
 ├── web/                    # Vite 构建产物（gitignore）
 └── dist/                   # electron-builder 打包产物（gitignore）
@@ -535,7 +535,7 @@ nativeAlert('保存成功', 'info');                   // type 仅支持 none/in
 ### 提交前自查清单
 
 - [ ] `node --check` / `get_errors` 无语法错误
-- [ ] `npm test` 单测全绿（256 用例）
+- [ ] `npm test` 单测全绿（259 用例）
 - [ ] 新增成员已加入 `setup()` 的 `return` 与 `ctx`
 - [ ] IPC 传参已 `JSON.parse(JSON.stringify(...))` 剥离 Proxy
 - [ ] 未引入外部 CDN / 未使用 `prompt`/`confirm`/`alert` / 未对 `cardData` 深层响应式

@@ -10,7 +10,7 @@
 > | 待做功能与排期 | `docs/规格与计划/后续升级计划.md` |
 > | 文档总地图 | `docs/README.md` |
 >
-> 最后更新：2026-09-13 ｜ 当前版本 **v2.2.7**（已发布 + OTA）
+> 最后更新：2026-09-14 ｜ 当前版本 **v2.2.10**（已发布 + OTA）
 
 ---
 
@@ -23,7 +23,7 @@
 | 仓库 | `https://github.com/tian2418671-sys/JSKZX.git`（远端 `origin`） |
 | 分支 | 本地 `master`（与 origin 同步） |
 | 构建产物 | `sillytavern-card-manager-<版本>.exe`（NSIS 安装版）+ `latest.yml` + `.exe.blockmap` + zip 绿色版 |
-| 测试 | `npm test` = `node --test "test/**/*.test.mjs"` → 当 前 **256 用例全绿**（25 个测试文件） |
+| 测试 | `npm test` = `node --test "test/**/*.test.mjs"` → 当前 **259 用例全绿**（25 个测试文件） |
 | 规模 | `js/components/` 41 个 SFC、`js/composables/` 36 个模块（含 `chat/` 引擎 16 个）、`js/utils/` 解析与索引工具 |
 | 用户习惯 | 说「**一条龙服务**」= 升版本号 → 更新文档三件套 → 打包 → 提交推送 → 发 GitHub Release（含 `latest.yml` 保 OTA） |
 | 典型库 | 日常小库 `E:\AI\酒馆工具\角色卡`（75 张）；压测大库 `I:\03\角色色卡`（11,186 张 / 9.76GB）；2 万卡副本由脚本现造 |
@@ -52,9 +52,12 @@ node scripts/release-check.mjs                   # 语法 + 单测 + 构建 + �
 
 ---
 
-## 二、当前状态（接手时点：2026-09-13）
+## 二、当前状态（接手时点：2026-09-14）
 
-- **版本 v2.2.7 已发布**：master 已推送、tag `v2.2.7` 已推、GitHub Release 已建（Latest）、OTA 链路已验证（`releases/latest/download/latest.yml` 返回 200 且版本号匹配）。
+- **版本 v2.2.10 已发布**：master 已推送、tag `v2.2.10` 已推、GitHub Release 已建（Latest）、OTA 链路已验证
+  （`releases/latest/download/latest.yml` 版本号/大小/校验和与本地一致）。
+  > 同日过程：v2.2.9 发布 → 复测发现 PK-14 补丁未生效（PK-17）→ **同号重发** 2.2.9 修订版（提交 `2140248`）
+  > → 因 OTA 比版本号、同号不给已装用户推送 → 再升 **v2.2.10** 重发同一批内容以覆盖 OTA。
 - 工作区干净（`git status --porcelain` 为空）。
 - **大库专项已完成一轮**：世界书正文懒加载（P1a）+ 索引跨代沿用（P2）+ 内存守门员 + 压测工具链。22,372 卡库实测堆 2,891MB → **2,053MB**，渲染进程不再 OOM。
 - **下一刀（P1b，未做）**：剩余 2,053MB 里 1,877MB 是「词条对象 + 倒排索引」，目标应是**词条对象本身**与索引规模，而不是文本。
@@ -82,7 +85,7 @@ js/utils/          cardLoader.js（卡解析/规范化）、pngParser.js、searc
 main/              vectorManager.js / vectorWorker.js / memoryStore.js（向量与长期记忆存储层）
 css/               tailwind.css（源）/ style.css（自定义）
 web/               vite build 产物（生产加载，gitignore）
-test/              25 个测试文件 / 256 用例（node:test，`npm test`）
+test/              25 个测试文件 / 259 用例（node:test，`npm test`）
 scripts/           压测与探针（library-dup-*、capacity-check.ps1、measure-startup.mjs、
                    release-check.mjs、_cdp-*.mjs 等）
 ```
