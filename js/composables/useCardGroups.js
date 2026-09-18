@@ -5,6 +5,7 @@
  */
 import { computed } from 'vue';
 import { migrateChatKeys } from './chat/chatStorage.js';
+import { migrateMemoryCard } from './chat/useChatMemory.js';
 
 export function useCardGroups({
     // 共享状态
@@ -190,6 +191,9 @@ export function useCardGroups({
             // 💬 同理：测卡会话/变量树也是按 path 派生的键（chat_storage 里 jsmobile-chat-<path>:*），
             //     不迁移则重命名分组后该组卡片的「测卡会话与变量树凭空消失」（键成孤儿）。
             migrateChatKeys(oldPrefix, newPrefix);
+            // 🧠 记忆 v4.1（D1a）：记忆按 cardPath 分桶，路径变更必须同步跟随，
+            //   否则重命名分组后该组卡的「记忆凭空消失」（遗留桶孤儿）。fire-and-forget，失败静默。
+            migrateMemoryCard(oldPrefix, newPrefix);
             await refreshLibrary();
         } else {
             nativeAlert(`分组已成功重命名为：「${cleanNewName}」`, 'info');
@@ -276,6 +280,7 @@ export function useCardGroups({
             item.avatar = isImage ? 'local-file://img/?path=' + encodeURIComponent(res.newFilePath) : null;
             migrateOverlayKey(oldPath, res.newFilePath);
             migrateChatKeys(oldPath, res.newFilePath); // 💬 测卡会话/变量树的键也按 path 派生，跟着走
+            migrateMemoryCard(oldPath, res.newFilePath); // 🧠 记忆 v4.1（D1a）：同理按 path 派生，跟着走
             persistCardCategory(item);
             return true;
         }

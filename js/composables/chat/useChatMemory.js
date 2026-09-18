@@ -1,61 +1,122 @@
 /**
- * 移动端长期记忆（MemoryChat 方案 B 融合）
- *  - 底层走原生 MemoryPlugin（Android 内置 SQLite），与桌面版无关
+ * 桌面版测卡·长期记忆（v4.1 对齐移动版同名文件，2026-09-18）
  *  - L1 原始消息 / L2 摘要 / L3 事实 统一为 type 字段存储
  *  - 测卡发送前检索相关记忆注入 system；发送后异步记录对话
+ * v4.1 主线（对齐移动版评审定案，规格见 docs/规格与计划/桌面版测卡记忆v4.1-实现规格.md）：
+ *  · D1 卡级分桶：记忆按 cardPath 隔离（换卡=换记忆）；cardName 降级纯展示
+ *  · D2 检索治理：停用词 + 有效词 <2 降级「本卡最近 N 条（updatedAt DESC）」
+ *  · D3 事实提取收紧：显式陈述优先；排除疑问句/假设/引用；空泛键跳过；值截断
+ *  · D4 同 key 覆盖：同 (fact, key, cardPath) → 覆盖更新（存储层实现）
+ *  · I2 注入双预算：条数 + 估算 token（默认 200 / 硬上限 400）
+ *  · I4 注入格式：XML 格式 C（默认）/ markdown 表格
+ *  · I5 返回 { text, meta }：meta 供侧栏 debug（灰度关闭时 meta=null）
+ * 与移动版差异（刻意的桌面化改造）：
+ *  · localStorage → chatStorage（桌面 app:// 下裸 localStorage 不持久）
+ *  · api ← chatBridge（透传 memory:* IPC，底层 main/memoryStore.js JSON 存储）
+ *  · 去 B1 批量抑制（桌面无批量测卡场景）
+ *  · D3 规则集/停用词抽到 memoryRules.js（纯函数单一事实源，供单测）
  */
 import { api } from './chatBridge.js';
 import { chatStorage } from './chatStorage.js';
+import { estimateTokens } from '../../utils/tokenEstimate.js';
+import { extractFacts as extractFactsRules, tokenizeQuery } from './memoryRules.js';
 
 const LS_ENABLED = 'jsmobile-memory-enabled';
 const LS_LIMIT = 'jsmobile-memory-limit';
+const LS_INJECT_TOKENS = 'jsmobile-memory-inject-tokens';
+const LS_FORMAT = 'jsmobile-memory-format';
+const LS_V2 = 'jsmobile-memory-v2';   // 灰度 flag：v4.1 新分桶/新格式/新条数（关=旧行为）
+
+const DEFAULT_LIMIT = 8;              // I2：默认注入条数 20 → 8
+const MAX_LIMIT = 200;
+const DEFAULT_INJECT_TOKENS = 200;    // I2：默认注入 token 预算
+const MAX_INJECT_TOKENS = 400;        // I2：硬上限（防中文 token 估算误差）
+const FORMAT_C = 'C';                 // I4：XML 格式
 
 export function isMemoryEnabled() {
     return chatStorage.get(LS_ENABLED) !== '0';
 }
 export function setMemoryEnabled(v) {
-    if (v) chatStorage.set(LS_ENABLED, '1');
-    else chatStorage.set(LS_ENABLED, '0');
+    chatStorage.set(LS_ENABLED, v ? '1' : '0');
+}
+export function isMemoryV2() {
+    return chatStorage.get(LS_V2) !== '0';   // 默认开
+}
+export function setMemoryV2(v) {
+    chatStorage.set(LS_V2, v ? '1' : '0');
 }
 export function getMemoryLimit() {
-    const n = parseInt(chatStorage.get(LS_LIMIT) || '20', 10);
-    return Number.isFinite(n) ? Math.min(Math.max(n, 1), 200) : 20;
+    const n = parseInt(chatStorage.get(LS_LIMIT) || String(DEFAULT_LIMIT), 10);
+    return Number.isFinite(n) ? Math.min(Math.max(n, 1), MAX_LIMIT) : DEFAULT_LIMIT;
 }
 export function setMemoryLimit(n) {
     const v = Number(n);
     if (!Number.isFinite(v)) return;
-    chatStorage.set(LS_LIMIT, String(Math.min(Math.max(Math.round(v), 1), 200)));
+    chatStorage.set(LS_LIMIT, String(Math.min(Math.max(Math.round(v), 1), MAX_LIMIT)));
+}
+/** I2：注入 token 预算 */
+export function getMemoryInjectTokens() {
+    const n = parseInt(chatStorage.get(LS_INJECT_TOKENS) || String(DEFAULT_INJECT_TOKENS), 10);
+    return Number.isFinite(n) ? Math.min(Math.max(n, 1), MAX_INJECT_TOKENS) : DEFAULT_INJECT_TOKENS;
+}
+export function setMemoryInjectTokens(n) {
+    const v = Number(n);
+    if (!Number.isFinite(v)) return;
+    chatStorage.set(LS_INJECT_TOKENS, String(Math.min(Math.max(Math.round(v), 1), MAX_INJECT_TOKENS)));
+}
+/** I4：注入格式（'C' = XML / 'markdown' = 表格） */
+export function getMemoryFormat() {
+    return chatStorage.get(LS_FORMAT) === 'markdown' ? 'markdown' : FORMAT_C;
+}
+export function setMemoryFormat(f) {
+    chatStorage.set(LS_FORMAT, f === 'markdown' ? 'markdown' : FORMAT_C);
 }
 
-/** 记录一条记忆（不阻塞，失败静默） */
-export async function recordMemory(type, content, key, cardName) {
+/** 归一化卡参数：接受 string（旧调用兼容）或 object { path, name }（v4.1 新调用，R1/R2 载体） */
+function normalizeCard(card) {
+    if (card && typeof card === 'object') {
+        return { path: String(card.path || ''), name: String(card.name || '') };
+    }
+    const s = String(card == null ? '' : card);
+    return { path: s, name: s };
+}
+
+/** 记录一条记忆（不阻塞，失败静默）；card 支持 string|object */
+export async function recordMemory(type, content, key, card) {
     if (!isMemoryEnabled()) return null;
+    const { path, name } = normalizeCard(card);
     try {
-        return await api.memoryAdd({ type: type || 'message', content: content || '', key: key || '', cardName: cardName || '' });
+        return await api.memoryAdd({
+            type: type || 'message', content: content || '', key: key || '',
+            cardName: name, cardPath: path
+        });
     } catch (e) {
         return { success: false, error: (e && e.message) || '' };
     }
 }
 
 /**
- * 记录对话消息（user / assistant）
- * 治理：错误占位（⚠ 开头）与空内容不进记忆；去重与 L1 修剪由原生层完成
+ * 记录对话消息（user / assistant）。
+ * 治理：错误占位（⚠ 开头）与空内容不进记忆；去重与修剪由存储层完成。
+ * card: string（旧调用兼容）或 object { path, name }（v4.1 R1/R2 修复载体）。
  */
-export function recordMessage(role, content, cardName) {
+export function recordMessage(role, content, card) {
     const text = String(content || '').trim();
     if (!text) return null;
     if (text.startsWith('⚠')) return null; // 请求失败占位文本不是记忆
-    return recordMemory('message', `${role === 'user' ? '用户' : 'AI'}: ${text}`, '', cardName);
+    const { path, name } = normalizeCard(card);
+    return recordMemory('message', `${role === 'user' ? '用户' : 'AI'}: ${text}`, '', { path, name });
 }
 
 /** 记录事实（L3，记忆表格行：键=值） */
-export function recordFact(key, value, cardName) {
+export function recordFact(key, value, card) {
     const v = String(value == null ? '' : value).trim();
     if (!v) return null;
-    return recordMemory('fact', v, String(key || '备忘').trim(), cardName);
+    const { path, name } = normalizeCard(card);
+    return recordMemory('fact', v, String(key || '备忘').trim(), { path, name });
 }
 
-/** 更新记忆表格行（改键/改值） */
+/** 更新记忆（R2 回写实际候选 / 侧栏编辑）：patch = { content?, key?, cardName?, cardPath? } */
 export async function updateMemory(id, patch) {
     try {
         return await api.memoryUpdate(id, patch || {});
@@ -64,54 +125,37 @@ export async function updateMemory(id, patch) {
     }
 }
 
-// ---------- L3 事实提取（用户交代的关键信息 → 记忆表格行） ----------
-// 启发式规则：命中即记（键 值）。值为句末截止（。！？!? 或行尾）。
-const FACT_RULES = [
-    { re: /(?:我叫|我的名字(?:叫|是)?|名字是|本名是)\s*[:：]?\s*(.+?)(?:[。！？!?，,]|$)/, key: '名字' },
-    { re: /我(?:最喜欢|超喜欢|特别喜欢|喜欢)\s*[:：]?\s*(.+?)(?:[。！？!?，,]|$)/, key: '喜欢' },
-    // 讨厌：允许逗号后省略「我」的口语写法（「我喜欢X，讨厌Y。」）
-    { re: /(?<=^|[，,；;：:\s])我?(?:最讨厌|特别讨厌|讨厌|不喜欢)\s*[:：]?\s*(.+?)(?:[。！？!?，,]|$)/, key: '讨厌' },
-    { re: /(?:记住|牢记|记下)\s*[:：]?\s*(.+?)(?:[。！？!?]|$)/, key: '备忘' },
-    { re: /(?:你|您|老板娘|老板|管家|夫君|主人|哥哥|姐姐)(?:要)?(?:记住|记得|牢记)\s*[:：]?\s*(.+?)(?:[。！？!?]|$)/, key: '备忘' },
-    { re: /我?(?:今年|现在)\s*(\d+)\s*岁/, key: '年龄', valueFrom: (m) => m[1] + '岁' },
-    { re: /我?(?:现在|正在|身处)?(?:在|身处)\s*[:：]?\s*(.+?)(?:[。！？!?，,]|$)/, key: '位置' },
-    { re: /我?(?:想去|要去|打算去|计划去)\s*[:：]?\s*(.+?)(?:[。！？!?，,]|$)/, key: '目标' },
-    { re: /我的(.+?)(?:是|为)\s*[:：]?\s*(.+?)(?:[。！？!?，,]|$)/, key: (m) => String(m[1] || '备忘').trim() },
-];
-
-/** 从用户消息提取事实列表：[{ key, value }]（纯函数，供单测）；同键同值去重 */
-export function extractFacts(text) {
-    const src = String(text || '');
-    const facts = [];
-    const seen = new Set();
-    for (const rule of FACT_RULES) {
-        const m = rule.re.exec(src);
-        if (!m) continue;
-        const key = typeof rule.key === 'function' ? rule.key(m) : rule.key;
-        const value = rule.valueFrom ? rule.valueFrom(m) : String(m[m.length - 1] || '').trim();
-        if (!key || !value) continue;
-        const sig = key + '\u0000' + value;
-        if (seen.has(sig)) continue; // 「记住X」与「你记住X」等重叠规则只记一次
-        seen.add(sig);
-        facts.push({ key, value });
+/** 确认/拒绝（P1 预留）：confirmed=1 注入 / 0 待确认 / -1 软删可恢复 */
+export async function confirmMemory(id, confirmed) {
+    try {
+        return await api.memoryConfirm(id, confirmed);
+    } catch (e) {
+        return { success: false, error: (e && e.message) || '' };
     }
-    return facts;
 }
 
-/** 检索相关记忆 */
-export async function searchMemory(query, limit) {
+/** D3 事实提取（收紧版，规则在 memoryRules.js 纯函数单一事实源） */
+export function extractFacts(text) {
+    return extractFactsRules(text);
+}
+
+/** D2：query → 有效词（去停用词），供注入层降级判定与 debug meta */
+export { tokenizeQuery };
+
+/** 检索相关记忆（v4.1：cardPath 强制隔离；D1 参数名沿用移动版桥接契约 cardName） */
+export async function searchMemory(query, limit, cardPath) {
     try {
-        const res = await api.memorySearch({ query: query || '', limit: limit || getMemoryLimit() });
+        const res = await api.memorySearch({ query: query || '', limit: limit || getMemoryLimit(), cardName: cardPath || '' });
         return (res && res.success && res.items) ? res.items : [];
     } catch (e) {
         return [];
     }
 }
 
-/** 列出记忆（供查看器） */
-export async function listMemory(type, limit) {
+/** 列出记忆（供查看器）；cardPath 非空 → 只看本卡 */
+export async function listMemory(type, limit, cardPath) {
     try {
-        const res = await api.memoryList({ type: type || '', limit: limit || 100 });
+        const res = await api.memoryList({ type: type || '', limit: limit || 100, cardName: cardPath || '' });
         return (res && res.success && res.items) ? res.items : [];
     } catch (e) {
         return [];
@@ -119,18 +163,22 @@ export async function listMemory(type, limit) {
 }
 
 /**
- * 记忆库统计（条数 + 分类），供侧栏「设置」分区显示。
+ * 记忆库统计（条数 + 分类 + 遗留桶），供侧栏「设置」分区显示。
  * 桌面版 memory:* 通道已实现（main/memoryStore.js + memory_store.json）；
  * 非 Electron 环境下 chatBridge 会给出失败桩 → 这里退化为 0 条，不报错。
  */
 export async function getMemoryStats() {
     try {
-        if (typeof api.memoryStats !== 'function') return { total: 0, byType: {} };
+        if (typeof api.memoryStats !== 'function') return { total: 0, byType: {}, orphans: 0 };
         const res = await api.memoryStats();
-        if (!res || !res.success) return { total: 0, byType: {} };
-        return { total: Number(res.total) || 0, byType: (res.byType && typeof res.byType === 'object') ? res.byType : {} };
+        if (!res || !res.success) return { total: 0, byType: {}, orphans: 0 };
+        return {
+            total: Number(res.total) || 0,
+            byType: (res.byType && typeof res.byType === 'object') ? res.byType : {},
+            orphans: Number(res.orphans) || 0
+        };
     } catch (e) {
-        return { total: 0, byType: {} };
+        return { total: 0, byType: {}, orphans: 0 };
     }
 }
 
@@ -142,38 +190,148 @@ export async function clearMemory(type) {
     try { return await api.memoryClear(type); } catch (e) { return { success: false }; }
 }
 
+/** D1a：删卡清记忆 */
+export async function clearMemoryByCard(cardPath) {
+    try { return await api.memoryClearByCard(cardPath); } catch (e) { return { success: false }; }
+}
+
+/** D1a：路径变更跟随（rename/move 后记忆跟随） */
+export async function migrateMemoryCard(from, to) {
+    try { return await api.memoryMigrateCard({ from: from || '', to: to || '' }); } catch (e) { return { success: false }; }
+}
+
 /**
- * 根据用户输入检索相关记忆，拼成可注入 system 的文本片段：
- *   - fact 事实 → 「记忆表格」（| 键 | 值 | Markdown 表格）
- *   - summary 摘要 → 要点列表
- * 空则返回 ''。
+ * 一次性迁移（D1）：显示名 → card_path（幂等可重跑）。
+ * @param {Array<{name?, path?}>} cardList 卡列表（library 的轻量投影即可）
+ * 唯一匹配：某显示名只对应一个 path → 绑定；同名多卡/无匹配 → 遗留桶（不丢数据）。
  */
-export async function buildMemoryContext(query) {
-    if (!isMemoryEnabled()) return '';
+export async function migrateMemoryToV2(cardList) {
+    if (!Array.isArray(cardList) || !cardList.length) return { success: false, error: '卡列表为空' };
+    const nameCount = new Map();
+    const nameToPath = new Map();
+    for (const c of cardList) {
+        const name = c && c.name ? String(c.name).trim() : '';
+        const path = c && c.path ? String(c.path) : '';
+        if (!name || !path) continue;   // 空名/空 path 防御
+        nameCount.set(name, (nameCount.get(name) || 0) + 1);
+        nameToPath.set(name, path);
+    }
+    const mappings = [];
+    for (const [name, count] of nameCount) {
+        mappings.push([name, count === 1 ? nameToPath.get(name) : null]);   // 同名多卡 → 遗留桶
+    }
     try {
-        const items = await searchMemory(query, getMemoryLimit());
-        const facts = items.filter((it) => it && it.type === 'fact' && it.content);
-        const summaries = items.filter((it) => it && it.type === 'summary' && it.content);
-        const parts = [];
+        return await api.memoryMigrateData(mappings);
+    } catch (e) {
+        return { success: false, error: (e && e.message) || '' };
+    }
+}
+
+// ---------- 注入文本拼装（I4） ----------
+
+/** Markdown 表格单元格转义：| → \|、换行 → 空格（防表格破行） */
+function escTable(s) {
+    return String(s == null ? '' : s).replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');
+}
+
+/** XML 转义（I4 格式 C；截断已先于转义） */
+function escXml(s) {
+    return String(s == null ? '' : s)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&apos;')
+        .replace(/\r?\n/g, ' ');
+}
+
+/** I4：按格式拼装注入文本（C = XML / markdown = 表格） */
+function buildInjectionText(facts, summaries, format) {
+    const parts = [];
+    if (format === FORMAT_C) {
+        if (facts.length) {
+            parts.push('<memory>');
+            parts.push('<user_profile>');
+            parts.push(facts.map((f) => `${escXml(f.key || '备忘')}：${escXml(f.content)}`).join('\n'));
+            parts.push('</user_profile>');
+            if (summaries.length) {
+                parts.push('<recent_events>');
+                parts.push(summaries.map((s) => '- ' + escXml(s.content)).join('\n'));
+                parts.push('</recent_events>');
+            }
+            parts.push('</memory>');
+        } else if (summaries.length) {
+            parts.push('<memory>');
+            parts.push('<recent_events>');
+            parts.push(summaries.map((s) => '- ' + escXml(s.content)).join('\n'));
+            parts.push('</recent_events>');
+            parts.push('</memory>');
+        }
+    } else {
         if (facts.length) {
             parts.push('### 记忆表格（角色已记住的信息，请在对话中自然运用，不要逐条复述）');
             parts.push('| 记忆 | 内容 |');
             parts.push('| --- | --- |');
-            for (const f of facts) {
-                parts.push('| ' + escTable(f.key || '备忘') + ' | ' + escTable(f.content) + ' |');
-            }
+            for (const f of facts) parts.push('| ' + escTable(f.key || '备忘') + ' | ' + escTable(f.content) + ' |');
         }
         if (summaries.length) {
             parts.push('### 对话摘要（近期发生的事）');
             parts.push(summaries.map((s) => '- ' + s.content).join('\n'));
         }
-        return parts.join('\n\n');
-    } catch (e) {
-        return '';
     }
+    return parts.join('\n\n');
 }
 
-/** Markdown 表格单元格转义：| → \|、换行 → 空格（防表格破行） */
-function escTable(s) {
-    return String(s == null ? '' : s).replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');
+/**
+ * 根据用户输入检索相关记忆，拼成可注入 system 的文本片段（v4.1）。
+ * @param {string} query 用户输入
+ * @param {string} cardPath 当前卡 path（D1 强制隔离）
+ * @returns {Promise<{text: string, meta: object|null}>} I5：meta 供 debug（灰度关时 null）
+ *   D2：有效词 <2 → 降级「本卡最近 N 条（updatedAt DESC）」
+ *   I2：条数 + 估算 token 双预算；I4：格式 C（XML）/ markdown
+ */
+export async function buildMemoryContext(query, cardPath) {
+    if (!isMemoryEnabled()) return { text: '', meta: null };
+    const v2 = isMemoryV2();
+    const limit = getMemoryLimit();
+    const budget = getMemoryInjectTokens();
+    const format = getMemoryFormat();
+    try {
+        let items = [];
+        let degraded = false;
+        const words = tokenizeQuery(query || '');
+        if (words.length < 2) {
+            // D2：有效词 <2 → 降级本卡最近 N 条（updatedAt DESC，存储层保证）
+            degraded = true;
+            items = await searchMemory('', limit, cardPath);
+        } else {
+            items = await searchMemory(words.join(' '), limit, cardPath);
+        }
+        // 只注入未软删/待确认的记忆（P0 confirmed 恒 1；P1 收紧后 0/-1 均不注入）
+        const usable = items.filter((it) => it && it.content && it.confirmed !== -1 && it.confirmed !== 0);
+        const facts = usable.filter((it) => it.type === 'fact');
+        const summaries = usable.filter((it) => it.type === 'summary');
+
+        // I2：条数 + 估算 token 双约束，逐步收窄
+        let factsTake = facts.slice(0, limit);
+        let summariesTake = summaries.slice(0, Math.max(1, Math.floor(limit / 2)));
+        let text = buildInjectionText(factsTake, summariesTake, format);
+        while (text && estimateTokens(text) > budget) {
+            if (summariesTake.length) summariesTake = summariesTake.slice(0, -1);
+            else if (factsTake.length) factsTake = factsTake.slice(0, -1);
+            else break;
+            text = buildInjectionText(factsTake, summariesTake, format);
+        }
+
+        if (!text) return { text: '', meta: v2 ? { injectedCount: 0, cardPath: cardPath || '', isDegraded: degraded, estimatedTokens: 0 } : null };
+        const meta = v2 ? {
+            injectedCount: factsTake.length + summariesTake.length,
+            cardPath: cardPath || '',
+            isDegraded: degraded,
+            estimatedTokens: estimateTokens(text)
+        } : null;
+        return { text, meta };
+    } catch (e) {
+        return { text: '', meta: null };
+    }
 }

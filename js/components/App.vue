@@ -594,6 +594,7 @@ import { useBatch } from '../composables/useBatch.js'; // ✅ 批量操作（多
 import searchIndex, { waitForIdle } from '../utils/searchIndex.js'; // 🚀 高性能搜索索引引擎
 import tokenCache from '../utils/tokenCache.js'; // 🚀 Token 估算缓存
 import { createMemoryGuard } from '../utils/memoryGuard.js'; // 🧠 内存守门员（OOM → 主动降级）
+import { migrateMemoryToV2, isMemoryV2 } from '../composables/chat/useChatMemory.js'; // 🧠 记忆 v4.1 一次性迁移
 import { migrateChatKeys } from '../composables/chat/chatStorage.js'; // 🧭 测卡会话/变量树的键随物理路径迁移
 import { slimCard, ensureCardFull, ensureCardsFull, isSlim, slimStats, SLIM_MIN_LIBRARY } from '../utils/cardSlim.js'; // 🪶 P1a 大库正文懒加载
 
@@ -4792,6 +4793,8 @@ export default {
         //    现在：构建在途时只记一次「补建」，收尾时用最新库重建一次。
         let indexBuilding = false;
         let indexDirty = false;
+        // 🧠 记忆 v4.1 迁移闸门：每会话只跑一次（migrateData 幂等，多跑无害，省一次 IPC）
+        let memoryV2Migrated = false;
         const rebuildSearchIndex = (newLibrary) => {
             if (!newLibrary || newLibrary.length === 0) {
                 buildTaskId++;          // 取消在途任务（库已空，无需补建）
@@ -4827,6 +4830,14 @@ export default {
                     memGuard.checkNow('index-built');
                     // 🪶 P1a：索引与 token 都就绪了，现在才可以把正文换出去（顺序不能反）
                     slimLibraryIfNeeded('index-built');
+                    // 🧠 记忆 v4.1（D1）：一次性迁移「显示名 → card_path」（幂等可重跑；
+                    //    唯一匹配 → 绑定；同名多卡/无匹配 → 遗留桶不丢数据）。挂在索引建完后跑，避开启动高峰。
+                    if (isMemoryV2() && !memoryV2Migrated) {
+                        memoryV2Migrated = true;
+                        migrateMemoryToV2(newLibrary.map((i) => ({ name: i.name, path: i.path })))
+                            .then((r) => { if (r && r.migrated) console.log(`[memory-v2] 已迁移 ${r.migrated} 条记忆到卡路径分桶`); })
+                            .catch(() => {});
+                    }
                 } catch (e) {
                     console.error('⚠️ 搜索索引构建失败:', e);
                 } finally {
@@ -5380,6 +5391,7 @@ export default {
             chatInit: chatEngine.initChat,
             chatResetForCard: resetChatEngineForCard,
             chatClear: chatEngine.clearChat,
+            chatDeleteMessage: chatEngine.deleteMessage,
             chatSend: chatEngine.sendChat,
             chatBuildPayload: chatEngine.buildPayload,
             chatNextSwipe: chatEngine.nextSwipe,
@@ -5524,6 +5536,7 @@ export default {
             chatInit: chatEngine.initChat,
             chatResetForCard: resetChatEngineForCard,
             chatClear: chatEngine.clearChat,
+            chatDeleteMessage: chatEngine.deleteMessage,
             chatSend: chatEngine.sendChat,
             chatBuildPayload: chatEngine.buildPayload,
             chatNextSwipe: chatEngine.nextSwipe,

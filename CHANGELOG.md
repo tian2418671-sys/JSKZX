@@ -1,7 +1,68 @@
-# SillyTavern 角色卡管理器 · v1.0 → v2.2.10 更新汇总
+# SillyTavern 角色卡管理器 · v1.0 → v2.2.11 更新汇总
 
-> 更新周期：2026-08-09 ~ 2026-09-14
+> 更新周期：2026-08-09 ~ 2026-09-19
 > 技术栈：Electron + Vue3 + Tailwind + ECharts
+
+---
+
+> **v2.2.11 专项（2026-09-19）**：测卡记忆 v4.1 桌面移植（对齐移动版 v1.10.26 两轮评审定案）
+> + CT-17/CT-18 逐条删除入口补齐。规格：`docs/规格与计划/桌面版测卡记忆v4.1-实现规格.md`。
+
+---
+
+## 🚀 v2.2.11 测卡记忆 v4.1 + 逐条删除
+
+### 🧠 记忆引擎 v4.1（对齐移动版 v4.1 评审定案，D1/D2/D3/D4/I2/I4/I5/R1/R2）
+- **D1 卡级分桶**：`main/memoryStore.js` 数据形态 `v:1 → v:2`，条目新增
+  `cardPath / confirmed / updatedAt`；`list/search` 支持 `cardName`（携带 cardPath）强制按卡过滤
+  —— **换卡 = 换记忆**，修掉「重名卡串记忆、改名后记忆丢失」的结构性缺陷。读入旧文件自动回填默认字段（遗留桶），首次落盘即 v2
+- **D4 同 key 覆盖**：fact 同 `(key, cardPath)` → UPDATE content（保留首次 `ts`、刷新
+  `updatedAt`），不再无限累积重复事实；单卡 fact 上限 50，超出按 `updatedAt ASC` 删最旧（移动版 §7.1 定案：保护被频繁覆盖的新值）
+- **D2 检索治理**：停用词表 + 有效词 <2 → 降级「本卡最近 N 条（updatedAt DESC）」；排序基准从
+  `ts` 改 `updatedAt`（覆盖后不回退旧序）
+- **D3 事实规则收紧**：新文件 `js/composables/chat/memoryRules.js`（纯函数单一事实源）——
+  排除疑问句/否定假设/引用；空泛键跳过（「我的想法是…/我在思考…」不再产生垃圾 fact）；
+  值截断 30/80（显式指示词 80）；位置规则排除认知活动动词
+- **I2/I4/I5 注入治理**：条数（默认 20→8）+ token 预算（默认 200 / 硬上限 400）双约束逐步收窄；
+  注入格式默认 XML（`<memory><user_profile>…`，含转义，截断先于转义），可切回 markdown 表格；
+  `buildMemoryContext` 返回 `{ text, meta }`（meta = 注入条数/卡路径/是否降级/估算 token，灰度关时 null）
+- **R1/R2 记录准确度**：user 记**原始输入**（宏/正则改写前的 text，不再被 processedText 污染）；
+  assistant 记录返回 id 存 `lastAssistantMemId`，**翻页时 updateMemory 回写实际选中候选**
+  （update 而非 remove+add，防重复；仅最后一条 assistant 生效）
+- **D1a 路径钩子**：`useCardGroups` 重命名分组（目录前缀）/移动单卡两处接 `migrateMemoryCard`
+  （冲突规则：目标优先删源，移动版 §7.2 定案）；`useCardCrud` 删卡两处接 `clearMemoryByCard`
+- **一次性迁移**：启动索引建完后跑 `migrateMemoryToV2`（显示名唯一匹配 → 绑定 path；
+  同名多卡/无匹配 → 遗留桶不丢数据；幂等可重跑；`memoryV2Migrated` 会话闸门）
+- **新 IPC 4 条**：`memory:confirm / memory:migrateData / memory:migrateCard / memory:clearByCard`（preload + chatBridge 桩同步）
+
+### 🗑 CT-17 ｜ 记忆「无法删除」—— 逐条删除入口根本不存在
+- **排查结论**：`memory:remove` IPC 链路一直是通的且有单测；坏在 UI —— `removeMemory()`
+  自 v2.2.7 落地以来**从未被任何组件调用**，用户看到的「记忆表」只在发给 AI 的提示词文本里
+- **修复**：侧栏「设置」分区新增**记忆查看器**：列表（键：值/摘要/消息）+ 每行 🗑 逐条删除
+  （删后统计与列表同步刷新）；「只看本卡 / 全部」切换（card 模式按 cardPath 过滤）；
+  遗留桶提示（`stats().orphans` > 0 时显示「N 条未归属任何卡的旧记忆」）
+
+### 🗑 CT-18 ｜ 测卡聊天记录无法逐条删除
+- **修复**：引擎新增 `deleteMessage(i)`（splice 后立即落盘；assistant 多候选整条删；
+  删空重载开场白）；每条消息气泡下加 🗑 按钮（发送中禁用），模板经本地包装函数转发
+  （规避 CT-14/15 同源的 `ctx.*` 模板坑）；ctx 两处暴露 `chatDeleteMessage`
+- **「重新生成」说明**：assistant 已具备候选级重生成（＋追加 / ↻ 整组重写 / ↳续写），未重复添加
+
+### 🔬 验证
+- `npm test` **267/267**（基线 259 + memoryStore 新增 8 例：v2 回填 / D4 覆盖保留 ts / 卡隔离 /
+  单卡上限按 updatedAt 删 / migrateData 幂等与遗留桶 / migrateCard 四况 / clearByCard / confirm）
+- `npm run build:web` 通过；`get_errors` 12 文件无错
+- **生产构建热测试**（隔离 profile + CDP）：记忆 IPC 全链路 8 步全绿
+  （add → 按卡 list → stats(orphans) → remove → 复查 → D1 同 key 异卡互不覆盖 → D4 覆盖 →
+  migrateCard 跟随 → clearByCard 清理）；应用挂载正常、渲染层错误 0、`crash.log` 无新增
+- D3 规则 Node 直测：误吞反例（「我在思考…」「我的想法是…」）返回空；正常提取（我叫/今年）命中；疑问/假设排除
+- 测试坑：旧「去重合并」用例用 fact+同 key 造数据，D4 语义下会走覆盖 → 改用 message 类型；
+  migrateData 用例同 key 两条也会被 D4 合并 → 用不同 key 造
+
+### 🧾 本次版本动作
+- `package.json` / `package-lock.json`：`2.2.10` → `2.2.11`
+- 文档三件套 + `docs/bugs/`（CT-17/18）+ 规格（`桌面版测卡记忆v4.1-实现规格.md`）
+- 新增热测试脚本 `scripts/_heat-v41.mjs` / `_heat-v41-ui.mjs`
 
 ---
 

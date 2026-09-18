@@ -327,12 +327,42 @@
                         </span>
                         <button @click="refreshMemStats" class="text-cyan-400 hover:text-cyan-300 shrink-0">刷新</button>
                     </div>
+                    <!-- 🧠 v4.1：遗留桶提示（未归属任何卡的旧记忆） -->
+                    <div v-if="(memStats.orphans || 0) > 0" class="text-amber-400/90">⚠ {{ memStats.orphans }} 条未归属任何卡的旧记忆（同名多卡/卡已删时不会自动归属）</div>
                     <div class="flex items-center justify-between gap-2">
                         <span class="text-zinc-600">存于 memory_store.json，与卡片配置互相独立</span>
                         <button v-if="!memClearArmed" @click="armMemClear"
                                 class="text-rose-400 hover:text-rose-300 shrink-0">清空</button>
                         <button v-else @click="doMemClear"
                                 class="text-white bg-rose-600 hover:bg-rose-500 rounded px-1.5 shrink-0">确认清空？</button>
+                    </div>
+                    <!-- 🧠 记忆查看器（CT-17：逐条查看/删除；默认只看本卡） -->
+                    <div class="border-t border-zinc-700/60 pt-1">
+                        <div class="flex items-center justify-between gap-2">
+                            <span class="font-bold text-zinc-300">记忆列表</span>
+                            <div class="flex items-center gap-1">
+                                <button @click="memViewMode = 'card'"
+                                        :class="memViewMode === 'card' ? 'text-cyan-300' : 'text-zinc-500 hover:text-zinc-300'">只看本卡</button>
+                                <span class="text-zinc-700">|</span>
+                                <button @click="memViewMode = 'all'"
+                                        :class="memViewMode === 'all' ? 'text-cyan-300' : 'text-zinc-500 hover:text-zinc-300'">全部</button>
+                            </div>
+                        </div>
+                        <div v-if="memItemsLoading" class="text-zinc-500 py-1">加载中...</div>
+                        <template v-else>
+                            <div v-if="!memItems.length" class="text-zinc-600 py-1">{{ memViewMode === 'card' ? '本卡暂无记忆（发送对话后会自动记录）' : '记忆库为空' }}</div>
+                            <div v-for="it in memItems" :key="it.id"
+                                 class="flex items-start justify-between gap-1.5 py-0.5 border-b border-zinc-800/60 last:border-b-0 group">
+                                <div class="min-w-0">
+                                    <span class="text-cyan-400/80">{{ it.type === 'fact' ? (it.key || '备忘') : (it.type === 'summary' ? '摘要' : '消息') }}：</span>
+                                    <span class="text-zinc-300 break-all">{{ it.content }}</span>
+                                    <span v-if="memViewMode === 'all' && !(it.cardPath)" class="ml-1 text-amber-500/80" title="未归属任何卡">◇</span>
+                                </div>
+                                <button @click="onMemRemove(it)" :disabled="memRemovingId === it.id"
+                                        class="text-rose-400/70 hover:text-rose-300 shrink-0 opacity-60 group-hover:opacity-100 disabled:opacity-30"
+                                        :title="memRemovingId === it.id ? '删除中...' : '删除这条记忆'">🗑</button>
+                            </div>
+                        </template>
                     </div>
                 </div>
             </template>
@@ -396,7 +426,8 @@ import {
     getReplyCount, setReplyCount, getUserName, setUserName, getUserPersona, setUserPersona, getMaxFloors, setMaxFloors
 } from '../composables/chat/useChatSettings.js';
 import {
-    isMemoryEnabled, setMemoryEnabled, getMemoryLimit, setMemoryLimit, getMemoryStats, clearMemory
+    isMemoryEnabled, setMemoryEnabled, getMemoryLimit, setMemoryLimit, getMemoryStats, clearMemory,
+    listMemory, removeMemory
 } from '../composables/chat/useChatMemory.js';
 import {
     loadSessions, setLastSessionId
@@ -495,8 +526,13 @@ export default {
             memEnabled: true,
             memLimit: 20,
             // 长期记忆库统计（memory:stats）：条数 + 分类；清空按钮两段式二次确认
-            memStats: { total: 0, byType: {} },
+            memStats: { total: 0, byType: {}, orphans: 0 },
             memClearArmed: false,
+            // 🧠 记忆查看器（CT-17）：默认只看本卡；逐条删除
+            memViewMode: 'card',
+            memItems: [],
+            memItemsLoading: false,
+            memRemovingId: '',
             // 变量树展开态（路径集合）
             expandedVarPaths: {},
             _unwatch: null
@@ -554,7 +590,11 @@ export default {
         }
     },
     watch: {
-        activeTab(t) { if (t === 'chat' || t === 'plugins' || t === 'settings') this.refreshLocal(); },
+        activeTab(t) {
+            if (t === 'chat' || t === 'plugins' || t === 'settings') this.refreshLocal();
+            // 🧠 切到设置分区时加载记忆列表（CT-17：查看器 + 逐条删除）
+            if (t === 'settings') { this.refreshMemStats(); this.refreshMemItems(); }
+        },
         // chatStorage.hydrate() 完成后重读一次：否则侧栏显示的是「首次运行的默认值」，
         // 而磁盘里其实有上次退出时保存的回复数/用户名/人设。
         storageReady(v) { if (v) this.refreshLocal(); },
@@ -712,11 +752,40 @@ export default {
         setMaxFloors(v) { setMaxFloors(v); this.maxFloors = getMaxFloors(); },
         onMemToggle(v) { setMemoryEnabled(v); this.memEnabled = isMemoryEnabled(); },
         onMemLimit(v) { setMemoryLimit(v); this.memLimit = getMemoryLimit(); },
-    /** 读取记忆库统计（memory:stats → 条数/分类）；失败则退化为 0 条，不影响 UI */
+    /** 读取记忆库统计（memory:stats → 条数/分类/遗留桶）；失败则退化为 0 条，不影响 UI */
     async refreshMemStats() {
         const s = await getMemoryStats();
         this.memStats = s;
         this.memClearArmed = false;
+    },
+    /** 🧠 记忆查看器（CT-17）：加载列表。card 模式只看本卡（按 cardPath 过滤） */
+    async refreshMemItems() {
+        this.memItemsLoading = true;
+        try {
+            const scope = this.memViewMode === 'card' ? (this.cardPath || '') : '';
+            this.memItems = await listMemory('', 100, scope);
+        } catch (e) {
+            this.memItems = [];
+        } finally {
+            this.memItemsLoading = false;
+        }
+    },
+    /** 逐条删除（CT-17）：删除后同时刷新统计与列表，双向反馈 */
+    async onMemRemove(it) {
+        if (!it || !it.id || this.memRemovingId) return;
+        this.memRemovingId = it.id;
+        try {
+            const res = await removeMemory(it.id);
+            if (res && res.success) {
+                this.memItems = this.memItems.filter((x) => x.id !== it.id);
+                await this.refreshMemStats();
+                this.$emit('log', '🗑 已删除记忆：' + String(it.content || '').slice(0, 20));
+            } else {
+                this.$emit('log', '⚠️ 删除记忆失败' + (res && res.error ? ('：' + res.error) : ''));
+            }
+        } finally {
+            this.memRemovingId = '';
+        }
     },
     armMemClear() { this.memClearArmed = true; this.$emit('log', '⚠️ 再次点击「确认清空？」才会删除长期记忆'); },
     async doMemClear() {

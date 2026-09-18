@@ -118,6 +118,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     memoryList: (payload) => ipcRenderer.invoke('memory:list', payload),
     memorySearch: (payload) => ipcRenderer.invoke('memory:search', payload),
     memoryStats: () => ipcRenderer.invoke('memory:stats'),
+    // 🧠 记忆 v4.1（D1 卡级分桶 / D1a 路径跟随）：确认、迁移、删卡清理
+    memoryConfirm: (id, confirmed) => ipcRenderer.invoke('memory:confirm', { id, confirmed }),
+    memoryMigrateData: (mappings) => ipcRenderer.invoke('memory:migrateData', { mappings }),
+    memoryMigrateCard: (payload) => ipcRenderer.invoke('memory:migrateCard', payload || {}),
+    memoryClearByCard: (cardPath) => ipcRenderer.invoke('memory:clearByCard', { cardPath }),
     // 🌍 世界书专属通道：新建世界书文件（网址导入落盘）
     createWorldbook: (params) => ipcRenderer.invoke('wb:create', params),
     // 🌍 世界书专属通道：重命名世界书物理文件

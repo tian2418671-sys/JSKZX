@@ -9,6 +9,7 @@
 import { triggerRef } from 'vue';
 import { normalizeCardData, isCharacterCardData, getCardRejectReason } from '../utils/cardLoader.js';
 import { parsePNGChunk, deepScanForJSON } from '../utils/pngParser.js';
+import { clearMemoryByCard } from './chat/useChatMemory.js';
 
 // 🚀 v2.3 Web Worker：批量角色卡解析（CPU 多线程）。把「JSON.parse + 血统鉴定 +
 //    规范化」从主线程搬到 Worker，与主线程的「自动分类/打标/组装」流水线并行。
@@ -891,6 +892,8 @@ export function useCardCrud({
             const res = await window.electronAPI.deleteFile(item.path);
             if (res.success) {
                 library.value = library.value.filter(i => i.id !== item.id);
+                // 🧠 记忆 v4.1（D1a）：删卡清记忆（桌面删卡=移入回收站，path 不可逆，保留即成孤儿）
+                clearMemoryByCard(item.path);
                 // 如果删除的正是当前打开的卡片，关闭编辑面板
                 if (cardData.value && item.data === cardData.value) reset();
                 await cleanupEmptyCategories(); // 🧹 自动清理空分组
@@ -918,6 +921,7 @@ export function useCardCrud({
             if (res.success) {
                 library.value = library.value.filter(item => item.id !== libItem.id);
                 deleteCardOverlays([libItem.path]); // 🔧 同步清理覆盖层，防配置膨胀
+                clearMemoryByCard(libItem.path); // 🧠 记忆 v4.1（D1a）：删卡清记忆
                 reset();
                 nativeAlert("卡片已安全移入本地回收站。", "info");
             } else {

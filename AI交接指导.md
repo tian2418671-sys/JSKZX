@@ -24,7 +24,7 @@
 | 分支 | 本地 `master`（与 origin 同步） |
 | 构建产物 | `sillytavern-card-manager-<版本>.exe`（NSIS 安装版）+ `latest.yml` + `.exe.blockmap` + zip 绿色版 |
 | 测试 | `npm test` = `node --test "test/**/*.test.mjs"` → 当前 **259 用例全绿**（25 个测试文件） |
-| 规模 | `js/components/` 41 个 SFC、`js/composables/` 36 个模块（含 `chat/` 引擎 16 个）、`js/utils/` 解析与索引工具 |
+| 规模 | `js/components/` 41 个 SFC、`js/composables/` 37 个模块（含 `chat/` 引擎 16 个）、`js/utils/` 解析与索引工具 |
 | 用户习惯 | 说「**一条龙服务**」= 升版本号 → 更新文档三件套 → 打包 → 提交推送 → 发 GitHub Release（含 `latest.yml` 保 OTA） |
 | 典型库 | 日常小库 `E:\AI\酒馆工具\角色卡`（75 张）；压测大库 `I:\03\角色色卡`（11,186 张 / 9.76GB）；2 万卡副本由脚本现造 |
 
@@ -78,7 +78,7 @@ main.js            Electron 主进程（CJS）：app:// 自定义协议、全部
 preload.js         contextBridge 暴露 window.electronAPI（约 30+ API）
 js/entry.js        渲染进程入口（createApp(App) + errorHandler）——注意不是 js/main.js
 js/components/     41 个 SFC（App.vue 为唯一根 + 子组件 + 弹窗）
-js/composables/    36 个模块：业务逻辑主体，App.vue setup 尾部统一注入
+js/composables/    37 个模块：业务逻辑主体，App.vue setup 尾部统一注入
    └ chat/         测卡引擎 16 个模块（useChatEngine / chatStorage / useChatPresets / chatBridge …）
 js/utils/          cardLoader.js（卡解析/规范化）、pngParser.js、searchIndex.js、tokenCache.js、
                    memoryGuard.js、cardSlim.js、tokenEstimate.js
@@ -104,7 +104,7 @@ scripts/           压测与探针（library-dup-*、capacity-check.ps1、measur
 | `cardSlim.js` | 大库正文懒加载（`slimCard` / `ensureCardFull`，>3000 张自动启用） |
 | `tokenEstimate.js` | Token 估算（超长文本防护） |
 
-**`js/composables/`（业务逻辑主体，共 36 个模块，含 `chat/` 16 个）**
+**`js/composables/`（业务逻辑主体，共 37 个模块，含 `chat/` 16 个）**
 
 | 模块 | 职责 |
 |---|---|

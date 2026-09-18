@@ -29,7 +29,7 @@ import {
 import {
     getReplyCount, getUserName, getUserPersona, getMaxFloors
 } from './useChatSettings.js';
-import { buildMemoryContext, recordMessage, recordFact, extractFacts, isMemoryEnabled } from './useChatMemory.js';
+import { buildMemoryContext, recordMessage, recordFact, extractFacts, isMemoryEnabled, updateMemory } from './useChatMemory.js';
 import {
     loadPlugins, mergePluginMacros, collectPluginSystemPrompts, collectPluginRegex
 } from './useChatPlugins.js';
@@ -231,10 +231,11 @@ export function useChatEngine(deps = {}) {
             const presetParams = Object.assign({}, getPresetParams(presetData), paramOverrides || {});
             const pluginSys = collectPluginSystemPrompts(plugins.value);
 
-            let memCtx = '';
+            let memCtx = { text: '', meta: null };
             if (isMemoryEnabled()) {
+                // 🧠 v4.1：D1 按 cardPath 强制隔离（换卡=换记忆）；返回 { text, meta }
                 const lastUser = [...msgs].reverse().find((m) => m.role === 'user');
-                memCtx = await buildMemoryContext(lastUser ? messageText(lastUser) : '');
+                memCtx = await buildMemoryContext(lastUser ? messageText(lastUser) : '', cardPath());
             }
 
             const sysTexts = presetMsgs.filter((m) => m.role === 'system').map((m) => m.content);
@@ -242,7 +243,7 @@ export function useChatEngine(deps = {}) {
             const persona = getUserPersona();
             if (persona) sysTexts.push(applyMacros('### 用户(你)的角色设定\n{{persona}}', macros));
             sysTexts.push(...pluginSys);
-            if (memCtx) sysTexts.push(memCtx);
+            if (memCtx.text) sysTexts.push(memCtx.text);
             const systemText = sysTexts.filter(Boolean).join('\n\n');
 
             const nonSysMsgs = presetMsgs.filter((m) => m.role !== 'system');
@@ -288,9 +289,10 @@ export function useChatEngine(deps = {}) {
         if (persona) sysParts.push(applyMacros('### 用户(你)的角色设定\n{{persona}}', macros));
         sysParts.push(...collectPluginSystemPrompts(plugins.value));
         if (isMemoryEnabled()) {
+            // 🧠 v4.1：D1 按 cardPath 强制隔离；返回 { text, meta }
             const lastUser = [...msgs].reverse().find((m) => m.role === 'user');
-            const memCtx = await buildMemoryContext(lastUser ? messageText(lastUser) : '');
-            if (memCtx) sysParts.push(memCtx);
+            const memCtx = await buildMemoryContext(lastUser ? messageText(lastUser) : '', cardPath());
+            if (memCtx.text) sysParts.push(memCtx.text);
         }
         const systemText = sysParts.filter(Boolean).join('\n\n');
         const messages = chatHistory.map((m) => ({ role: m.role, content: applyMacros(m.content, macros) }));
@@ -362,10 +364,17 @@ export function useChatEngine(deps = {}) {
                 swipes.push(await requestReply(payload, type, n === 0, paramOverrides));
             }
             chatMessages.value.push({ role: 'assistant', swipes, index: 0 });
-            // 长期记忆（不阻塞；错误占位由 recordMessage 过滤）
-            recordMessage('user', processedText, cardName());
-            if (swipes[0]) recordMessage('assistant', swipes[0], cardName());
-            for (const f of extractFacts(processedText)) recordFact(f.key, f.value, cardName());
+            // 🧠 v4.1 长期记忆（不阻塞；错误占位由 recordMessage 过滤）：
+            // · R1：记「原始输入」而非 processedText —— 宏/正则改写后的文本不是用户说的话；
+            // · R2：记「实际选中候选」的返回 id 存 lastAssistantMemId，翻页时 update 回写；
+            // · D1：卡标识传 { path, name } 对象（recordMessage 兼容旧 string）。D3 事实提取同样吃原话。
+            const card = { path: cardPath(), name: cardName() };
+            recordMessage('user', text, card);
+            if (swipes[0]) {
+                const r = await recordMessage('assistant', swipes[0], card);
+                lastAssistantMemId = (r && r.success && r.id) ? r.id : '';
+            } else lastAssistantMemId = '';
+            for (const f of extractFacts(text)) recordFact(f.key, f.value, card);
         } catch (e) {
             chatMessages.value.push({ role: 'assistant', swipes: ['⚠ 请求异常: ' + (e && e.message ? e.message : e)], index: 0 });
             nativeAlert && nativeAlert('请求异常: ' + (e && e.message ? e.message : e), 'error');
@@ -376,6 +385,8 @@ export function useChatEngine(deps = {}) {
     }
 
     const cardName = () => ((safeData && safeData.value) || {}).name || '';
+    /** R2：最后一条 assistant 消息对应的记忆条目 id（翻页时 update 回写实际候选，非 remove+add） */
+    let lastAssistantMemId = '';
 
     // ==================== swipe ====================
     /**
@@ -387,11 +398,26 @@ export function useChatEngine(deps = {}) {
         const m = chatMessages.value[i];
         if (!m || !Array.isArray(m.swipes) || m.swipes.length < 2) return;
         chatMessages.value[i] = shiftSwipe(m, 1);
+        rewriteLastAssistantMemory(i);
     }
     function prevSwipe(i) {
         const m = chatMessages.value[i];
         if (!m || !Array.isArray(m.swipes) || m.swipes.length < 2) return;
         chatMessages.value[i] = shiftSwipe(m, -1);
+        rewriteLastAssistantMemory(i);
+    }
+    /** R2：翻页后把「实际选中的候选」回写到该条 assistant 记忆（update 而非 remove+add，防重复；
+     *  仅对最后一条 assistant 消息生效 —— 记忆里只记了它的 id） */
+    function rewriteLastAssistantMemory(i) {
+        if (!lastAssistantMemId) return;
+        const m = chatMessages.value[i];
+        if (!m || m.role !== 'assistant') return;
+        const last = chatMessages.value.length - 1;
+        if (i !== last) return;
+        const chosen = Array.isArray(m.swipes) ? m.swipes[m.index || 0] : '';
+        if (!chosen) return;
+        // fire-and-forget：卡名取当前卡（卡内翻页时不变）；失败静默
+        updateMemory(lastAssistantMemId, { content: 'AI: ' + String(chosen).trim() });
     }
     /** 追加一条新候选（再生成一个） */
     async function moreSwipe(i, paramOverrides = {}) {
@@ -581,6 +607,25 @@ export function useChatEngine(deps = {}) {
         saveCurrentChat();
     }
 
+    /**
+     * 删除单条聊天记录（CT-17：用户反馈逐条清理需求）。规则：
+     *  · assistant 消息带多候选时整条删（候选组是一体的，删单候选会破坏 swipe 语义）；
+     *  · 删后若会话为空 → 重载开场白（与 clearChat 同语义，不产生空窗会话）；
+     *  · 立即落盘（拖到后面窗口一关就白删了）。
+     */
+    function deleteMessage(i) {
+        const msgs = chatMessages.value;
+        const m = msgs[i];
+        if (!m || chatSending.value) return false;
+        msgs.splice(i, 1);
+        if (!msgs.length) {
+            if (activeSessionId.value) persistMessages(cardPath(), activeSessionId.value, []);
+            pushFirstMessage();
+        }
+        saveCurrentChat();
+        return true;
+    }
+
     /** 切卡时调用：重建会话列表与变量引擎，重载开场白 */
     function resetForCard() {
         activeSessionId.value = '';
@@ -615,6 +660,7 @@ export function useChatEngine(deps = {}) {
         // 动作
         initChat, resetForCard, clearChat, sendChat, buildPayload, requestReply,
         nextSwipe, prevSwipe, moreSwipe, regenerateSwipe, continueSwipe,
+        deleteMessage,
         newSession, switchSession, renameSessionById, removeSessionById, saveCurrentChat,
         resetVars, undoVar, setVar,
         segmentsOf, renderTpl, collectActivatedWbText,

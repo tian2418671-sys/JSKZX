@@ -17,8 +17,9 @@ if (typeof window !== 'undefined' && !real) {
 /** 生成一个失败桩（保证调用方 try/catch 或降级逻辑能正常工作） */
 const stub = (name) => async () => ({ success: false, error: `[chatBridge] ${name} 在非 Electron 环境不可用` });
 
-/** 记忆通道：preload 未暴露时用桩兜底，避免直接抛 undefined is not a function */
-const MEMORY_METHODS = ['memoryAdd', 'memoryUpdate', 'memoryRemove', 'memoryClear', 'memoryList', 'memorySearch', 'memoryStats'];
+/** 记忆通道：preload 未暴露时用桩兜底，避免直接抛 undefined is not a function
+ *  🧠 v4.1 追加：memoryConfirm / memoryMigrateData / memoryMigrateCard / memoryClearByCard */
+const MEMORY_METHODS = ['memoryAdd', 'memoryUpdate', 'memoryRemove', 'memoryClear', 'memoryList', 'memorySearch', 'memoryStats', 'memoryConfirm', 'memoryMigrateData', 'memoryMigrateCard', 'memoryClearByCard'];
 
 const FALLBACK = {
     encryptSecret: async (v) => ({ success: true, value: v }),   // 无加密环境回退明文

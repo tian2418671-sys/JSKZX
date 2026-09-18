@@ -1363,6 +1363,11 @@ app.whenReady().then(() => {
   ipcMain.handle('memory:list', memoryHandler((s, p) => s.list(p)));
   ipcMain.handle('memory:search', memoryHandler((s, p) => s.search(p)));
   ipcMain.handle('memory:stats', memoryHandler((s) => ({ success: true, ...s.stats() })));
+  // 🧠 v4.1（D1/D1a）：卡级分桶 + 路径变更跟随 + 删卡清理（移动版 v4.1 同名契约）
+  ipcMain.handle('memory:confirm', memoryHandler((s, p) => s.confirm(p && p.id, p && p.confirmed)));
+  ipcMain.handle('memory:migrateData', memoryHandler((s, p) => s.migrateData(p && p.mappings)));
+  ipcMain.handle('memory:migrateCard', memoryHandler((s, p) => s.migrateCard(p || {})));
+  ipcMain.handle('memory:clearByCard', memoryHandler((s, p) => s.clearByCard(typeof p === 'string' ? p : (p && p.cardPath))));
 
   // ==========================================
   // 🛡️ 统一持久化中枢（app_config.json 最高权威）

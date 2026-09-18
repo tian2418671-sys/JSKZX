@@ -675,6 +675,12 @@
                                             :render-text="renderChatHtml"
                                         />
                                     </div>
+                                    <!-- 🗑 删除本条（CT-17）；assistant 多候选时整条删 -->
+                                    <div class="mt-0.5 text-[10px]" :class="msg.role === 'user' ? 'text-right' : ''">
+                                        <button @click="onChatDeleteMessage(idx)" :disabled="chatSending"
+                                                class="text-zinc-600 hover:text-rose-400 disabled:opacity-30 transition-colors"
+                                                :title="msg.role === 'assistant' && (msg.swipes || []).length > 1 ? '删除本条（含全部候选）' : '删除本条'">🗑</button>
+                                    </div>
                                     <!-- 🔄 swipe 工具条（常显：只有 1 个候选时 ◀▶ 置灰，让人看得出有候选机制） -->
                                     <div v-if="msg.role === 'assistant'" class="mt-1 flex items-center gap-1.5 text-[10px] text-zinc-500">
                                         <button @click="onChatPrevSwipe(idx)" :disabled="(msg.swipes || []).length < 2"
@@ -1919,6 +1925,11 @@ export default {
         //    ctx 是 setup 内部的局部变量，**没有交给模板作用域**（之前被这个坑挡住的一共 3 处：
         //    清空记录 / ◀ / ▶，点了都没反应）。一律走本地包装函数转发（与 onChatSend 同一手法）。
         const onChatClear = () => { if (ctx.chatClear) ctx.chatClear(); };
+        // 🗑 删除单条聊天记录（CT-17）；删除后列表变化，滚动到底保持视觉稳定
+        const onChatDeleteMessage = (i) => {
+            if (!ctx.chatDeleteMessage) return;
+            if (ctx.chatDeleteMessage(i)) scrollChatToBottom();
+        };
         const onChatPrevSwipe = (i) => {
             if (ctx.chatPrevSwipe) ctx.chatPrevSwipe(i);
             scrollChatToBottom();
@@ -1951,7 +1962,7 @@ export default {
             chatMessages, chatDraft, chatSending, cardName,
             segmentsOfMsg, renderChatHtml, chatVarsJsonSafe, chatContainer,
             onChatSend, onChatMoreSwipe, onChatRegenerate, onChatContinue,
-            onChatClear, onChatPrevSwipe, onChatNextSwipe,
+            onChatClear, onChatPrevSwipe, onChatNextSwipe, onChatDeleteMessage,
             scrollChatToBottom, chatSegEnabled, toggleChatSeg,
             // ⚙ 测卡工作区侧边栏（7 分区）
             sidebarVisible, sidebarWidth, chatStorageReady,
