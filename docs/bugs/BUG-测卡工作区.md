@@ -254,6 +254,31 @@
 - **验证**：同 CT-17；启动冒烟无 `[Vue 错误]`。
 - **来源**：用户反馈（2026-09-19）
 
+### CT-19 ｜ 🔴 卡内 HTML 面板缺 jQuery/Vue 全局库 → `$ is not defined`（CT-13 修复漏了分支）
+- **现象**：测卡区渲染带 jQuery 的卡内面板（实测卡：`1786851144596_MC_liteby_Crooked2_1.png`，
+  开场白里是 `<script>$("body").load("https://cdn.jsdelivr.net/gh/CrHouse815/-MC-_lite-@main/dist/index.html")</script>`）时，
+  控制台报 3 条 `Uncaught ReferenceError: $ is not defined`，来源是 `app://index.html/__jsk_seg__/N-*.html`，面板空白。
+- **根因**（**只验证不猜**）：`buildHtmlSrcdoc()` 把面板内容分 4 种形状分别补壳，但只有前两种把
+  `vendorTags`（`<script src="app://index.html/vendor/chat-host.js">`，即 jQuery/Vue/lodash/zod 全局）拼进文档；
+  **后两种（「只有 `<body>`」与「只有 `</head>`/纯片段」）用的是 `META_TAGS + prelude`，把 vendor 整个丢了** ——
+  桥接（`getVariables` 等）在、全局库不在 → 模板顶层的 `$` 直接 `ReferenceError`，模块顶层就死。
+  > 与 CT-13 同根（同一批全局库），但 CT-13 只修了「会不会注入」，没有覆盖全部分支。
+- **复现（Node 直调 `buildHtmlSrcdoc`，vendor 传入非空）**：
+  `完整文档 <html>` ✅ / `准完整 <head>…` ✅ / `仅 <body>` ❌ VENDOR-LOST / `</head>+<body> 围栏残渣` ❌ / `纯片段 <div>` ❌。
+  （既有单测只用了 `<head>…` 形状 + `''` vendor，恰好避开漏掉的那两个分支。）
+- **修复**：两个回退分支同样拼上 `vendorTags`（`META_TAGS + vendorTags + prelude`），
+  并给单测补上「非空 vendor × 4 种形状」的断言。
+- **验证**（全部实测，2026-09-19）：
+  1. `test/chatRender.test.mjs` 新增 2 例（4 种形状带 vendor + 空 vendor 不凭空插入）→ 13/13 绿；`npm test` 全绿；
+  2. 真实卡（隔离 profile + 调试端口）：打开 `MC_lite` 卡 → 切测卡页签 → 控制台
+     **`$ is not defined` 由 3 条降到 0 条**，且卡内面板应用**真的启动**了
+     （日志出现 `[GameLayout] MClite布局已加载` / `[App] MC房子应用已挂载` / `[MvuStore] MVU变量框架未加载，使用模拟数据`）；
+  3. 合成自检卡（隔离临时库，面板脚本自己上报）：`{ jQuery: true, Vue: true, zod: true }`，
+     且生成的段文档里 `vendor/chat-host.js` 位于模板脚本**之前**。
+- **防再犯**：**多分支生成同一类文档时，任何「只在一部分分支里加的公共注入」都要用参数化测试锁住全部形状**
+  —— 这次就是「修了主路径、漏了回退分支」。
+- **来源**：本轮插件页签回归测试时发现（2026-09-19）
+
 ---
 
 ## 四、本领域改动前的自检清单

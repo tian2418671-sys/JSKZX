@@ -448,6 +448,103 @@
                     </div>
                 </div>
 
+                <!-- 🧩 卡内插件：当前这张卡自带的酒馆插件（酒馆助手脚本 + 变量 + 第三方写卡扩展） -->
+                <div v-if="currentTab === 'plugins'">
+                    <div class="bg-zinc-900/90 border border-zinc-800 rounded-lg p-4 mb-4 shadow-sm">
+                        <!-- 标题栏 -->
+                        <div class="flex items-center justify-between mb-3 pb-2 border-b border-zinc-800 flex-wrap gap-2">
+                            <div class="flex items-center gap-2 flex-wrap min-w-0">
+                                <span class="text-sm font-bold text-cyan-400">🧩 卡内插件（跟随卡片保存）</span>
+                                <span class="text-xs px-2 py-0.5 bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 rounded-full font-mono">{{ cardPluginCount }} 个脚本</span>
+                                <span v-if="pluginScriptGroup" class="text-[10px] px-2 py-0.5 bg-zinc-800 text-zinc-400 border border-zinc-700 rounded-full font-mono truncate max-w-[320px]" :title="pluginScriptGroup.sourcePath">{{ pluginScriptGroup.sourcePath }}</span>
+                            </div>
+                            <div class="flex items-center gap-2 shrink-0">
+                                <button @click="currentTab = 'regex'" class="px-2.5 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border border-zinc-700 text-xs rounded transition" title="卡内正则脚本在「正则脚本」页签编辑">⚡ 正则 {{ regexScripts.length }} 条</button>
+                                <button v-if="pluginScriptGroup && pluginScriptGroup.writable" @click="addPluginScript" class="px-2.5 py-1 bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-medium rounded shadow transition">➕ 添加脚本</button>
+                            </div>
+                        </div>
+
+                        <!-- 酒馆助手脚本（可编辑） -->
+                        <template v-if="pluginScriptGroup">
+                            <div v-if="pluginScriptGroup.shapeWarning" class="mb-3 p-2.5 rounded border border-amber-500/40 bg-amber-500/10 text-[11px] text-amber-300">⚠️ {{ pluginScriptGroup.shapeWarning }}</div>
+
+                            <div v-if="pluginScriptGroup.items.length" class="space-y-3">
+                                <div v-for="(item, index) in pluginScriptGroup.items" :key="scriptUid(item, index)"
+                                     class="bg-zinc-800/80 border border-zinc-700/80 rounded-lg overflow-hidden">
+                                    <!-- 条目头 -->
+                                    <div class="flex items-center gap-2 p-2.5 flex-wrap">
+                                        <span class="text-[10px] font-mono text-zinc-500 shrink-0">#{{ index + 1 }}</span>
+                                        <input :value="item.name" @input="updatePluginItemField(item, 'name', $event.target.value)"
+                                               class="flex-1 min-w-[140px] bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-100 focus:border-cyan-500 focus:outline-none"
+                                               placeholder="脚本名称">
+                                        <span class="text-[10px] px-1.5 py-0.5 rounded border shrink-0"
+                                              :class="item.type === 'script' ? 'bg-cyan-500/10 text-cyan-400 border-cyan-500/30' : 'bg-zinc-800 text-zinc-400 border-zinc-700'">{{ item.type }}</span>
+                                        <span v-if="item.legacy" class="text-[10px] px-1.5 py-0.5 rounded bg-violet-500/10 text-violet-300 border border-violet-500/30 shrink-0" title="旧版结构：脚本字段包在外层 value 对象里，编辑会写回内层">旧版结构</span>
+                                        <span class="text-[10px] text-zinc-500 font-mono shrink-0 whitespace-nowrap">{{ item.lines }} 行 / {{ item.chars }} 字符</span>
+                                        <label class="flex items-center gap-1.5 text-[11px] shrink-0 cursor-pointer select-none">
+                                            <input type="checkbox" :checked="item.enabled" @change="updatePluginItemField(item, 'enabled', $event.target.checked)" class="rounded bg-zinc-900 border-zinc-700 accent-cyan-500">
+                                            <span :class="item.enabled ? 'text-emerald-400 font-bold' : 'text-zinc-500'">{{ item.enabled ? '已启用' : '已停用' }}</span>
+                                        </label>
+                                        <button @click="togglePluginItem(scriptUid(item, index))"
+                                                class="px-2 py-1 rounded text-[11px] border border-zinc-600 text-zinc-300 hover:bg-zinc-700 hover:text-white transition shrink-0">{{ isPluginItemExpanded(scriptUid(item, index)) ? '▲ 收起' : '▼ 展开编辑' }}</button>
+                                        <button @click="openPluginFullscreen(scriptUid(item, index))"
+                                                class="px-2 py-1 rounded text-[11px] border border-zinc-600 text-zinc-300 hover:bg-zinc-700 hover:text-white transition shrink-0" title="全屏放大编辑（复制/查找/格式化更方便）">⛶ 放大</button>
+                                        <button v-if="pluginScriptGroup.writable" @click="deletePluginScript(item, index)"
+                                                class="p-1 text-zinc-400 hover:text-rose-400 rounded hover:bg-zinc-700/50 transition text-xs shrink-0" title="删除此脚本">🗑️</button>
+                                    </div>
+                                    <!-- 展开：复用项目已有 CodeEditor（CodeMirror：高亮/行号/查找/格式化） -->
+                                    <div v-if="isPluginItemExpanded(scriptUid(item, index))" class="border-t border-zinc-700/80">
+                                        <CodeEditor :model-value="item.content" language="javascript" height="420px"
+                                                    @update:model-value="updatePluginItemField(item, 'content', $event)" />
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div v-else-if="!pluginScriptGroup.shapeWarning" class="text-center py-6 border border-dashed border-zinc-800 rounded-lg text-zinc-500 text-xs">
+                                <p class="mb-2">该卡识别到脚本容器，但里面是 0 条脚本（{{ pluginScriptGroup.sourcePath }}）</p>
+                                <button v-if="pluginScriptGroup.writable" @click="addPluginScript" class="text-cyan-400 hover:underline">+ 新增第一条脚本</button>
+                            </div>
+                        </template>
+
+                        <div v-else class="text-center py-6 border border-dashed border-zinc-800 rounded-lg text-zinc-500 text-xs">
+                            <p class="mb-2">此卡 extensions 里没有发现酒馆助手脚本容器（tavern_helper / TavernHelper_scripts）</p>
+                            <button @click="addPluginScript" class="text-cyan-400 hover:underline">+ 为这张卡新建脚本容器并写入第一条脚本</button>
+                        </div>
+
+                        <!-- 诊断：本卡 extensions 现有键（空态时告诉用户「到底有什么」） -->
+                        <div v-if="cardPluginInfo.diagnostics.length" class="mt-4 pt-3 border-t border-zinc-800">
+                            <p class="text-[10px] text-zinc-500 mb-1.5">本卡 extensions 现有键（共 {{ cardPluginInfo.diagnostics.length }} 个）：</p>
+                            <div class="flex flex-wrap gap-1.5">
+                                <span v-for="d in cardPluginInfo.diagnostics" :key="d.key" class="text-[10px] font-mono px-1.5 py-0.5 rounded bg-zinc-800 border border-zinc-700 text-zinc-400">
+                                    {{ d.key }} <span class="text-zinc-600">{{ d.type }}</span>
+                                </span>
+                            </div>
+                            <p v-if="cardPluginInfo.foreignKeys.length" class="mt-2 text-[10px] text-amber-400/90">⚠️ 未识别的扩展数据：{{ cardPluginInfo.foreignKeys.map(f => f.key).join('、') }}</p>
+                        </div>
+
+                        <!-- 其它插件数据（只读 JSON，避免误改结构） -->
+                        <div v-if="pluginExtraGroups.length" class="mt-4 space-y-3">
+                            <div v-for="group in pluginExtraGroups" :key="group.key" class="bg-zinc-800/60 border border-zinc-700/70 rounded-lg overflow-hidden">
+                                <div class="flex items-center gap-2 p-2.5">
+                                    <span class="text-sm shrink-0">{{ group.icon }}</span>
+                                    <div class="flex-1 min-w-0">
+                                        <div class="text-xs font-medium text-zinc-200 truncate">{{ group.label }}</div>
+                                        <div class="text-[10px] text-zinc-500 font-mono truncate" :title="group.sourcePath">{{ group.sourcePath }}</div>
+                                    </div>
+                                    <span class="text-[10px] text-zinc-500 font-mono shrink-0">{{ group.sizeHint }}</span>
+                                    <span class="text-[10px] px-1.5 py-0.5 rounded bg-zinc-900 text-zinc-500 border border-zinc-700 shrink-0">只读</span>
+                                    <button v-if="group.kind !== 'value'" @click="togglePluginItem(group.key)"
+                                            class="px-2 py-1 rounded text-[11px] border border-zinc-600 text-zinc-300 hover:bg-zinc-700 hover:text-white transition shrink-0">{{ isPluginItemExpanded(group.key) ? '▲ 收起' : '▼ 查看' }}</button>
+                                </div>
+                                <div v-if="isPluginItemExpanded(group.key)" class="border-t border-zinc-700/80">
+                                    <div v-if="group.kind === 'value'" class="p-3 text-xs text-zinc-300 font-mono break-all">{{ group.text }}</div>
+                                    <CodeEditor v-else :model-value="pluginJsonText(group)" language="json" height="360px" readonly />
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- 📊 渲染预览器：应用卡内渲染型正则脚本，实时预览 HTML 美化/状态栏效果 -->
                 <div v-if="currentTab === 'statusbar'">
                     <div class="bg-zinc-900/90 border border-zinc-800 rounded-lg p-4 shadow-sm">
@@ -2165,6 +2262,20 @@ export default {
             loaderUrls: ctx.loaderUrls,
             injectStatusbarTemplate: ctx.injectStatusbarTemplate,
             injectStatusbarPrompt: ctx.injectStatusbarPrompt,
+            // 🧩 卡内插件页签（角色卡自带酒馆插件：酒馆助手脚本 / 变量 / 第三方写卡扩展）
+            cardPluginInfo: ctx.cardPluginInfo,
+            pluginScriptGroup: ctx.pluginScriptGroup,
+            pluginExtraGroups: ctx.pluginExtraGroups,
+            cardPluginCount: ctx.cardPluginCount,
+            scriptUid: ctx.scriptUid,
+            isPluginItemExpanded: ctx.isPluginItemExpanded,
+            togglePluginItem: ctx.togglePluginItem,
+            openPluginFullscreen: ctx.openPluginFullscreen,
+            closePluginFullscreen: ctx.closePluginFullscreen,
+            updatePluginItemField: ctx.updatePluginItemField,
+            addPluginScript: ctx.addPluginScript,
+            deletePluginScript: ctx.deletePluginScript,
+            pluginJsonText: ctx.pluginJsonText,
             // ⚙ 测卡头部状态条：API 配置已由右侧抽屉「设置」分区承担，此处只读展示摘要
             //    （原 API: / Key: / Model: / 拉取模型 一整条已移除）
             apiEndpoint: ctx.apiEndpoint,

@@ -1,0 +1,29 @@
+{
+  "_说明": "声明式检查：不写 Python 也能加检查。字段：name 名字 / cmd 命令数组 / tags 标签 / severity(blocker|warn) / timeout 秒 / expect_exit 期望退出码 / ok_pattern 输出必须含 / fail_pattern 输出含即失败 / paths 责任路径(--changed 用)",
+  "checks": [
+    {
+      "name": "语法：探针脚本（scripts/*.mjs）",
+      "cmd": [
+        "node",
+        "-e",
+        "const fs=require('fs'),{execFileSync}=require('child_process');const files=fs.readdirSync('scripts').filter(f=>/\\.m?js$/.test(f));let bad=0;for(const f of files){try{execFileSync(process.execPath,['--check','scripts/'+f],{stdio:'pipe'});}catch(e){bad++;console.log('✗',f);}}if(bad){console.log(bad+'/'+files.length+' 个脚本语法错误');process.exit(1);}console.log('OK '+files.length+' 个探针脚本语法通过');"
+      ],
+      "tags": ["syntax"],
+      "severity": "blocker",
+      "timeout": 120,
+      "ok_pattern": "OK ",
+      "paths": ["scripts/*.mjs", "scripts/*.cjs", "scripts/*.js"]
+    },
+    {
+      "name": "卫生：preload 暴露面统计",
+      "cmd": [
+        "node",
+        "-e",
+        "const t=require('fs').readFileSync('preload.js','utf8');const n=(t.match(/^\\s{4}[A-Za-z_$][\\w$]*\\s*:/gm)||[]).length;console.log('preload 暴露 '+n+' 个 API（供人工确认没有误加）');"
+      ],
+      "tags": ["info"],
+      "severity": "warn",
+      "paths": ["preload.js"]
+    }
+  ]
+}

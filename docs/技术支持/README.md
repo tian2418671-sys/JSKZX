@@ -35,8 +35,11 @@
 
 | 脚本 | 用途 |
 |---|---|
+| `check.py`（Python） | **一键检查**：语法 / 单测 / 构建 / 文档链接 / 版本一致性 / 对外文件禁词 / 仓库卫生。`python scripts/check.py` 全跑、`--fast` 跳过 #slow、`--only docs,#git`、`--changed` 只跑命中改动的、`--strict` 提醒也算失败、`--json out.json` 出报告、`--list` 看清单、`--new NAME` 生成扩展模板。检查项全在 `scripts/pychecks/`（加检查**不用改运行器**，见 `pychecks/README.md`） |
+| `checkkit.py`（Python） | 上述框架的类型与工具（`Check` / `Context` / `ok()/warned()/failed()`），扩展模块直接 `from checkkit import ...` |
 | `release-check.mjs` | **发版前置自查**（语法 + 单测 + 构建 + 文档一致性 + git 状态），`--e2e dev/prod` 加跑端到端 |
-| `check-doc-links.mjs` | 校验全仓库 markdown 的相对链接能否解析（当前 61 文件 / 106 条全有效） |
+| `check-doc-links.mjs` | 校验全仓库 markdown 的相对链接能否解析（当前 58 文件 / 137 条全有效） |
+| `extract-release-notes.mjs` | 从 `RELEASE_NOTES.md` 抽取指定版本段（默认当前 `package.json` 版本）到临时文件，供 `gh release create --notes-file` 使用——**不要手抄正文** |
 | `dev-run.ps1` | dev 启动（含终端编码修正） |
 
 ### 压测与容量
@@ -67,6 +70,7 @@
 | 脚本 | 用途 |
 |---|---|
 | `chat-sidebar-test.mjs` | 测卡侧栏 7 分区（生产 `app://` 构建） |
+| `card-plugins-test.mjs` | **卡内插件页签**端到端（黑盒 DOM）：页签存在 / 面板渲染 / 徽标与条目数一致 / 展开内嵌代码编辑器 / ⛶ 全屏放大与 Esc 关闭 / 只读分组可展开 / 无渲染层报错。用法：实例带 `--remote-debugging-port=9351` + `$env:CDP_PORT="9351"; node scripts/card-plugins-test.mjs`；可选 `PLUGIN_CARD_TERMS`（找带插件卡的搜索词）、`TEST_ADD=1`（额外验「空容器卡一键新建」，**仅改内存不保存**） |
 | `chat-engine-test.mjs` | 测卡引擎管线（宏 / 世界书 / EJS / payload / 分段渲染 / swipe） |
 | `builtin-cat-test.mjs` | 内置大分类定制：改名 / 隐藏 / 恢复 / 清理还原（**结束时还原，不破坏用户数据**） |
 | `ai-category-modal-smoke.mjs` | AI 归类「自动建类」UI 冒烟（🆕 新建徽标与 optgroup 渲染） |
@@ -107,6 +111,7 @@
 | `scan-rejected-cards.cjs` | 在万卡库里找出「像角色卡但被血统鉴定拒绝」的 JSON |
 | `scan-theme-accent.cjs` | 扫描浅色主题下可能看不清的强调色文字类（-200/-300/-400）与未覆盖的深色类 |
 | `scan-theme-gaps.cjs` | 精确扫描：使用中但 `[data-theme="light"]` 未覆盖的深色类（含透明度变体） |
+| `_probe-card-plugins.mjs` | **卡内插件容器形态 / 解析开销**（**离线**，不需起应用）：`node scripts/_probe-card-plugins.mjs "<库根>" [--perf] [张数]`。输出各容器路径（`tavern_helper.scripts` / 键值对数组形态 / 旧版 `TavernHelper_scripts` / `regex_scripts` / MVU / 第三方写卡扩展…）命中的卡数与样例，并列出脚本条目字段组合；`--perf` 另给 `harvestCardPlugins()` 单次耗时（最重 5 张 + 均值）。**改任何「读写卡内插件」的功能前先跑它** —— 这是判断「要兼容哪些形态」的唯一依据（实测 76 张库：主流形态 14 张、键值对数组 11 张、旧版 4 张） |
 
 > ⚠️ **探针铁律**：读应用单例状态**必须**走 `window.__jskDiag.*`（应用真正使用的那份），
 > 自己 `import('/js/utils/xxx.js')` 会因 Vite 的 `?t=` 查询参数拿到**另一个模块实例**，读数全错。

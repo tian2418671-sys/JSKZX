@@ -172,9 +172,13 @@ export function buildHtmlSrcdoc(html, varsJson, panelId, vendorTagsRaw, opts) {
             // 模板自带 <head>：预置插到 head 开头（charset 已在模板或下面的合成分支里）
             return injectIntoHead(doc, (vendorTags || '') + prelude);
         }
-        return injectIntoHead('<!DOCTYPE html><html><head></head>' + body + '</html>', META_TAGS + prelude);
+        // ⚠️ CT-19：这两个回退分支以前只拼 META_TAGS + prelude，
+        //    把 vendorTags（jQuery/Vue/lodash/zod 全局）整段丢了 ——
+        //    卡内状态栏模板顶层直接引用 `$`/`Vue` → ReferenceError → 面板空白。
+        //    多分支生成同一类文档时，「公共注入」必须每个分支都带上（已用参数化单测锁住 4 种形状）。
+        return injectIntoHead('<!DOCTYPE html><html><head></head>' + body + '</html>', META_TAGS + vendorTags + prelude);
     }
-    return injectIntoHead('<!DOCTYPE html><html><head></head><body>' + body + '</body></html>', META_TAGS + prelude);
+    return injectIntoHead('<!DOCTYPE html><html><head></head><body>' + body + '</body></html>', META_TAGS + vendorTags + prelude);
 }
 
 // 合成文档的基础 meta（放在预置前，保证 charset 声明仍在文档最前）

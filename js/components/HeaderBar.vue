@@ -99,6 +99,9 @@
                         <button @click="viewOptions.showRegex = !viewOptions.showRegex" class="px-3 py-1.5 text-left hover:bg-indigo-600 hover:text-white flex justify-between items-center">
                             <span>⚡ 正则脚本对照区</span> <span v-if="viewOptions.showRegex" class="text-indigo-400 font-bold">✓</span>
                         </button>
+                        <button @click="viewOptions.showPlugins = !viewOptions.showPlugins" class="px-3 py-1.5 text-left hover:bg-indigo-600 hover:text-white flex justify-between items-center">
+                            <span>🧩 卡内插件页签</span> <span v-if="viewOptions.showPlugins" class="text-indigo-400 font-bold">✓</span>
+                        </button>
                         <button @click="viewOptions.showRawJson = !viewOptions.showRawJson" class="px-3 py-1.5 text-left hover:bg-indigo-600 hover:text-white flex justify-between items-center">
                             <span>📄 Raw JSON 代码区</span> <span v-if="viewOptions.showRawJson" class="text-indigo-400 font-bold">✓</span>
                         </button>

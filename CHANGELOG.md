@@ -1,7 +1,70 @@
-# SillyTavern 角色卡管理器 · v1.0 → v2.2.11 更新汇总
+# SillyTavern 角色卡管理器 · v1.0 → v2.2.12 更新汇总
 
 > 更新周期：2026-08-09 ~ 2026-09-19
 > 技术栈：Electron + Vue3 + Tailwind + ECharts
+
+---
+
+> **v2.2.12 专项（2026-09-19）**：角色卡「插件」页签（卡内酒馆助手脚本可视化编辑）
+> + CT-19 卡内面板全局库缺失修复 + Python 一键检查工具。规格：`docs/规格与计划/角色卡插件页签-实现规格.md`。
+
+---
+
+## 🚀 v2.2.12 卡内插件页签 + CT-19 面板全局库修复
+
+### 🧩 角色卡「插件」页签（卡内酒馆插件可视化编辑）
+- **入口**：`EditorPanel.vue` 新增 `currentTab === 'plugins'`（徽标 = 卡内脚本条数；`viewOptions.showPlugins` 可关，顶部视图菜单可切换）
+- **数据层** `js/utils/cardPlugins.js`（纯函数，可单测）：`harvestCardPlugins` / `resolveScriptContainer` /
+  `resolveVariablesContainer` / `buildScriptItem` / `writeScriptField` / `createScriptEntry`
+  - 兼容实测三种真实形态（76 张卡扫描统计）：`extensions.tavern_helper.scripts`（25 张，主流）、
+    **键值对数组形态** `[["scripts",[…]]]`（同一字段的另一种导出）、旧版 `TavernHelper_scripts`（`value` 包装）；
+  - **容器存在即出分组**（空容器也出，不再「明明有脚本却显示没有」）；形态异常只报 `shapeWarning`、**不改造数据**；
+  - 新增条目跟随既有形态（旧版容器继续写 `value` 包装），不破坏卡片结构；编辑落在原对象上（`item.host`）。
+- **交互层** `js/composables/useCardPlugins.js` + `js/components/CardPluginModal.vue`
+  - 展开 = 内嵌 `CodeEditor.vue`（CodeMirror：高亮 / 行号 / 查找替换 / ✨ 格式化）；⛶ 放大 = 全屏弹窗（同一组件，Esc 关闭）；
+  - 正文编辑 **400ms 防抖**，收起 / 关弹窗立即 flush（避免逐键失效该卡 Token 缓存）；
+  - 脚本「行数」**惰性计算**：最重卡（脚本正文 ~2MB）单次解析 **0.95ms → 0.012ms**（全库均值 0.023 → 0.003ms）——
+    解析函数在每次 `refreshCardData()`（如描述框逐键输入）都会重跑，惰性后不再白花；
+  - 只读 JSON 文本 `WeakMap` 凝 stringify + 缓存（变量树可能上万行）；切卡清空展开态。
+  - **弹窗必须在 `App.vue` 顶层**：项目全局样式给 `.border*` 加了 `transform: translateZ(0)`，
+    带该类的祖先会成为 `fixed` 的包含块，页签内 `fixed inset-0` 会跑偏。
+- **测试**：`test/cardPlugins.test.mjs`（11 例，形态兼容）+ `test/cardPluginsPanel.test.mjs`（10 例：编辑/新增/删除/展开，
+  删除链路因 Electron 原生确认框无法自动化而固定在这里）。
+- **规格**：`docs/规格与计划/角色卡插件页签-实现规格.md`
+
+### 🔴 CT-19 ｜ 卡内 HTML 面板缺 jQuery/Vue 全局库 → `$ is not defined`（CT-13 修复漏分支）
+- **现象**：`MC_lite` 卡面板在测卡区空白；控制台 3 条 `Uncaught ReferenceError: $ is not defined`（来源 `__jsk_seg__` 文档）
+- **根因**：`buildHtmlSrcdoc()` 按 4 种文档形状分别补壳，只有前两种拼了 `vendorTags`
+  （`app://index.html/vendor/chat-host.js`）—— **「仅 `<body>`」与「纯片段」两个回退分支漏了它**，
+  桥接在、全局库不在 → 模板顶层 `$` 直接 `ReferenceError`
+- **修复**：两个回退分支补 `vendorTags`（各 1 行）；`test/chatRender.test.mjs` 新增 2 例
+  （非空 vendor × 4 种形状必须都带上 + vendor 要早于模板脚本；空 vendor 不得凭空插入）
+- **验证**：`npm test` 290 例全绿；真实卡冒烟 `$ is not defined` **3 条 → 0 条**，且卡内面板应用**真的启动**
+  （日志 `[GameLayout] MClite布局已加载` / `[App] MC房子应用已挂载` / `[MvuStore] …使用模拟数据`）；
+  合成自检卡面板自报 `{ jQuery: true, Vue: true, zod: true }`
+- **防再犯**：多分支生成同一类文档时，「公共注入」必须每个分支都带（已用参数化测试锁住 4 种形状）
+
+### 🧪 开发工具（不进安装包）
+- **Python 一键检查**：`scripts/check.py`（运行器）+ `scripts/checkkit.py`（框架）+ `scripts/pychecks/`（内置 12 条 + 声明式 2 条）
+- 覆盖：语法（Node/Python/JSON）、单测、构建、文档相对链接、文档脚本登记、版本号一致性、
+  **对外文件禁词（只扫 RELEASE_NOTES 最新段）**、仓库卫生（缓存/临时文件）、探针脚本语法、preload 暴露面
+- 用法：`--fast / --only / --skip / --changed / --strict / --json / --list / --new / --ascii`；退出码 0/1/2
+- **卡内插件端到端**：`scripts/card-plugins-test.mjs`（黑盒 DOM：页签存在 / 面板渲染 / 徽标与条目数一致 /
+  展开内嵌编辑器 / ⛶ 全屏放大与 Esc / 只读分组 / 无渲染层报错；可选 `TEST_ADD=1` 验「空容器卡一键新建」，仅改内存不落盘）
+- **卡内插件离线探针**：`scripts/_probe-card-plugins.mjs "<库根>" [--perf]` —— 容器形态统计（路径 × 卡数 × 样例 + 脚本字段组合）
+  与解析开销（实测 76 张库：主流形态 14 / 键值对数组 11 / 旧版 4；最重卡 0.010ms、均值 0.003ms）
+
+### 📄 文档
+- 新规格：`docs/规格与计划/角色卡插件页签-实现规格.md`（含 76 张卡实测表、踩坑、CDP 验收记录）
+- `docs/bugs/`：CT-19 完整条目 + 索引（CT 19 条）；`docs/技术支持/README.md` 登记新工具脚本
+- 修正交接文档版本号与测试规模（START-HERE / AI交接指导 / docs/README）
+
+### 🔬 验证
+- `npm test` → **290/290**（27 个测试文件，新增 2 个文件 / 23 例）
+- `node scripts/release-check.mjs` → 无阻塞项；`python scripts/check.py` → 14 项（通过 11 / 提醒 3 / 失败 0）
+- `npm run build:web` 成功；隔离 profile 真实启动逐项验证：
+  卡内插件页签（`BeiPaiDaoMu` 2 条脚本 / `Kora` 旧版结构 / 双臀洗浴空容器可新建）、
+  测卡面板启动、卡片 8 个页签、全屏放大 + 改名写回 —— 均正常，无 `[Vue 错误]`、`crash.log` 无新增，真实卡库零文件被改写
 
 ---
 

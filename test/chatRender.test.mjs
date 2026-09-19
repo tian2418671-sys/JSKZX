@@ -92,3 +92,32 @@ test('buildHtmlSrcdoc：变量 JSON 里的 </script 不会破出桥接脚本', (
     const doc = buildHtmlSrcdoc('<body>x</body>', '{"stat_data":{"t":"</script><img src=x>"}}', 'seg3_0');
     assert.ok(!doc.includes('</script><img'), '变量内容须转义');
 });
+
+test('buildHtmlSrcdoc：4 种文档形状都必须带上 vendor（CT-19 回归锁）', () => {
+    // CT-19：`buildHtmlSrcdoc` 分 4 种形状补壳，以前只有前两种拼了 vendorTags，
+    // 「仅 <body>」「纯片段/<`</head>`>」两个回退分支把 jQuery/Vue 全局整段丢掉 →
+    // 卡内面板顶层 `$`/`Vue` 直接 ReferenceError（测卡区面板空白）。
+    // 这张参数化表就是防「修了主路径、漏了回退分支」再次发生。
+    const vendor = '<script src="app://index.html/vendor/chat-host.js"></script>';
+    const shapes = {
+        '完整文档': '<html><head></head><body>x</body></html>',
+        '准完整（<head>…<body>）': '<head><script>1</script></head><body>x</body>',
+        '仅 <body>（实测 MC_lite 卡形状）': '</head>\n<body>\n<script>$("body").load("u")</script>\n</body>\n',
+        '纯片段（<div>）': '<div id="a">hi</div>'
+    };
+    for (const [name, html] of Object.entries(shapes)) {
+        const doc = buildHtmlSrcdoc(html, '{}', 'seg_0', vendor);
+        assert.ok(doc.includes('vendor/chat-host.js'), `${name}：缺 vendor 全局库`);
+        assert.ok(doc.includes('getVariables'), `${name}：缺桥接 API`);
+        // vendor 必须在模板自带脚本之前（模板顶层就引用 $ / Vue）
+        if (doc.includes('$("body")')) {
+            assert.ok(doc.indexOf('vendor/chat-host.js') < doc.indexOf('$("body")'), `${name}：vendor 应早于模板脚本`);
+        }
+    }
+});
+
+test('buildHtmlSrcdoc：vendor 为空串时不得凭空插入脚本标签', () => {
+    const doc = buildHtmlSrcdoc('<div>hi</div>', '{}', 'seg_0', '');
+    assert.ok(!doc.includes('chat-host'), '空 vendor 不应产生引用');
+    assert.ok(doc.includes('getVariables'), '桥接仍然要在');
+});

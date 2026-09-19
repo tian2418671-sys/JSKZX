@@ -31,10 +31,10 @@
 |---|---|
 | 项目 | SillyTavern（酒馆）角色卡本地管理桌面工具（Electron 43 + Vue 3 + Vite 8） |
 | 仓库 | `https://github.com/tian2418671-sys/JSKZX.git`（远端 `origin`） |
-| 当前版本 | **v2.2.10**（已发布：GitHub Release + OTA 已验证） |
+| 当前版本 | **v2.2.12**（已发布：GitHub Release + OTA 已验证） |
 | 当前分支 | 本地 `master`（与 origin 同步） |
 | 构建产物 | `sillytavern-card-manager-<版本>.exe` + `latest.yml` + `.exe.blockmap` + zip 绿色版 |
-| 测试 | `npm test` → 259 用例全绿（25 个测试文件） |
+| 测试 | `npm test` → 290 用例全绿（27 个测试文件） |
 | 大库基准 | 11,186 卡 / 9.76GB（日常库 75 张；2 万卡副本由脚本现造） |
 
 ---
@@ -42,7 +42,7 @@
 ## 🔒 铁律（必须遵守）
 
 1. **没收到用户推送/打包指令，禁止推送 / 打包 / 发 Release** —— 用户会先自己看效果再决定。
-2. **发布策略以用户最新指令为准**：2026-09-04 起用户已要求正常发布（已发布至 v2.2.10）；历史「仅本地不发布、不打包」限制作废，但仍须用户明示才发布。
+2. **发布策略以用户最新指令为准**：2026-09-04 起用户已要求正常发布（已发布至 v2.2.12）；历史「仅本地不发布、不打包」限制作废，但仍须用户明示才发布。
 3. 用户常报「某功能坏了」—— 先**验证代码现状**（grep / 读源码）再判断，**勿盲改**（历史上多次是误报）。
 4. 用户提供的代码方案要**适配本项目架构**（Electron IPC、`app://`、路径白名单、`confirmDialog`/`nativeAlert`、Options API 组件规范）再落地。
 5. 重要功能改动后必须过三关：`get_errors` → `npm run build:web` → **真实启动冒烟**（`npx electron . --disable-gpu --enable-logging`）。`vite build` 只验编译，**不验运行时**。

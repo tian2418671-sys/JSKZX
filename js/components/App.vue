@@ -229,6 +229,14 @@
             @close="showImageModal = false"
         />
 
+        <!-- ================= [ 弹窗：卡内插件脚本全屏编辑（子组件 CardPluginModal，复用 CodeEditor） ] ================= -->
+        <card-plugin-modal
+            v-if="pluginFullscreenItem"
+            :item="pluginFullscreenItem"
+            :source-path="pluginScriptGroup ? pluginScriptGroup.sourcePath : ''"
+            @field="(field, value) => updatePluginItemField(pluginFullscreenItem, field, value)"
+            @close="closePluginFullscreen"
+        />
         <!-- ================= [ 弹窗：历史快照列表与一键恢复（子组件 SnapshotModal） ] ================= -->
         <snapshot-modal
             :show="showSnapshotModal"
@@ -535,6 +543,7 @@ import SingleTagModal from './SingleTagModal.vue'; // 单卡添加标签弹窗
 import DiskScanModal from './DiskScanModal.vue'; // 磁盘扫描进度弹窗
 import UpdateModal from './UpdateModal.vue'; // 版本更新检测弹窗
 import TextModal from './TextModal.vue'; // 全屏大文本阅读/编辑弹窗
+import CardPluginModal from './CardPluginModal.vue'; // 🧩 卡内插件脚本全屏编辑器（复用 CodeEditor）
 import ImageModal from './ImageModal.vue'; // 高清立绘大图预览弹窗
 import ApiSettingsModal from './ApiSettingsModal.vue'; // API 引擎与模型设置弹窗
 import GlobalAssetModal from './GlobalAssetModal.vue'; // 全局世界书与正则资产中心弹窗
@@ -579,6 +588,7 @@ import { useWorldbooks } from '../composables/useWorldbooks.js'; // 🌍 世界�
 import { usePresets } from '../composables/usePresets.js'; // ⚙️ 酒馆预设管理功能
 import { usePresetStitch } from '../composables/usePresetStitch.js'; // 🧵 预设缝合中心（条目跨预设搬运 + 自定义条目 + order 重建）
 import { usePlugins } from '../composables/usePlugins.js'; // 🧩 酒馆插件管理功能
+import { useCardPlugins } from '../composables/useCardPlugins.js'; // 🧩 卡内插件页签（本卡自带的酒馆助手脚本/变量）
 import { useWorldbookEntries } from '../composables/useWorldbookEntries.js'; // 📚 世界书词条深度编辑（Entry IDE）组合式函数
 import { useGlobalEntrySearch } from '../composables/useGlobalEntrySearch.js'; // 🔎 全库词条搜索与反向引用组合式函数
 import { useWorldbookExtras } from '../composables/useWorldbookExtras.js'; // 📤 世界书扩展：提取/JSONL导入/批量导出/快照/统计
@@ -620,7 +630,7 @@ document.addEventListener('dragover', (e) => e.preventDefault());
 document.addEventListener('drop', (e) => e.preventDefault());
 
 export default {
-    components: { Section, DragOverlay, AppLoadingOverlay, ToastContainer, BatchTagModal, PromptModal, OptionSelectModal, SingleTagModal, DiskScanModal, UpdateModal, TextModal, ImageModal, ApiSettingsModal, GlobalAssetModal, GraphModal, WbGraphModal, DedupeModal, WbDedupeModal, PresetDedupeModal, PresetStitchModal, ContentDedupeModal, DiffModal, WbMergeModal, WbImportModal, GlobalEntrySearchModal, WbSnapshotModal, ContextMenu, WbContextMenu, AiTagModal, AutoTagRulesModal, HeaderBar, SidebarPanel, EditorPanel, PluginWorkspace, SnapshotModal, PushModal },
+    components: { Section, DragOverlay, AppLoadingOverlay, ToastContainer, BatchTagModal, PromptModal, OptionSelectModal, SingleTagModal, DiskScanModal, UpdateModal, TextModal, ImageModal, ApiSettingsModal, GlobalAssetModal, GraphModal, WbGraphModal, DedupeModal, WbDedupeModal, PresetDedupeModal, PresetStitchModal, ContentDedupeModal, DiffModal, WbMergeModal, WbImportModal, GlobalEntrySearchModal, WbSnapshotModal, ContextMenu, WbContextMenu, AiTagModal, AutoTagRulesModal, HeaderBar, SidebarPanel, EditorPanel, PluginWorkspace, CardPluginModal, SnapshotModal, PushModal },
     setup() {
         // 主题状态（localStorage 在自定义协议下可能不可用，做防御性读取；默认暗夜极客）
         let savedTheme = 'dark';
@@ -1099,7 +1109,8 @@ export default {
             showAvatarPreview: true,  // 是否显示顶部立绘预览
             showTokenStats: true,     // 是否显示 Token 消耗分析栏
             showWorldbook: true,      // 是否显示世界书页签
-            showRegex: true           // 是否显示正则脚本页签
+            showRegex: true,          // 是否显示正则脚本页签
+            showPlugins: true         // 是否显示卡内插件页签
         });
 
         // 导入单张/多张角色卡文件（经隐藏文件输入，追加写入当前库）
@@ -1945,6 +1956,7 @@ export default {
                 { id: 'advanced', name: '进阶设定', icon: '🛠️' },
                 { id: 'worldbook', name: '世界书', icon: '🌍', badge: worldbookEntries.value.length || null },
                 { id: 'regex', name: '正则脚本', icon: '⚙️', badge: regexScripts.value.length || null },
+                { id: 'plugins', name: '插件', icon: '🧩', badge: cardPluginCount.value || null },
                 { id: 'statusbar', name: '美化/状态栏', icon: '📊', badge: renderableScripts.value.length || null },
                 { id: 'chat', name: '聊天测试', icon: '💬', action: () => chatEngine?.initChat() },
                 { id: 'raw', name: 'Raw JSON', icon: '💻' }
@@ -1953,6 +1965,7 @@ export default {
                 if (t.id === 'raw' && !viewOptions.value.showRawJson) return false;
                 if (t.id === 'worldbook' && !viewOptions.value.showWorldbook) return false;
                 if (t.id === 'regex' && !viewOptions.value.showRegex) return false;
+                if (t.id === 'plugins' && !viewOptions.value.showPlugins) return false;
                 return true;
             });
         });
@@ -5026,6 +5039,19 @@ export default {
             contextMenu, closeContextMenu, appMode
         });
 
+        // 🧩 卡内插件页签：展示「当前打开这张卡」自带的酒馆助手脚本 / 变量 / 第三方写卡扩展
+        //    ⚠️ 与上面的插件工作区（磁盘插件工程）是两回事：这里的数据跟着卡片文件走
+        const {
+            cardPluginInfo, pluginScriptGroup, pluginExtraGroups, cardPluginCount,
+            scriptUid, findScriptItem, pluginFullscreenItem,
+            isPluginItemExpanded, togglePluginItem, openPluginFullscreen, closePluginFullscreen,
+            updatePluginItemField, addPluginScript, deletePluginScript,
+            pluginJsonText, flushPluginEdits
+        } = useCardPlugins({
+            cardData, safeData, cardContentVersion,
+            refreshCardData, confirmDialog, addLog
+        });
+
         // ✨ AI 打标 / 翻译 / 格式升维：组合式函数注入（共享状态与 API 配置保留在 App.vue）
         const {
             showAITagModal, aiCandidateTags, aiCustomPrompt, aiTaggingProgress, isAITagging, openAITagModal, startAITagging,
@@ -5312,6 +5338,12 @@ export default {
             showStatusDataPanel, statusDataCandidates, importStatusData, importAllStatusData,
             renderableScripts, toggleStatusbarScript, isScriptEnabled,
             appliedResult, previewHtml, loaderUrls, injectStatusbarTemplate, injectStatusbarPrompt,
+            // 🧩 卡内插件页签（角色卡自带的酒馆助手脚本 / 变量 / 第三方写卡扩展）
+            cardPluginInfo, pluginScriptGroup, pluginExtraGroups, cardPluginCount,
+            scriptUid, findScriptItem, pluginFullscreenItem,
+            isPluginItemExpanded, togglePluginItem, openPluginFullscreen, closePluginFullscreen,
+            updatePluginItemField, addPluginScript, deletePluginScript,
+            pluginJsonText, flushPluginEdits,
             worldbookExpanded, toggleWorldbookEntry, expandAllWorldbook, collapseAllWorldbook,
             getKeysString, updateEntryKeys,
             getRegexPlacement, handleDrop, handleFileUpload, downloadJson, reset,
