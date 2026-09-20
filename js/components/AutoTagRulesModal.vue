@@ -34,22 +34,46 @@
                         </button>
                     </div>
 
-                    <!-- 🏷️ Tab 系统预设：内置集合，分组展示（默认全部生效） -->
+                    <!-- 🏷️ Tab 系统预设：内置集合，分组展示 + 🆕 P1 逐条/组级开关 -->
                     <div v-if="tab === 'system'" class="space-y-2">
+                        <!-- 🆕 P1：生效统计 + 一键恢复全开 -->
+                        <div class="flex items-center justify-between text-[11px] bg-gray-50 border border-gray-200 rounded px-3 py-1.5 gap-2">
+                            <span class="text-gray-600">
+                                内置规则：<strong class="text-blue-700">生效 {{ systemStats.enabled }}</strong> / 关闭 <strong :class="systemStats.disabled ? 'text-rose-600' : 'text-gray-400'">{{ systemStats.disabled }}</strong>
+                                <span class="text-gray-400">（共 {{ systemStats.total }} 条）</span>
+                            </span>
+                            <button @click="$emit('reset-disabled')" :disabled="systemStats.disabled === 0"
+                                    class="px-2 py-0.5 bg-white border border-gray-300 rounded text-[11px] text-gray-700 hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed transition shrink-0">↩️ 恢复全开</button>
+                        </div>
+
                         <div v-for="g in systemGroups" :key="g.group" class="border border-gray-200 rounded-lg overflow-hidden">
-                            <button @click="toggleGroup(g.group)"
-                                    class="w-full flex items-center justify-between px-3 py-2 bg-gray-50 hover:bg-gray-100 transition text-left">
-                                <span class="text-xs font-bold text-gray-700">{{ g.group }} <span class="text-[10px] font-normal text-gray-400">({{ g.rules.length }})</span></span>
-                                <span class="text-gray-400 text-xs">{{ expandedGroups[g.group] ? '🔼' : '🔽' }}</span>
-                            </button>
-                            <div v-if="expandedGroups[g.group]" class="px-3 py-2 space-y-1.5 bg-white">
-                                <div v-for="r in g.rules" :key="r.name" class="flex items-start gap-2 py-0.5 border-b border-gray-100 last:border-0">
-                                    <span class="shrink-0 px-1.5 py-0.5 bg-blue-600/10 text-blue-700 text-[11px] rounded whitespace-nowrap">{{ r.name }}</span>
-                                    <code class="text-[10px] text-gray-500 font-mono break-all leading-5">{{ r.regex }}</code>
+                            <div class="w-full flex items-center justify-between px-3 py-2 bg-gray-50 gap-2">
+                                <button @click="toggleGroup(g.group)" class="flex items-center gap-1.5 text-xs font-bold text-gray-700 hover:text-blue-700 transition text-left">
+                                    <span class="text-gray-400">{{ expandedGroups[g.group] ? '🔼' : '🔽' }}</span>
+                                    <span>{{ g.group }}</span>
+                                    <span class="text-[10px] font-normal text-gray-400">({{ groupEnabledCount(g) }}/{{ g.rules.length }} 生效)</span>
+                                </button>
+                                <div class="flex gap-1 shrink-0">
+                                    <button @click="$emit('set-rules-enabled', g.rules.map(r => r.name), true)"
+                                            class="px-1.5 py-0.5 bg-white border border-gray-300 rounded text-[10px] text-gray-600 hover:bg-emerald-600 hover:text-white hover:border-emerald-600 transition">全开本组</button>
+                                    <button @click="$emit('set-rules-enabled', g.rules.map(r => r.name), false)"
+                                            class="px-1.5 py-0.5 bg-white border border-gray-300 rounded text-[10px] text-gray-600 hover:bg-rose-500 hover:text-white hover:border-rose-500 transition">全关本组</button>
                                 </div>
                             </div>
+                            <div v-if="expandedGroups[g.group]" class="px-3 py-2 space-y-1.5 bg-white">
+                                <label v-for="r in g.rules" :key="r.name" class="flex items-start gap-2 py-0.5 border-b border-gray-100 last:border-0 cursor-pointer">
+                                    <input type="checkbox" :checked="!isRuleDisabled(r.name)"
+                                           @change="$emit('toggle-rule', r.name, $event.target.checked)"
+                                           class="mt-0.5 w-3.5 h-3.5 shrink-0 accent-blue-600">
+                                    <span :class="['shrink-0 px-1.5 py-0.5 text-[11px] rounded whitespace-nowrap', isRuleDisabled(r.name) ? 'bg-gray-200 text-gray-400 line-through' : 'bg-blue-600/10 text-blue-700']">{{ r.name }}</span>
+                                    <code :class="['text-[10px] font-mono break-all leading-5', isRuleDisabled(r.name) ? 'text-gray-300 line-through' : 'text-gray-500']">{{ r.regex }}</code>
+                                </label>
+                            </div>
                         </div>
-                        <p class="text-[10px] text-gray-400">💡 系统预设已内置并默认生效，无需逐个添加；如需补充请切到「自定义规则」。</p>
+                        <p class="text-[10px] text-gray-400 leading-relaxed">
+                            💡 关闭的规则<strong>不再参与打标</strong>（AI 打标①层与「导入自动打标」），如需补充请切到「自定义规则」。<br>
+                            <strong class="text-amber-600">⚠️ 此开关只影响打标，不影响「清洗历史外来标签」的保留词表</strong>——已关闭规则的历史标签仍会被保留，不会被当外来标签清除。
+                        </p>
                     </div>
 
                     <!-- ✏️ Tab 自定义规则：手动输入 / 选词添加 -->
@@ -128,9 +152,17 @@ export default {
     props: {
         show: { type: Boolean, default: false },
         rules: { type: Array, default: () => [] },       // 用户自定义规则 [{name, regex}]
-        customKeywords: { type: Array, default: () => [] } // 用户自定义关键词库
+        customKeywords: { type: Array, default: () => [] }, // 用户自定义关键词库
+        // 🆕 P1：被关闭的内置规则名清单（父级权威；本组件只展示 + emit，不自行改动）
+        disabledRules: { type: Array, default: () => [] }
     },
-    emits: ['close', 'save', 'reset', 'add-keyword', 'remove-keyword'],
+    emits: [
+        'close', 'save', 'reset', 'add-keyword', 'remove-keyword',
+        // 🆕 P1：内置规则开关（emit 两个参数，与 App.vue 的 toggleAutoTagRule / setAutoTagRulesEnabled 签名一致）
+        'toggle-rule',        // (name, enabled)
+        'set-rules-enabled',  // (names[], enabled)
+        'reset-disabled'      // 一键恢复全开
+    ],
     data() {
         return {
             saving: false,
@@ -162,6 +194,17 @@ export default {
                 map[g].push(r);
             }
             return Object.keys(map).map(g => ({ group: g, rules: map[g] }));
+        },
+        // 🆕 P1：内置规则关闭清单（父级权威）→ Set 便于查询
+        disabledSet() {
+            return new Set(Array.isArray(this.disabledRules) ? this.disabledRules : []);
+        },
+        // 🆕 P1：内置规则生效统计（顶部汇总条用）
+        systemStats() {
+            const total = defaultAutoTagRules.length;
+            let disabled = 0;
+            for (const r of defaultAutoTagRules) if (this.disabledSet.has(r.name)) disabled++;
+            return { total, enabled: total - disabled, disabled };
         }
     },
     watch: {
@@ -176,6 +219,14 @@ export default {
         }
     },
     methods: {
+        // 🆕 P1：某条内置规则是否被关闭
+        isRuleDisabled(name) {
+            return this.disabledSet.has(name);
+        },
+        // 🆕 P1：某组内仍生效的条数（组头显示用）
+        groupEnabledCount(g) {
+            return (g.rules || []).filter(r => !this.disabledSet.has(r.name)).length;
+        },
         syncLocal() {
             this.localRules = (this.rules || []).map(r => ({
                 name: String(r && r.name || ''),

@@ -104,6 +104,47 @@ test('清洗：V1 字符串型原生 tags 同样双清', async () => {
     assert.equal(m.persists.length, 1, '字符串层有改动即落盘');
 });
 
+// ---------- P1：清洗白名单与打标开关解耦（数据事故防线，硬验收 H2） ----------
+// 背景：P1 给内置规则加了「逐条开关」（autoTagDisabledRules）。若某条规则被关闭后，
+//       App.vue 把「生效集合（少了被关闭规则名）」注入清洗白名单，则历史卡上由该规则打出的标签
+//       会被判为「外来标签」并被物理清除（不可逆）→ 因此 App.vue 注入的是**完整集合**
+//       （autoTagRulesAllForClean，见 App.vue 中 useTags 注入处的注释）。
+
+test('P1 防线：注入「完整规则集」时，已关闭规则的历史标签必须被保留', async () => {
+    const m = makeMock({
+        // 模拟用户已在内置规则表里关掉 'NSFW (限制级)'，但白名单仍拿到完整集合
+        systemCommonTags: { value: ['Fantasy (奇幻)'] },
+        compiledAutoTagRules: { value: { 'Fantasy (奇幻)': /魔法|精灵/, 'NSFW (限制级)': /nsfw|r18/ } }
+    });
+    const card = makeCard({
+        name: '历史卡',
+        customTags: ['NSFW (限制级)', '真外来标签'],
+        data: { data: { name: '历史卡', description: '', tags: ['NSFW (限制级)', '真外来标签'] } }
+    });
+    m.library.value.push(card);
+    await m.tags.cleanForeignTagsFromLibrary();
+    assert.deepEqual(card.customTags, ['NSFW (限制级)'], '被关闭规则的历史标签必须保留');
+    assert.deepEqual(card.data.data.tags, ['NSFW (限制级)'], '原生 data.tags 同样保留');
+    assert.ok(m.alerts.some(a => a.m.includes('已清除 1 个外来标签')), '只清掉真正的外来标签');
+});
+
+test('P1 反例（为何必须注入完整集）：误注入「生效集合」会导致该标签被误清洗', async () => {
+    const m = makeMock({
+        systemCommonTags: { value: ['Fantasy (奇幻)'] },
+        // ❌ 错误做法：白名单里少了被关闭的规则名
+        compiledAutoTagRules: { value: { 'Fantasy (奇幻)': /魔法|精灵/ } }
+    });
+    const card = makeCard({
+        name: '历史卡',
+        customTags: ['NSFW (限制级)'],
+        data: { data: { name: '历史卡', description: '', tags: [] } }
+    });
+    m.library.value.push(card);
+    await m.tags.cleanForeignTagsFromLibrary();
+    // 这条断言把「事故现场」固化成回归用例：提醒后人别把 App.vue 的注入源改回带开关的集合
+    assert.deepEqual(card.customTags, [], '误注入生效集合 → 历史标签被清除（不可逆）');
+});
+
 // ---------- 边界 ----------
 
 test('清洗：全库均在词表内时提示无需清洗且不落盘', async () => {

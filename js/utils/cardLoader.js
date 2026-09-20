@@ -137,11 +137,15 @@ export function getCardRejectReason(data) {
 }
 
 /**
- * 自动贴标签规则（v2.1 升级：系统预设集合 + 用户自定义）
+ * 自动贴标签规则（v2.1 升级：系统预设集合 + 用户自定义；v2.2.13 P1：新增内置规则关闭清单）
  * - defaultAutoTagRules：系统内置预设规则集合（分 group，默认全部生效，随应用内置）
  *   —— 用户无需逐条添加，它们已经在系统里；UI 分组展示供查看。
- * - compileAutoTagRules(custom)：编译 = 系统预设全部 + 用户自定义（[{name, regex}]，同名覆盖）
- * 消费方：useCardCrud（导入自动分类）与 useAITools（AI 打标三层漏斗第一层），规则由 App.vue 注入。
+ * - compileAutoTagRules(custom, disabledNames)：编译 = 系统预设（**扣除关闭清单**）+ 用户自定义（[{name, regex}]，同名覆盖）
+ *   · disabledNames 省略 / null / [] → 行为与旧版**完全一致**（全量生效，老配置零迁移）
+ *   · 关闭清单**只作用于内置规则**：同名自定义规则照常生效（自定义规则用"删除"表达关闭，不设开关）
+ * 消费方：
+ *   · useCardCrud（导入自动分类）、useAITools（AI 打标三层漏斗第一层）→ 传关闭清单（受开关影响）
+ *   · useTags（「清洗历史外来标签」保留词表）→ **不传**关闭清单（否则关掉规则会导致历史标签被误清洗，不可逆）
  */
 export const defaultAutoTagRules = [
     // ── 世界观 / 题材 ──
@@ -199,15 +203,24 @@ export const autoTagKeywordCandidates = [
     '青梅竹马', '纯爱', '治愈', '后宫', '主仆', '女仆', '恋爱', 'ntr', '虐心', '调教'
 ];
 
-// 编译规则：系统预设全部 + 用户自定义（[{name, regex}]，同名覆盖系统预设）
+// 编译规则：系统预设（扣除关闭清单） + 用户自定义（[{name, regex}]，同名覆盖系统预设）
 // ⚠️ 逐条 try/catch：单条正则非法只跳过该条，不拖垮整表。
-export function compileAutoTagRules(customRules) {
+// @param {Array|null} customRules      用户自定义规则
+// @param {string[]|null} [disabledNames] 内置规则关闭清单（按规则 name 精确匹配，trim 后比较）
+export function compileAutoTagRules(customRules, disabledNames) {
     const out = {};
+    // 🆕 关闭清单：空 / 非数组 → 空集合（等价于"全开"，保证旧调用行为不变）
+    const off = new Set(
+        (Array.isArray(disabledNames) ? disabledNames : [])
+            .filter(n => typeof n === 'string' && n.trim())
+            .map(n => n.trim())
+    );
     // 1) 系统预设（默认全部生效，无需用户逐个添加）
     for (const r of defaultAutoTagRules) {
+        if (off.has(r.name)) continue; // 🆕 用户在设置里关掉了这条内置规则
         try { out[r.name] = new RegExp(r.regex, 'i'); } catch (e) { /* 系统预设正则非法跳过 */ }
     }
-    // 2) 用户自定义（追加 / 同名覆盖）
+    // 2) 用户自定义（追加 / 同名覆盖）—— 不受关闭清单影响
     if (Array.isArray(customRules)) {
         for (const item of customRules) {
             if (item && typeof item.name === 'string' && item.name.trim()

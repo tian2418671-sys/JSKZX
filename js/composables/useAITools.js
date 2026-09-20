@@ -4,9 +4,10 @@
  * 一键汉化、提示词智能重构（格式升维）。共享状态与工具（selectedIds/library/cardData/API 配置等）
  * 保留在 App.vue 并注入；行为保持不变。
  */
-import { ref, watch, onMounted, onUnmounted } from 'vue';
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
+import { resolveFunnelPlan, isFunnelEmpty, formatFunnelSummary } from '../utils/tagFunnel.js'; // 🏷️ P1：三层漏斗的层决策（纯函数，UI 与引擎共用）
 
-export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey, apiType, resolveApiModel, extractReplyContent, persistCardUpdate, refreshCardData, nativeAlert, confirmDialog, showToast, systemPromptPresets, autoTagRules, syncConfigToDisk }) {
+export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey, apiType, resolveApiModel, extractReplyContent, persistCardUpdate, refreshCardData, nativeAlert, confirmDialog, showToast, systemPromptPresets, autoTagRules, tagFunnel, syncConfigToDisk }) {
     // ================= [ AI 智能批量打标系统 ] =================
     const showAITagModal = ref(false);
     const aiCandidateTags = ref([]); // AI 候选标签池（点击常用标签快速添加 / ✕ 移除）
@@ -175,9 +176,25 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
             return;
         }
 
+        // 🆕 P1：三层全关 → 直接拦下（与 UI「开始按钮禁用」共用 isFunnelEmpty，双保险）
+        //         硬验收 H1：绝不出现"静默 0 结果"
+        if (isFunnelEmpty(tagFunnel.value)) {
+            nativeAlert('打标管线三层均已关闭。\n请到「设置 → 🏷️ 打标与分类」至少启用一层。', 'warning');
+            return;
+        }
+
+        // 🆕 P1：本次执行计划（UI 与引擎共用同一个纯函数 → 避免"按钮说能跑、引擎却不跑"）
+        const plan = resolveFunnelPlan({
+            funnel: tagFunnel.value,
+            vectorReady: !!(vectorStatus.value && vectorStatus.value.ready),
+            hasCandidateTags: aiCandidateTags.value.length > 0,
+            hasApiConfig: !!(apiEndpoint.value && apiEndpoint.value.trim())
+        });
+
         isAITagging.value = true;
         // 分层统计（修正 3.3：严格区分规则命中/向量命中/LLM/无匹配/失败）
-        const stats = { rule: 0, vector: 0, llm: 0, empty: 0, fail: 0 };
+        // 🆕 P1：unprocessed = 因③层关闭/不可用而未处理的张数（记账，不静默）
+        const stats = { rule: 0, vector: 0, llm: 0, empty: 0, fail: 0, unprocessed: 0 };
         const failReasons = []; // 收集失败明细（卡片名 + 原因）
 
         // 统一落盘辅助：双层级写标签（内存显示层 customTags + 酒馆 PNG 元数据层 data.tags）+ 持久化
@@ -204,7 +221,17 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
         // 🚀 建 O(1) 卡片索引：避免 targetIds 内每张卡都 O(n) find（千卡库 → 千万级比较）
         const cardIndex = new Map();
         for (const c of library.value) if (c && c.id) cardIndex.set(c.id, c);
-        for (let i = 0; i < targetIds.length; i++) {
+        // 🆕 P1：①规则层关闭 → 全部卡视为"未命中"，继续交给②③做语义/LLM 打标
+        //    ⚠️ 这里**只**决定"①是否执行"，不得引入"命中即跳过"式反向短路（历史缺陷 AI-02）
+        if (!plan.rule) {
+            rulePassedIds.push(...targetIds);
+            aiTaggingProgress.value = {
+                current: targetIds.length,
+                total: targetIds.length,
+                status: '⏭️ ① 规则层已关闭（跳过）'
+            };
+        }
+        for (let i = 0; plan.rule && i < targetIds.length; i++) {
             const id = targetIds[i];
             const card = cardIndex.get(id);
             if (!card) continue;
@@ -228,11 +255,13 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
             // 每 64 张让出主线程一拍，避免长同步循环阻塞 UI / 诱发渲染层崩溃
             if ((i & 63) === 63) await new Promise(r => setTimeout(r, 0));
         }
-        aiTaggingProgress.value = {
-            current: targetIds.length,
-            total: targetIds.length,
-            status: `① 规则匹配完成: 命中 ${stats.rule}，剩余 ${rulePassedIds.length} 张待处理`
-        };
+        if (plan.rule) {
+            aiTaggingProgress.value = {
+                current: targetIds.length,
+                total: targetIds.length,
+                status: `① 规则匹配完成: 命中 ${stats.rule}，剩余 ${rulePassedIds.length} 张待处理`
+            };
+        }
 
         // ============ 第二层：本地向量匹配（免费离线，不消耗 Token） ============
         // 🔧 修正 3.7：向量层处理「规则命中 + 规则未命中」全部卡片（ruleHitIds + rulePassedIds），
@@ -240,7 +269,12 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
         //    其它语义相关标签。规则与向量配合后仍无标签的卡才进入第三层 LLM。
         const vectorTargetIds = [...rulePassedIds, ...ruleHitIds];
         let llmTargetIds = [...rulePassedIds]; // 向量未启用时：规则未命中的卡直接交 LLM
-        if (useLocalVector.value && vectorTargetIds.length > 0 && vectorStatus.value.ready && aiCandidateTags.value.length > 0) {
+        // 🆕 P1：②层是否执行由 plan.vector 统一决定（已内含 开关 × 模型就绪 × 候选池非空）
+        if (!plan.vector && tagFunnel.value.vector) {
+            // 用户确实开了②，但条件不满足 → 明确告知原因（不静默跳过）
+            aiTaggingProgress.value.status = `⏭️ ② 向量层已跳过（${plan.skip.vector || '条件不满足'}）`;
+        }
+        if (plan.vector && vectorTargetIds.length > 0) {
             // 🚀 进度条联动：规则阶段已完成 N 张，向量阶段从 N 起单调递增（N + cur）
             vectorMatchBase.value = targetIds.length;
             vectorMatchActive.value = true;
@@ -283,7 +317,11 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
         }
 
         // ============ 第三层：LLM 兜底（保留原有完整逻辑：重试/退避/Prompt/解析/落盘） ============
-        if (llmTargetIds.length > 0) {
+        // 🆕 P1：③层关闭（或 API 未配置）→ 记账"未处理张数"，不静默丢弃
+        if (!plan.llm && llmTargetIds.length > 0) {
+            stats.unprocessed = llmTargetIds.length;
+        }
+        if (plan.llm && llmTargetIds.length > 0) {
             // ⚠️ 前置校验（仅 LLM 层需要 API 配置）
             if (!apiEndpoint.value || !apiEndpoint.value.trim()) {
                 nativeAlert(`规则命中 ${stats.rule} 张，向量命中 ${stats.vector} 张，剩余 ${llmTargetIds.length} 张需要调用 AI 但未配置 API！`, 'warning');
@@ -391,7 +429,8 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
         }
 
         // 组装结果提示：分层展示 + 失败明细（最多 6 条，超长截断防刷屏）
-        let resultMsg = `🎉 三层漏斗完成！\n① 规则命中: ${stats.rule} | ② 向量命中: ${stats.vector} | ③ LLM: ${stats.llm}`;
+        // 🆕 P1：主体文案由纯函数生成（含"已跳过 / 未处理"，可单测）
+        let resultMsg = formatFunnelSummary(stats, plan);
         if (stats.empty > 0) resultMsg += `\n⚠️ 无匹配标签: ${stats.empty} 张`;
         if (stats.fail > 0) {
             resultMsg += `\n❌ 失败: ${stats.fail} 张`;
@@ -551,7 +590,17 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
     };
 
     // ============= 🧠 本地向量引擎（三层漏斗第二层：免费离线语义匹配） =============
-    const useLocalVector = ref(false);          // UI 开关
+    // 🔧 P1：开关合并 —— 「是否启用向量层」统一由 `tagFunnel.vector` 决定（且随设置持久化，
+    //    修掉改动前"勾了重启就失效"的问题）。
+    //    `useLocalVector` 保留为**双向别名**（读 = tagFunnel.vector，写 = 回写 + 落盘），
+    //    这样 AITagModal 既有的 `update:useLocalVector` 绑定与 App.vue 的 ctx 暴露零改动。
+    const useLocalVector = computed({
+        get: () => !!tagFunnel.value.vector,
+        set: (v) => {
+            tagFunnel.value = { ...tagFunnel.value, vector: !!v };
+            if (typeof syncConfigToDisk === 'function') { try { syncConfigToDisk(); } catch (e) { /* 忽略 */ } }
+        }
+    });
     // 🔧 修正：默认阈值 0.65 → 0.35（与 main/vectorManager.js DEFAULT_THRESHOLD 对齐）。
     //    实测「长文 vs 短标签」0.65 命中率≈0%，标签展开后 0.35 能命中强相关且误报可控。
     const vectorThreshold = ref(0.35);          // 相似度阈值（标签展开后建议 0.30-0.45）

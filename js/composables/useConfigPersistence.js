@@ -12,6 +12,7 @@
  *     onMounted 恢复期赋值 isRestoringConfig 须用 .value（ref 化）。
  */
 import { ref } from 'vue';
+import { normalizeTagFunnel, normalizeDisabledRules } from '../utils/tagFunnel.js'; // 🏷️ P1：三层开关 / 关闭清单归一化（落盘前收敛脏值）
 
 export function useConfigPersistence({
     // —— 唯一权威源（App.vue 顶层持有） ——
@@ -20,8 +21,8 @@ export function useConfigPersistence({
     tagLangMode, customCategories, removedDefaultKeys, systemCommonTags,
     customTagCategories, customTagAssignments,
     builtinCatRenames, builtinCatHidden,
-    // —— 收集源：自动打标规则表（可配置，v2.1） ——
-    autoTagRules, customKeywords,
+    // —— 收集源：自动打标规则表（可配置，v2.1）+ 三层开关 / 关闭清单（P1） ——
+    autoTagRules, customKeywords, autoTagDisabledRules, tagFunnel,
     // —— 收集源：API 配置 ——
     apiEndpoint, apiKey, apiModel, apiType,
     // —— 收集源：UI 状态 ——
@@ -62,6 +63,10 @@ export function useConfigPersistence({
             autoTagRules: JSON.parse(JSON.stringify(Array.isArray(autoTagRules.value) ? autoTagRules.value : [])),
             // ✏️ 自定义关键词库（候选词池，v2.1）
             customKeywords: JSON.parse(JSON.stringify(Array.isArray(customKeywords.value) ? customKeywords.value : [])),
+            // 🏷️ P1：内置规则关闭清单（默认空 = 全开；新内置规则自动默认开启 → 与 removedDefaultKeys 同构）
+            autoTagDisabledRules: JSON.parse(JSON.stringify(normalizeDisabledRules(autoTagDisabledRules && autoTagDisabledRules.value))),
+            // 🏷️ P1：打标三层漏斗开关（规则 / 向量 / LLM）—— 唯一真相源
+            tagFunnel: JSON.parse(JSON.stringify(normalizeTagFunnel(tagFunnel && tagFunnel.value))),
             cardOverlays: JSON.parse(JSON.stringify(appConfig.value.cardOverlays || {})),
             api: {
                 endpoint: apiEndpoint ? apiEndpoint.value : (appConfig.value.api && appConfig.value.api.endpoint) || '',

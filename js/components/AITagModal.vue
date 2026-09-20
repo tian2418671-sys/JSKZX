@@ -16,7 +16,51 @@
 
                 <div class="p-5 overflow-y-auto space-y-5 flex-1 custom-scrollbar text-xs">
 
-                    <!-- 🏷️ 1. 候选标签池 -->
+                    <!-- 🏷️ P1：执行管线（这里的开关 = 本次任务；全局默认在「设置 → 🏷️ 打标与分类」，两处共用同一状态） -->
+                    <div class="bg-indigo-50 p-3 rounded-lg border border-indigo-200">
+                        <div class="flex items-center justify-between mb-2 gap-2">
+                            <label class="block font-bold text-indigo-900">
+                                ⚙️ 执行管线
+                                <span class="text-[10px] font-normal text-indigo-700/70">（① 规则 → ② 本地向量 → ③ LLM 兜底）</span>
+                            </label>
+                            <span class="text-[10px] text-indigo-700/70 shrink-0">规则表：生效 {{ rulesStats.enabled }} / 关闭 {{ rulesStats.disabled }}</span>
+                        </div>
+                        <div class="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-[11px]">
+                            <label class="flex items-center gap-1.5 cursor-pointer">
+                                <input type="checkbox" :checked="tagFunnel.rule" :disabled="isAITagging"
+                                       @change="$emit('set-funnel-layer', 'rule', $event.target.checked)" class="w-3.5 h-3.5 accent-indigo-600">
+                                <span class="text-gray-800">① 规则匹配</span>
+                                <span class="text-gray-400">零成本</span>
+                            </label>
+                            <label class="flex items-center gap-1.5 cursor-pointer">
+                                <input type="checkbox" :checked="tagFunnel.vector" :disabled="isAITagging"
+                                       @change="$emit('set-funnel-layer', 'vector', $event.target.checked)" class="w-3.5 h-3.5 accent-purple-600">
+                                <span class="text-gray-800">② 本地向量</span>
+                                <span class="text-gray-400">免费离线</span>
+                            </label>
+                            <label class="flex items-center gap-1.5 cursor-pointer">
+                                <input type="checkbox" :checked="tagFunnel.llm" :disabled="isAITagging"
+                                       @change="$emit('set-funnel-layer', 'llm', $event.target.checked)" class="w-3.5 h-3.5 accent-blue-600">
+                                <span class="text-gray-800">③ LLM 兜底</span>
+                                <span class="text-gray-400">消耗 Token</span>
+                            </label>
+                            <button @click="$emit('open-auto-tag-rules')" :disabled="isAITagging"
+                                    class="ml-auto px-2 py-0.5 bg-white border border-purple-300 text-purple-700 rounded text-[11px] hover:bg-purple-600 hover:text-white transition disabled:opacity-50">📝 管理规则表</button>
+                        </div>
+                        <!-- 执行计划预览：提前告知哪层会被跳过（含跳过原因），避免"点了没反应" -->
+                        <div class="mt-2 text-[10px] leading-relaxed">
+                            <span v-if="funnelEmpty" class="text-rose-600 font-bold">⚠️ 三层均已关闭：打标无法执行，请至少启用一层。</span>
+                            <template v-else>
+                                <span class="text-indigo-800">本次将执行：</span>
+                                <span class="font-mono text-indigo-900">{{ plannedLayers }}</span>
+                                <span v-if="funnelPlan.skip && funnelPlan.skip.vector" class="text-amber-600 ml-2">· ②跳过原因：{{ funnelPlan.skip.vector }}</span>
+                                <span v-if="funnelPlan.skip && funnelPlan.skip.llm" class="text-amber-600 ml-2">· ③跳过原因：{{ funnelPlan.skip.llm }}</span>
+                                <span class="text-indigo-700/70 ml-2">（①关闭后「导入时自动打标」同样不生效）</span>
+                            </template>
+                        </div>
+                    </div>
+
+                    <!-- 🧩🏷️ 1. 候选标签池 -->
                     <div class="bg-gray-50 p-3 rounded-lg border border-gray-200">
                         <label class="block font-bold text-gray-700 mb-2">🏷️ 1. 候选标签池 <span class="text-[10px] font-normal text-gray-500">(AI 将优先从中挑选)</span>:</label>
 
@@ -259,9 +303,11 @@
 
                 <div class="px-5 py-4 bg-gray-50 border-t border-gray-200 flex justify-end gap-3 shrink-0">
                     <button @click="$emit('close')" :disabled="isAITagging" class="px-5 py-2 bg-white border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-100 disabled:opacity-50 transition">取消</button>
-                    <button @click="$emit('start-tagging')" :disabled="isAITagging" class="px-5 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-bold disabled:opacity-75 flex items-center gap-2 shadow-md transition">
+                    <button @click="$emit('start-tagging')" :disabled="isAITagging || funnelEmpty"
+                            :title="funnelEmpty ? '三层打标管线均已关闭 —— 请在上方执行管线或「设置 → 🏷️ 打标与分类」至少启用一层' : ''"
+                            class="px-5 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-bold disabled:opacity-75 disabled:cursor-not-allowed flex items-center gap-2 shadow-md transition">
                         <svg v-if="isAITagging" class="animate-spin h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
-                        {{ isAITagging ? '打标处理中...' : '🚀 开始智能打标' }}
+                        {{ isAITagging ? '打标处理中...' : (funnelEmpty ? '🚫 管线已全关' : '🚀 开始智能打标') }}
                     </button>
                 </div>
             </div>
@@ -302,7 +348,11 @@ export default {
         vectorStatus: { type: Object, default: () => ({ ready: false, cacheExists: false, cacheSizeMB: 0, cachePath: '' }) },
         vectorDownloading: { type: Boolean, default: false },
         vectorDownloadProgress: { type: Object, default: () => ({ status: '', file: '', progress: 0 }) },
-        vectorDownloadSource: { type: Object, default: () => ({ source: '', attempt: 0, total: 0, label: '' }) }
+        vectorDownloadSource: { type: Object, default: () => ({ source: '', attempt: 0, total: 0, label: '' }) },
+        // 🆕 P1：三层漏斗开关 + 执行计划 + 规则表统计（均来自 App.vue；本组件只展示 + emit）
+        tagFunnel: { type: Object, default: () => ({ rule: true, vector: false, llm: true }) },
+        funnelPlan: { type: Object, default: () => ({ rule: true, vector: false, llm: true, skip: {} }) },
+        rulesStats: { type: Object, default: () => ({ total: 0, enabled: 0, disabled: 0 }) }
     },
     emits: [
         'close', 'remove-ai-candidate-tag', 'update:newAICandidateTag', 'add-ai-candidate-tag-manual',
@@ -315,12 +365,24 @@ export default {
         'update:useLocalVector', 'update:vectorThreshold', 'update:vectorTopK',
         'init-vector-engine', 'delete-vector-cache',
         // 📝 自动打标规则表管理
-        'open-auto-tag-rules'
+        'open-auto-tag-rules',
+        // 🆕 P1：三层开关（(layer, enabled)，与 App.vue 的 setFunnelLayer 签名一致）
+        'set-funnel-layer'
     ],
     // 🏷️ [标签大分类] 系统标签池按大分类分组（人物关系/角色设定/外貌身材...），候选标签更好找
     computed: {
         groupedSystemTags() {
             return groupTagsByCategory(this.systemCommonTags || []);
+        },
+        // 🆕 P1：三层全关 → 禁用「开始打标」（硬验收 H1：绝不出现"静默 0 结果"）
+        funnelEmpty() {
+            const f = this.tagFunnel || {};
+            return !f.rule && !f.vector && !f.llm;
+        },
+        // 🆕 P1：本次实际会执行的层（①→②→③ 可读串，用于提前告知会被跳过的层）
+        plannedLayers() {
+            const p = this.funnelPlan || {};
+            return [p.rule ? '①' : null, p.vector ? '②' : null, p.llm ? '③' : null].filter(Boolean).join(' → ') || '（无）';
         }
     },
     // 🏷️ [大分类折叠] 记录被折叠的分类 key（点击分组标题折叠/展开）
