@@ -19,7 +19,7 @@
 | 找什么 | 去哪 |
 |---|---|
 | 接手须知、架构、标准工作流、高频缺陷地图 | [`AI交接指导.md`](../AI交接指导.md) |
-| 历史缺陷与坑（**99 条**，按领域） | [`docs/bugs/README.md`](docs/bugs/README.md) |
+| 历史缺陷与坑（**103 条**，按领域） | [`docs/bugs/README.md`](docs/bugs/README.md) |
 | 代码片段 / 实测技术数据 / 外部 API 参考 / 脚本清单 | [`docs/技术支持/README.md`](docs/技术支持/README.md) |
 | 发版流程（产物校验、OTA 验证、回滚、检查单） | [`docs/发布/一条龙-发布流程.md`](docs/发布/一条龙-发布流程.md) |
 | 实现规格与后续计划 | [`docs/规格与计划/`](docs/规格与计划/README.md) |

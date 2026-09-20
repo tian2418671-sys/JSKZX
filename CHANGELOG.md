@@ -10,7 +10,205 @@
 
 ---
 
-## 🚀 v2.2.12 卡内插件页签 + CT-19 面板全局库修复
+> **🕐 未发布（工作区，2026-09-20）**：P1 打标三层漏斗开关（规则 / 本地向量 / LLM 逐层 + 内置规则逐条开关）
+> + P2 命令注册表 / 命令面板 / 菜单归位。
+> 规格：`docs/规格与计划/打标三层开关-P1实现规格.md`｜方案：`docs/技术支持/方案-界面重整与应用级扩展系统.md`（v1.2）
+
+---
+
+## 🕐 未发布 · P1 打标三层漏斗开关（一）
+
+### ✨ 用户可感知的变化
+- **三层独立开关**：① 规则匹配 / ② 本地向量 / ③ LLM 兜底 可单独启停
+  （入口：设置 → 🏷️ 打标与分类；打标弹窗顶部「执行管线」同步显示**本次执行计划**与**跳过原因**）
+- **内置规则逐条开关**：38 条内置规则支持**单条 + 组级**（全开本组 / 全关本组）启停，**重启保留**
+- **导入自动打标联动**：① 关闭时「导入时自动打标」自动失效（避免"开着却没反应"被当成 bug）
+- 顺带修掉旧问题：**② 向量开关此前不持久化**（只存内存，重启回到默认）
+
+### 🧩 实现要点（内部）
+- **新增纯函数层** `js/utils/tagFunnel.js`：`DEFAULT_TAG_FUNNEL` / `normalizeTagFunnel` / `normalizeDisabledRules` /
+  `isFunnelEmpty` / `resolveFunnelPlan` / `formatFunnelSummary` / `formatFunnelBadge`
+  —— **UI（按钮可用性）与引擎（是否执行）共用同一个 `resolveFunnelPlan`**，避免"按钮说能跑、引擎却不跑"
+- `cardLoader.compileAutoTagRules(customRules, disabledNames)` 新增第二参；**省略 = 与旧版逐位一致**
+  （`cardLoader.js:236` 兜底导出保持单参数 → 老配置 / 老调用零迁移）；关闭清单**只作用于内置规则**，同名自定义规则仍生效
+- `useAITools.startAITagging()` 三层**入口短路**（`plan.rule` / `plan.vector` / `plan.llm`），**层内逻辑一行未改**；
+  三层全关 → 入口 `nativeAlert` + 弹窗按钮禁用（**双保险，不出现"静默 0 结果"**）
+- `useLocalVector` 改为 `tagFunnel.vector` 的**双向别名**（读=开关、写=回写+落盘），AITagModal 既有绑定与 ctx 暴露零改动
+- **清洗白名单解耦（防数据事故）**：`useTags` 的 keep 词表改用**完整规则集**（`App.vue` 的 `autoTagRulesAllForClean`）——
+  否则用户关掉某规则后，该规则历史产出的标签会被判为"外来标签"并被**物理清除（不可逆）**；仅改注入源 1 处，`useTags.js` 零改动
+- 落盘：`app_config.json` **顶层**新增 `tagFunnel`（默认 `rule:true / vector:false / llm:true`）与 `autoTagDisabledRules`
+  （`useConfigPersistence` 收集 + 启动恢复走 `isRestoringConfig` 闸门；`vector` 默认关 = 与改动前行为一致，避免"重启后突然下载 120MB 模型"）
+- **新增防线脚本** `scripts/pychecks/ctx_exposure.py` + 基线 `ctx_exposure_baseline.json`
+  （AR-13：比对 `App.vue` 的状态定义与 `ctx` 暴露，**新增未暴露即拦下**；已自测：临时插入未暴露状态 → 精确报出并给出处理指引）
+
+### 🔬 验证
+- `npm test` → **321 pass / 0 fail**（基线 290 → 新增 31：`tagFunnel.test.mjs` + `autoTagRules.test.mjs` 共 29 例、
+  `cleanForeignTags.test.mjs` 新增 2 例 H2 白名单解耦防线用例）
+- `npm run build:web` → 通过（1.6~1.7s）；`python scripts/check.py --fast` → 通过 12 / 失败 0
+  （含新增 ctx 暴露检查：150 个状态定义 / 15 项未暴露均在基线内，无新增回归）
+- 隔离 profile 真实启动（`--user-data-dir=%TEMP%\jsk-p1-s2/s3/s4-smoke`）→ 无 `[Vue 错误]`、无 `crash.log`、Crashpad 无转储
+- **CDP 端到端**（生产 `app://` 构建）：设置菜单「🏷️ 打标与分类」渲染 ✓；编辑菜单状态提示 `规则✓ 向量✗ AI✓` ✓；
+  点击三层开关 → `规则✗ 向量✗ AI✗` + 全关警告 ✓；`app_config.json` 中 `tagFunnel` 三项 false **已落盘** ✓；
+  **重启后仍为全 ✗**（恢复分支生效）✓
+- 待人工目视（需先选卡才能打开弹窗）：三层全关时「开始打标」按钮禁用 + `🚫 管线已全关` 文案
+
+### 📄 文档
+- 规格：`docs/规格与计划/打标三层开关-P1实现规格.md`（S1~S4 分步实施与 3 条硬验收）
+- 方案：`docs/技术支持/方案-界面重整与应用级扩展系统.md`（P1 设计 + 评审结论 + §八 变更风控）
+
+---
+
+## 🔧 未发布 · P2 命令注册表与菜单归位（二）
+
+### ✨ 用户可感知的变化
+- **新增「🏷️ 标签(T)」顶级菜单**（2026-09-20 按用户要求）：把标签 / 打标类命令集中起来，分三组
+  —— ☑️ 选择（全选所有卡片 / **反选**）、🏷️ 打标（AI 智能批量打标 / **批量加标签…** / 批量修改分类分组）、
+  🧹 整理与清理（管理规则表 / 恢复内置规则全开 / 清理无效全局标签 / 清洗历史外来标签）
+- **新增「⌘ 命令面板」（`Ctrl+Shift+P`）**：搜索并执行任意命令（全部命令可搜），纯键盘操作（↑↓ 选择 / Enter 执行 / Esc 关闭）
+- **菜单按「用户任务」重新归位**（旧位置保留一行「已移动到…」提示，一个版本后移除）：
+  - 顶部菜单「窗口(W)」→ **「视图(V)」**（名称与内容相符：只放 8 个视图开关）
+  - 新增 **「帮助(H)」** 菜单：检查应用更新（原先藏在「设置」里）
+  - **按稳定性把菜单拆开**（2026-09-20 按用户要求：实验菜单不混放稳定工具）：
+    · 新增 **🧰 工具**：命令面板 / 清理无效全局标签 / 同名查重 / 版本查重 / 清洗历史外来标签；
+    · 新增 **🔧 维护**：历史快照 / 回收站 / 全局回收站 / 清理全部快照 / 清理孤儿快照
+      （**菜单项名称改为纯中文**：不再夹 `.bak` / `.trash` / `jsTavern_Trash` 等英文）；
+    · 「🧪 实验与工具」→ **🧪 实验**：只留早期 / 不稳定功能（全盘打捞卡片、本地 AI 对话测卡）；
+    · **外观只在「设置 → 🎨 外观与字号」**（视图菜单里的重复组已取消；工具栏「主题」快捷按钮保留）。
+  - 「文件」菜单新增 **💾 备份配置**（与工具栏「备份配置」同一命令）；新增 **📂 打开预设目录...**
+    （该功能早已存在于侧边栏预设视图，只是顶部菜单一直没入口）；
+    工具栏去掉与「文件」菜单重复的「📂 打开本地库」「🌐 链接导入」
+- **快捷键统一收口**：`Ctrl+O / Ctrl+I / Ctrl+S / Ctrl+Shift+P` 由注册表分发
+  （「物理保存修改」在卡内插件页签打开时仍自动路由到插件保存 —— 行为不变，但不再是手写特判）
+
+### 🧩 实现要点（内部）
+- **新增** `js/utils/commandRegistry.js`：注册表单一真相源（`register / list / listByMenu / findShortcut / execute / getProblems`）
+  - **id 重复 / 快捷键冲突 → 后注册者拒绝并记录**（绑不静默覆盖）；`shortcut` 保留原始大小写（菜单显示 `Ctrl+O`），`shortcutKey` 为归一化匹配键
+  - `when` 条件 v1 只支持单值相等比较（`appMode == 'worldbooks'`），**语法不认识时放行**（宁可多显示，不可静默藏命令）
+  - `menu` 支持**数组** = 同一命令多菜单镜像入口（评审 2-2 要求）；`sectionTitle` 支持菜单分组小标题
+- **新增** `js/composables/useCommands.js`：50 条内置命令声明（菜单 / 工具栏 / 命令面板 / 快捷键同源）
+- **新增** `js/components/CommandPaletteModal.vue`（模糊搜索 + ↑↓/Enter/Esc + 分组展示）、
+  `js/components/CommandMenuItem.vue`（菜单项 / 工具栏两种形态，含 ✓、badge、禁用态）
+- `HeaderBar.vue`：文件 / 编辑 / 标签 / 推送 / 视图 / 工具 / 帮助 **7 个菜单由注册表渲染**；
+  设置菜单因「命令 + 开关/滑块/子菜单」交错结构保持手写渲染，但**数据源同样走注册表**（`runCommand('settings.xxx')`）
+- `App.vue` keydown：全局快捷键先查注册表（`findShortcut`），**命中即分发并 return**；未注册的按键才走既有分支
+  （`saveCurrentAssetSmart()` 统一“卡内插件页签打开时 Ctrl+S 走插件保存”的旧特判）
+
+### 🧭 影响半径清单（§八 8.7-1：每个提交必附）
+### 🧭 影响半径清单（§八 8.7-1：每个提交必附）
+
+| 我改了谁 | 谁依赖我 | 怎么验 |
+|---|---|---|
+| `js/utils/commandRegistry.js`（新增） | `useCommands.js`、`HeaderBar.vue`、`CommandPaletteModal.vue`、`App.vue` keydown | `npm test`（`commandRegistry.test.mjs` 30 例）+ `pychecks/command_registry.py` + CDP 面板计数 50 |
+| `js/composables/useCommands.js`（新增，50 条命令 / 8 个菜单键） | HeaderBar 各菜单的 `v-for` 渲染、工具栏手写按钮的 `runCommand`、命令面板 | CDP 菜单项数 `8/4/9/2/14/16/12/1` + 面板 50 条 + pycheck「引用存在」 |
+| `js/components/HeaderBar.vue`（菜单 / 设置菜单 / 工具栏三区块） | 用户交互（含旧位置迁移提示） | 隔离 profile 冒烟 + CDP DOM 断言 + **截图对照**（抓到了 AR-32/AR-33） |
+| `js/components/CommandPaletteModal.vue`（新增） | 全局快捷键 `Ctrl+Shift+P` | CDP：打开 / 搜索过滤 / Enter 执行并关闭 / Esc 关闭（注：`fade` 过渡期内元素仍在 DOM，断言需轮询等待） |
+| `js/components/CommandMenuItem.vue`（新增） | 菜单与命令面板共用 | 两种形态均渲染（菜单项带 ✓ / badge / 禁用态） |
+| `js/components/App.vue`：keydown 分发、`saveCurrentAssetSmart`、`selectInvertCards`、新增 ctx 字段 | 全局快捷键；HeaderBar 及其它子组件 | `ctx_exposure.py`（157 个定义无新增未暴露）+ 冒烟无 `[Vue 错误]` |
+| **`App.vue` 的 `const ctx = {...}` / `provide` 相邻结构** | **`ctx_exposure.py` 自身（AR-31）** | 该项检查必须 ✅ —— 一旦报「未解析到结构」即防线宕机，按 AR-31 处理 |
+
+### 🔬 验证
+- `npm test` → **351 pass / 0 fail**（P2 新增 `commandRegistry.test.mjs` 30 例：含多菜单/分组标题/独立排序）
+- `npm run build:web` → 通过；`python scripts/check.py` → 通过 17 / 失败 0（全量）
+- **CDP 端到端**（`app://` 真实构建）：`Ctrl+Shift+P` 打开面板并列出 **50 条命令** ✓；搜索过滤（含无匹配 0 条）✓；
+  Enter 执行并关闭 ✓；Esc 关闭 ✓；菜单结构 `文件8 / 编辑4 / 标签9 / 推送2 / 视图14 / 设置16 / 工具12 / 帮助1` ✓；
+  分组标题多处渲染正确（含「标签」菜单三分组）✓；旧位置迁移提示 ✓；工具栏去重（删 2 按钮）✓；
+  **镜像入口同源**：设置菜单里点「界面字号 +1」立即生效 ✓；点「明亮白昼」→ 主题全局切换 ✓（工具栏主题按钮同步）
+- 隔离 profile 真实启动 ×3 → 无 `[Vue 错误]`、无 `crash.log`、Crashpad 无转储
+- **新增防线脚本** `scripts/pychecks/command_registry.py`：静态校验「命令 id 唯一 / 快捷键不冲突 / `runCommand` 与菜单键引用存在」，
+  已自测（临时插入重复 id 与重复快捷键 → 精确报出；「最后一个命令块无尾逗号」「注释里的示例 id」两种假阳性已修）
+
+### 🐟 实施期发现并修掉的一个「防线失效」缺陷（AR-31）
+- 把命令注册块插到 `const ctx = {...}` 与 `provide('appCtx', ctx)` **之间**，导致 `ctx_exposure.py`（AR-13 防线）
+  正则失配、**降级为提醒**（等于防线静默宕机）。已把注册块移到 `provide` **之后**，
+  并在该处留下「这两句必须保持紧邻」的注释。检查恢复：157 个状态定义 / 15 项未暴露均在基线内 ✓
+- 且 `ctx_exposure.py` 已强化：结构失配时**由提醒升为失败并直接指出中间插了什么**（防再犯机器化）
+- 详见 `docs/bugs/BUG-架构与渲染.md` AR-31（含防再犯条目）
+
+### 🐞 实施期发现的另两个缺陷（AR-32 / AR-33）
+- **AR-32（静默 undefined）**：`dedupeTargetLabel` / `funnelBadge` / `funnelEmpty` 只定义在 `HeaderBar` 内部、
+  从未进 ctx → 菜单直接显示「同名查重与版本清理（undefined）」，打标状态后缀则被 `safeCall` 吞掉而**无声消失**。
+  已在 `App.vue` 定义并暴露这三个 computed，`HeaderBar` 改为复用同一份；
+  并把「命令引用的 ctx 字段存在」固化为 `command_registry.py` 的**第二项检查**（现为「48 个引用全部存在」✓）。
+- **AR-33（菜单排序错乱）**：`listByMenu()` 当时**复用了 `list()` 的顺序**（按 `menus[0]` 排），
+  导致多菜单命令在**非主菜单**里按“主菜单名”落位 —— 新建「标签」菜单时「反选」「批量加标签」被甩到末尾、
+  分组标题重复。已改为**按本菜单 section/order 独立排序**（不再需要“调 `menus[0]`”这类绕过手法），
+  并补 2 条回归单测。两次都是靠 **§八 8.5 的「截图对照」防线**发现的。
+- 三条缺陷均已在 `docs/bugs/` 登记（含防再犯）。
+
+### 🧭 影响半径清单（§八 8.7-1：每个提交必附）
+
+| 我改了谁 | 谁依赖我 | 怎么验 |
+|---|---|---|
+| `js/utils/commandRegistry.js`（新增） | `useCommands.js`、`HeaderBar.vue`、`CommandPaletteModal.vue`、`App.vue` keydown | `npm test`（`commandRegistry.test.mjs` 30 例）+ `pychecks/command_registry.py` + CDP 面板计数 50 |
+| `js/composables/useCommands.js`（新增，50 条命令 / 8 个菜单键） | HeaderBar 各菜单的 `v-for` 渲染、工具栏手写按钮的 `runCommand`、命令面板 | CDP 菜单项数 `8/4/9/2/14/16/12/1` + 面板 50 条 + pycheck「引用存在」 |
+| `js/components/HeaderBar.vue`（菜单 / 设置菜单 / 工具栏三区块） | 用户交互（含旧位置迁移提示） | 隔离 profile 冒烟 + CDP DOM 断言 + **截图对照**（抓到了 AR-32/AR-33） |
+| `js/components/CommandPaletteModal.vue`（新增） | 全局快捷键 `Ctrl+Shift+P` | CDP：打开 / 搜索过滤 / Enter 执行并关闭 / Esc 关闭（注：`fade` 过渡期内元素仍在 DOM，断言需轮询等待） |
+| `js/components/CommandMenuItem.vue`（新增） | 菜单与命令面板共用 | 两种形态均渲染（菜单项带 ✓ / badge / 禁用态） |
+| `js/components/App.vue`：keydown 分发、`saveCurrentAssetSmart`、`selectInvertCards`、新增 ctx 字段 | 全局快捷键；HeaderBar 及其它子组件 | `ctx_exposure.py`（157 个定义无新增未暴露）+ 冒烟无 `[Vue 错误]` |
+| **`App.vue` 的 `const ctx = {...}` / `provide` 相邻结构** | **`ctx_exposure.py` 自身（AR-31）** | 该项检查必须 ✅ —— 一旦报「未解析到结构」即防线宕机，按 AR-31 处理 |
+
+### 📄 文档
+- 方案：`docs/技术支持/方案-界面重整与应用级扩展系统.md`（P2 实施进度 + 偏离清单 + 新缺陷记录见 §十二；P2-2 表末“菜单入口补齐”项已按用户澄清修正口径）
+- 缺陷：`docs/bugs/BUG-架构与渲染.md` AR-31 / AR-32 / AR-33
+- **对外迁移对照表**：`RELEASE_NOTES.md` 顶部「🕐 未发布」段（发版时把标题换成版本号即可）
+
+### 修复：顶部菜单「点击命令后不关闭」（AR-34）
+
+- **现象**：菜单展开后点里面的命令，命令执行了但**菜单仍然开着**，必须手动把鼠标移开；
+  命令会弹窗时（如「管理规则表」）菜单与弹窗**叠在一起**，看起来像卡死。
+- **根因**：菜单面板原用纯 CSS `hidden group-hover:flex` 驱动 —— `:hover` 由鼠标位置决定，
+  **点击不会改变它**，代码里没有任何「点击后关闭」的通道。
+- **修复**：菜单显示改为 **JS 状态控制**：
+  · `HeaderBar.vue` 新增 `menuOpen` 状态，9 个菜单容器改 `@mouseenter` / `@mouseleave`，
+    面板改 `:class="menuOpen === key ? 'flex' : 'hidden'"`；
+  · 菜单项（`CommandMenuItem`）**已有**的 `@executed` 事件 → `closeMenus()`，
+    **只在实际执行了命令时关**（点禁用项不关，符合预期）；
+  · 手写按钮走的 `runCommand()` 内部也调 `closeMenus()` —— 一行覆盖设置菜单里的全部手写入口；
+  · 菜单按钮顺带加 `@click`，鼠标未移开时也能重新打开。
+- **验证**：集成浏览器**真实鼠标** hover + 点击 → 面板立即关闭 ✓；点菜单按钮可重新打开 ✓；
+  弹窗类命令（管理规则表）→ 菜单关闭 + 弹窗正常打开、不再重叠 ✓；
+  Electron 干净启动**无 Vue 警告** ✓、9 个面板初始均 `hidden` ✓。
+- **检出方式（写下来防再踩）**：CDP 的 `element.click()` **不改变 `:hover`**，
+  所以脚本断言永远测不出这个缺陷 —— 涉及 hover / 鼠标位置的交互必须用**真实鼠标**（集成浏览器 / 人工）验证。
+
+### 菜单结构再调整（2026-09-20，按用户决定）
+
+- **「编辑」菜单并入「标签」菜单（编辑菜单整体取消）**：原编辑菜单 4 项中，
+  「AI 打标 / 批量改分类 / 全选」与标签菜单**重复**（已从编辑菜单删除），
+  「批量选择模式」一并移入标签菜单的「☑️ 选择」组；标签菜单底部留一行「已从编辑菜单并入本菜单」提示（一个版本后移除）。
+- **快捷字母补齐**：`🧰 工具(G)` / `🔧 维护(W)` / `🧪 实验(L)` —— 与文件(F) / 标签(T) / 推送(P) / 视图(V) / 设置(S) / 帮助(H) 格式一致。
+- **「反选」标题去掉括号说明**（原标题「反选（未选→选 / 已选→取消）」影响美观），说明移入悬停提示。
+- **验证**：菜单 10 → **9 个**；标签菜单 10 项；`check.py` 命令项通过（49 条命令 / **10 个菜单键** / 13 处引用）；
+  CDP 断言标签菜单分组标题 = ☑️ 选择 / 🏷️ 打标 / 🧹 整理与清理；热模式（Vite HMR）下自动生效，无需重新构建。
+
+### 全局资产库下线（2026-09-20，按用户决定）
+
+- **动机**：该功能处于尴尬位置 —— 与侧边栏「世界书库 / 预设」及卡内世界书编辑重叠，且只做只读浏览；
+  用户决定**先关闭**，后续改为以「扩展」形式重新提供（扩展化已暂缓，见上方「后续」段）。
+- **处理（注释化，可恢复，未删任何文件）**：
+  · 工具栏入口 → `HeaderBar.vue` 注释掉按钮，原位置留一行灰色提示「全局资产库已下线」（一个版本后移除）；
+  · 命令 `toolbar.globalAssets` → `useCommands.js` 整块注释；
+  · 弹窗渲染 + 组件导入/注册 → `App.vue` 注释掉；
+    **保留** `showGlobalAssetModal` / `globalAssetTab` 状态与 ctx 暴露（ref 被 ctx 引用），
+    且 `globalAllWorldbooks` / `globalAllRegexScripts` 仍被「全库词条搜索」共用，不能一并注释。
+  · `GlobalAssetModal.vue` 文件保留；三处注释均写了恢复步骤（搜 `⛔`）。
+- **验证**：命令面板 50 → **49 条**（搜“资产库”无结果）；工具栏按钮消失、仅留提示；
+  `check.py --fast` 通过；冒烟无 `[Vue 错误]`、无 `crash.log`。
+- **顺手修掉一个检查缺陷**：`pychecks/command_registry.py` 原先只剥离 `//` / `*` / `/*` 注释，
+  不认识 `<!-- -->` 注释块 → 把注释掉的按钮当成“引用未注册命令”**误报**。
+  已支持 HTML / Vue 注释（含行内片段），以后注释代码不会再假报。
+
+### 后续：应用级扩展系统（P5 / P3 / P4）暂缓
+
+- 用户 2026-09-20 决定：**先专注当前功能与稳定性，扩展化转后续**（设计已评审完毕，不需要重做）；
+- 已完成的前置：**P2 命令注册表**正是扩展贡献点的挂载目标（前置 1 已就绪）；
+- 存档位置：[`docs/规格与计划/后续升级计划.md`](docs/规格与计划/后续升级计划.md) 第四节（实测难度基线 + 重启前置清单）
+  + 方案 §六 P5 设计 / §四 P3 / §五 P4 / §12.4 难度评估；
+- 术语：统一叫「**扩展**」，「插件」只指卡内酒馆助手脚本。
+
+---
+
+## 🔧🚀 v2.2.12 卡内插件页签 + CT-19 面板全局库修复
 
 ### 🧩 角色卡「插件」页签（卡内酒馆插件可视化编辑）
 - **入口**：`EditorPanel.vue` 新增 `currentTab === 'plugins'`（徽标 = 卡内脚本条数；`viewOptions.showPlugins` 可关，顶部视图菜单可切换）
@@ -1070,13 +1268,13 @@
 - 7 个操作按钮（汉化/升维/快照/换卡图/保存/导出/删除）收进 ⚙
 - `<Teleport to="body">` + fixed 定位 + 全屏透明遮罩：彻底解决遮挡 / 裁剪 / 层级问题
 
-### � 更新后静默升级（新功能）
+### 🔧 更新后静默升级（新功能）
 - **根因定位**：真正导致「更新 = 重装向导」的不是 oneClick，而是 `sys:installUpdate` 里**无参 `quitAndInstall()`**——`isSilent` / `isForceRunAfter` 默认均 false → 以非静默方式运行安装器（assisted installer 弹界面）、装完不自动重启
 - **最小修复 1 行**：`autoUpdater.quitAndInstall(true, true)`（`isSilent=true` 静默升级；`isForceRunAfter=true` 装完自动重启）
 - 首次安装自定义目录已支持：`oneClick:false` + `allowToChangeInstallationDirectory:true`（assisted 向导可自选 D/E 盘），无需改动
 - ⚠️ 关键前提：保持 per-user（package.json **勿设 `perMachine:true`**）——否则装到 C:\Program Files，静默更新因无 UAC 提权写入失败（EACCES）
 
-### �🐛 Bug 修复（8 项，含根因）
+### 🔧🐛 Bug 修复（8 项，含根因）
 
 1. **卡片导入空分组**：清理历史遗留的幽灵分组数据（`123`/`555`）并把卡片回退「未分类」
 2. **编辑器内容区右侧大面积空白**：移除 basic / advanced / worldbook / regex 4 处 `max-w-5xl` 宽度限制，内容随窗口铺满
