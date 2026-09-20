@@ -187,6 +187,9 @@
                                     class="px-4 py-1.5 bg-rose-600 hover:bg-rose-700 text-white rounded font-bold transition">⛔ 中止</button>
                         </div>
 
+                        <!-- 🔍 扫描前置提示（无启用规则 / 改动未保存 —— 用户报「点重新扫描无反应」的就地解释） -->
+                        <div v-if="scanHint" class="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1.5 leading-relaxed">⚠️ {{ scanHint }}</div>
+
                         <!-- 🤖 AI 分辨状态 / 统计（建议默认不勾选，可一键勾选） -->
                         <div v-if="llm.running || llm.lastAt" class="text-[10px] text-purple-700 leading-relaxed">
                             🤖 {{ llm.running ? `AI 分辨中… ${llm.done} / ${llm.total}` : `AI 分辨完成：建议 ${llm.suggested} 张 · 未识别 ${llm.unmatched} 张 · 新请求 ${llm.requested} 次` }}
@@ -240,7 +243,7 @@
 
                         <!-- 无扫描结果（空态） -->
                         <div v-if="!plan" class="text-gray-400 text-center py-8 border border-dashed border-gray-300 rounded-lg space-y-1">
-                            <div v-if="localProfiles.length === 0">尚未配置收纳规则 —— 请先到「📋 收纳规则」页添加或载入推荐模板</div>
+                            <div v-if="!hasEnabledSavedProfiles">尚未配置可用的收纳规则 —— 请到「📋 收纳规则」添加 / 载入推荐模板并保存，再回来点「🔄 重新扫描」</div>
                             <div v-else>尚未生成计划 —— 点上方「🔄 重新扫描」开始（只读，不动文件）</div>
                         </div>
 
@@ -367,6 +370,7 @@ export default {
             expandedSkipped: false,
             presetNote: '',
             confirmReset: false,
+            scanHint: '',          // 🔍 扫描前置提示（无启用规则 / 改动未保存 —— 避免「点重新扫描无反应」）
             openPickerIdx: -1,     // 🏷️ 当前展开「标签点选」面板的规则行（-1 = 全收起）
             pickerFilter: ''       // 点选面板内的筛选关键词
         };
@@ -377,6 +381,10 @@ export default {
             return AUTO_GROUP_MATCH_TYPES.map(v => ({ value: v, label: AUTO_GROUP_MATCH_LABELS[v] || v }));
         },
         patternlessTypes() { return MATCH_TYPES_WITHOUT_PATTERN; },
+        // 🔍 已保存规则里有没有「启用且目标分组非空」的条目 —— 扫描的先决条件（与 useAutoGroup 的 enabledCount 同口径近似）
+        hasEnabledSavedProfiles() {
+            return (this.profiles || []).filter(p => p && p.enabled !== false && String(p.group || '').trim()).length > 0;
+        },
         // 🏷️ 标签点选面板数据：按大分类分组 + 关键词过滤（数据源 = 系统标签库 + 全库卡片标签）
         filteredTagGroups() {
             const kw = String(this.pickerFilter || '').trim().toLowerCase();
@@ -438,6 +446,7 @@ export default {
                     this.syncLocal();
                     this.presetNote = '';
                     this.confirmReset = false;
+                    this.scanHint = '';
                     this.openPickerIdx = -1;
                     this.pickerFilter = '';
                     this.tab = (this.profiles && this.profiles.length) ? 'preview' : 'rules';
@@ -603,7 +612,15 @@ export default {
             this.presetNote = '';
             this.$emit('reset-profiles');
         },
-        doScan() { this.$emit('scan', { includeGrouped: this.includeGrouped }); },
+        // 🔍 扫描前置检查（用户报「点重新扫描无反应」——此前无启用规则时静默 return，界面无任何反馈）
+        doScan() {
+            if (!this.hasEnabledSavedProfiles) {
+                this.scanHint = '还没有启用中的收纳规则——请到「📋 收纳规则」添加规则（或载入推荐模板），并点「💾 保存规则」后再扫描；规则改动需要先保存才会参与扫描。';
+                return;
+            }
+            this.scanHint = '';
+            this.$emit('scan', { includeGrouped: this.includeGrouped });
+        },
         changeIncludeGrouped(v) {
             this.includeGrouped = !!v;
             this.$emit('scan', { includeGrouped: this.includeGrouped }); // 勾选变化 → 父级重扫，保证预览与执行同源
