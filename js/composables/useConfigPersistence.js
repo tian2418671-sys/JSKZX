@@ -13,6 +13,7 @@
  */
 import { ref } from 'vue';
 import { normalizeTagFunnel, normalizeDisabledRules } from '../utils/tagFunnel.js'; // 🏷️ P1：三层开关 / 关闭清单归一化（落盘前收敛脏值）
+import { normalizeGroupProfiles, normalizeAutoGroupLastRun } from '../utils/autoGroup.js'; // 🗂️ 自动分组：分组档案 / 移动日志归一化（落盘前收敛脏值）
 
 export function useConfigPersistence({
     // —— 唯一权威源（App.vue 顶层持有） ——
@@ -23,6 +24,8 @@ export function useConfigPersistence({
     builtinCatRenames, builtinCatHidden,
     // —— 收集源：自动打标规则表（可配置，v2.1）+ 三层开关 / 关闭清单（P1） ——
     autoTagRules, customKeywords, autoTagDisabledRules, tagFunnel,
+    // —— 收集源：自动分组（分组档案 + 最近一次移动日志；S1~S4） ——
+    autoGroupProfiles, autoGroupLastRun,
     // —— 收集源：API 配置 ——
     apiEndpoint, apiKey, apiModel, apiType,
     // —— 收集源：UI 状态 ——
@@ -67,6 +70,9 @@ export function useConfigPersistence({
             autoTagDisabledRules: JSON.parse(JSON.stringify(normalizeDisabledRules(autoTagDisabledRules && autoTagDisabledRules.value))),
             // 🏷️ P1：打标三层漏斗开关（规则 / 向量 / LLM）—— 唯一真相源
             tagFunnel: JSON.parse(JSON.stringify(normalizeTagFunnel(tagFunnel && tagFunnel.value))),
+            // 🗂️ 自动分组：分组档案（声明式收纳条件）+ 最近一次移动日志（回滚依据；按卡名+分组记，不记绝对路径）
+            autoGroupProfiles: JSON.parse(JSON.stringify(normalizeGroupProfiles(autoGroupProfiles && autoGroupProfiles.value))),
+            autoGroupLastRun: JSON.parse(JSON.stringify(normalizeAutoGroupLastRun(autoGroupLastRun && autoGroupLastRun.value))),
             cardOverlays: JSON.parse(JSON.stringify(appConfig.value.cardOverlays || {})),
             api: {
                 endpoint: apiEndpoint ? apiEndpoint.value : (appConfig.value.api && appConfig.value.api.endpoint) || '',

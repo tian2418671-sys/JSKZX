@@ -6,6 +6,7 @@
  */
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 import { resolveFunnelPlan, isFunnelEmpty, formatFunnelSummary } from '../utils/tagFunnel.js'; // 🏷️ P1：三层漏斗的层决策（纯函数，UI 与引擎共用）
+import { classifyApiError, summarizeFailures } from '../utils/aiTagFeedback.js'; // 📜 打标过程日志：错误归类 + 失败聚合（纯函数）
 
 export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey, apiType, resolveApiModel, extractReplyContent, persistCardUpdate, refreshCardData, nativeAlert, confirmDialog, showToast, systemPromptPresets, autoTagRules, tagFunnel, syncConfigToDisk }) {
     // ================= [ AI 智能批量打标系统 ] =================
@@ -113,6 +114,17 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
     const aiTaggingProgress = ref({ current: 0, total: 0, status: '' });
     const isAITagging = ref(false);
 
+    // 📜 打标过程实时日志（应用内窗口；启动打标自动打开——替系统弹框汇报，全程肉眼可检查）
+    const aiTagLog = ref([]);
+    const showAiTagLog = ref(false);
+    const AI_TAG_LOG_MAX = 2000; // 超大库防内存膨胀：超出裁掉头部
+    const pushTagLog = (text, level = 'info') => {
+        aiTagLog.value.push({ at: Date.now(), level, text: String(text) });
+        if (aiTagLog.value.length > AI_TAG_LOG_MAX) aiTagLog.value.splice(0, aiTagLog.value.length - AI_TAG_LOG_MAX);
+    };
+    const closeAiTagLog = () => { showAiTagLog.value = false; };
+    const clearAiTagLog = () => { aiTagLog.value = []; };
+
     // 打开 AI 打标弹窗
     const openAITagModal = () => {
         if (selectedIds.value.length === 0) return;
@@ -195,7 +207,16 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
         // 分层统计（修正 3.3：严格区分规则命中/向量命中/LLM/无匹配/失败）
         // 🆕 P1：unprocessed = 因③层关闭/不可用而未处理的张数（记账，不静默）
         const stats = { rule: 0, vector: 0, llm: 0, empty: 0, fail: 0, unprocessed: 0 };
-        const failReasons = []; // 收集失败明细（卡片名 + 原因）
+        const failReasons = []; // 收集失败明细（{ name, raw } —— 收尾按类聚合展示）
+
+        // 📜 打开「打标过程」窗口 + 头部管线说明（哪些层会跑/跳过一步写明 —— 减少「我明明关了怎么还跑」的困惑）
+        aiTagLog.value = [];
+        showAiTagLog.value = true;
+        pushTagLog(`🚀 开始打标：共 ${targetIds.length} 张`, 'info');
+        pushTagLog(`管线：${plan.rule ? '① 规则（开）' : '① 规则（关）'} → ${plan.vector ? '② 向量（开）' : '② 向量（关）'} → ${plan.llm ? '③ LLM 兜底（开）' : '③ LLM 兜底（关）'}`, 'info');
+        if (!plan.rule) pushTagLog('⏭️ ① 规则层已关闭：全部卡片视为未命中，继续交给后续层', 'dim');
+        if (!plan.vector) pushTagLog('⏭️ ② 向量层已关闭：未命中的卡将直接交给 ③ LLM（LLM 开着时会真实调用 API）', 'dim');
+        else if (plan.skip && plan.skip.vector) pushTagLog(`⏭️ ② 向量层将跳过（${plan.skip.vector}）`, 'dim');
 
         // 统一落盘辅助：双层级写标签（内存显示层 customTags + 酒馆 PNG 元数据层 data.tags）+ 持久化
         const applyAutoTags = async (card, tags) => {
@@ -245,8 +266,10 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
                 await applyAutoTags(card, matched);
                 stats.rule++;
                 ruleHitIds.push(id); // 规则命中 → 仍进向量层做语义补充
+                pushTagLog(`① [${i + 1}/${targetIds.length}] ${card.name || '未知'} → 规则命中：${matched.join('、')}`, 'ok');
             } else {
                 rulePassedIds.push(id);
+                pushTagLog(`① [${i + 1}/${targetIds.length}] ${card.name || '未知'} → 未命中规则`, 'dim');
             }
             // 🚀 实时进度：每张卡推进一次 current，进度条不再“卡 0”
             aiTaggingProgress.value.current = i + 1;
@@ -301,6 +324,7 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
                         if (vr.tags && vr.tags.length > 0) {
                             await applyAutoTags(card, vr.tags);
                             stats.vector++; // 向量命中（含对规则已命中卡的语义补充）
+                            pushTagLog(`② ${card.name || '未知'} → 语义补充标签：${vr.tags.join('、')}`, 'ok');
                         } else if (rulePassedSet.has(vr.id)) {
                             llmTargetIds.push(vr.id); // 规则未命中 且 向量未命中 → 交 LLM
                         }
@@ -311,22 +335,27 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
             } catch (e) {
                 vectorMatchActive.value = false; // 异常也停止合并
                 console.warn('向量匹配失败，全部降级到 LLM:', e);
+                pushTagLog('⚠️ 向量引擎异常：未命中卡全部降级 ③ LLM', 'warn');
                 llmTargetIds = [...rulePassedIds];
             }
             aiTaggingProgress.value.status = `② 向量匹配完成: 命中 ${stats.vector}，剩余 ${llmTargetIds.length} 张交 LLM`;
+            pushTagLog(`② 向量完成：命中 ${stats.vector} 张，剩余 ${llmTargetIds.length} 张交 ③ LLM`, 'info');
         }
 
         // ============ 第三层：LLM 兜底（保留原有完整逻辑：重试/退避/Prompt/解析/落盘） ============
         // 🆕 P1：③层关闭（或 API 未配置）→ 记账"未处理张数"，不静默丢弃
         if (!plan.llm && llmTargetIds.length > 0) {
             stats.unprocessed = llmTargetIds.length;
+            pushTagLog(`⏭️ ③ LLM 兜底已关闭：${llmTargetIds.length} 张未处理（不调用 API）`, 'dim');
         }
         if (plan.llm && llmTargetIds.length > 0) {
             // ⚠️ 前置校验（仅 LLM 层需要 API 配置）
             if (!apiEndpoint.value || !apiEndpoint.value.trim()) {
-                nativeAlert(`规则命中 ${stats.rule} 张，向量命中 ${stats.vector} 张，剩余 ${llmTargetIds.length} 张需要调用 AI 但未配置 API！`, 'warning');
+                stats.unprocessed += llmTargetIds.length;
+                pushTagLog(`⚠️ 剩余 ${llmTargetIds.length} 张需要调用 AI，但未配置 API —— 已跳过（未处理）。请到「设置 → API」配置接口与密钥。`, 'warn');
             } else if (!enableAIExtraction.value && aiCandidateTags.value.length === 0) {
-                nativeAlert('错误：已关闭AI自由提取，但未提供候选标签池！\n请先在上方点击添加候选标签，或开启「允许 AI 自由提取标签」。', 'warning');
+                stats.unprocessed += llmTargetIds.length;
+                pushTagLog('⚠️ 已关闭 AI 自由提取，且候选标签池为空 —— LLM 兜底已跳过（未处理）', 'warn');
             } else {
         for (let i = 0; i < llmTargetIds.length; i++) {
             const currentId = llmTargetIds[i];
@@ -336,6 +365,7 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
             aiTaggingProgress.value.current = targetIds.length - llmTargetIds.length + i + 1;
             aiTaggingProgress.value.total = targetIds.length;
             aiTaggingProgress.value.status = `③ LLM 兜底 (${i + 1}/${llmTargetIds.length}): ${card.name || '未知角色'}`;
+            pushTagLog(`③ [${i + 1}/${llmTargetIds.length}] ${card.name || '未知角色'} → 请求中…`, 'info');
 
             try {
                 // 3. 深度提取卡片设定（防爆 Token 截断）
@@ -403,13 +433,18 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
                 if (Array.isArray(newTags) && newTags.length > 0) {
                     await applyAutoTags(card, newTags);
                     stats.llm++;
+                    pushTagLog(`✅ ${card.name || '未知角色'} → LLM 标签：${newTags.join('、')}`, 'ok');
                 } else {
                     stats.empty++; // 修正 3.3：模型返回空 → 归入"无匹配"，不是成功
+                    pushTagLog(`⚠️ ${card.name || '未知角色'} → 模型未返回任何标签（无匹配）`, 'warn');
                 }
             } catch (err) {
                 console.error(`❌ 卡片 [${card.name}] 打标失败:`, err);
                 stats.fail++;
-                failReasons.push(`${card.name || '未知角色'}: ${(err && err.message) ? err.message : String(err)}`);
+                const rawMsg = (err && err.message) ? err.message : String(err);
+                const cls = classifyApiError(rawMsg);
+                failReasons.push({ name: card.name || '未知角色', raw: rawMsg });
+                pushTagLog(`❌ ${card.name || '未知角色'} → ${cls.label}`, 'err');
             }
 
             // 请求节流：卡片之间留出间隔，配合重试退避，防止触发上游 429 限流（最后一张无需再等）
@@ -428,17 +463,14 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
             try { syncConfigToDisk(); } catch (e) { /* 忽略 */ }
         }
 
-        // 组装结果提示：分层展示 + 失败明细（最多 6 条，超长截断防刷屏）
-        // 🆕 P1：主体文案由纯函数生成（含"已跳过 / 未处理"，可单测）
-        let resultMsg = formatFunnelSummary(stats, plan);
-        if (stats.empty > 0) resultMsg += `\n⚠️ 无匹配标签: ${stats.empty} 张`;
+        // 📜 收尾总结写入日志窗口（**不再弹系统弹框**）：分层结果 + 失败归类聚合
+        pushTagLog('────────── 打标完成 ──────────', 'info');
+        pushTagLog(formatFunnelSummary(stats, plan), stats.fail > 0 ? 'warn' : 'ok');
+        if (stats.empty > 0) pushTagLog(`⚠️ 无匹配标签：${stats.empty} 张`, 'warn');
         if (stats.fail > 0) {
-            resultMsg += `\n❌ 失败: ${stats.fail} 张`;
-            const shown = failReasons.slice(0, 6);
-            resultMsg += '\n\n失败原因：\n' + shown.map(r => '· ' + r).join('\n');
-            if (failReasons.length > 6) resultMsg += `\n... 等共 ${failReasons.length} 条`;
+            pushTagLog(`❌ 失败：${stats.fail} 张（逐条明细见上方日志）`, 'err');
+            for (const line of summarizeFailures(failReasons)) pushTagLog(`· ${line}`, 'err');
         }
-        nativeAlert(resultMsg, stats.fail > 0 ? 'warning' : 'info');
 
         // 延迟一点关闭弹窗，让用户看到最后的状态
         setTimeout(() => {
@@ -699,6 +731,8 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
     return {
         // AI 智能批量打标
         showAITagModal, aiCandidateTags, aiCustomPrompt, aiTaggingProgress, isAITagging, openAITagModal, startAITagging,
+        // 📜 打标过程实时日志窗口
+        aiTagLog, showAiTagLog, pushTagLog, closeAiTagLog, clearAiTagLog,
         enableAIExtraction, customAIPrompt, newAICandidateTag,
         addAICandidateTag, addAICandidateTagManual, removeAICandidateTag,
         // 系统提示词（systemPromptPresets 保留在 App.vue，此处仅返回操作方法）

@@ -31,6 +31,32 @@
             <plugin-workspace ref="pluginWorkspaceRef" />
         </div>
 
+        <!-- ================= [ 批量操作悬浮控制台（可拖动：按住标题栏拖动，双击标题栏复位底部居中） ] =================
+             ⚠️ AR-35（2026-09-20 修复）：本块必须保持在**所有弹窗之前**渲染 ——
+             悬浮条与弹窗同为 z-50，同层级时由 DOM 顺序决定覆盖关系（谁后渲染谁在上）。
+             放在弹窗之后会盖住打标/自动分组等弹窗（用户报「被挡住了看不见」）。移动本块前先看 AR-35。 -->
+        <div v-if="selectedIds.length > 0"
+             class="fixed z-50 bg-gray-800/95 backdrop-blur-sm text-zinc-100 p-2.5 flex flex-col gap-1.5 shadow-2xl text-xs border border-gray-700 rounded-xl"
+             :style="batchBarStyle">
+            <div class="flex justify-between items-center px-1 cursor-grab select-none active:cursor-grabbing"
+                 title="按住此处可随意拖动；双击复位到底部居中"
+                 @mousedown="startBatchBarDrag"
+                 @dblclick="resetBatchBarPos">
+                <span class="font-bold text-blue-400">已勾选 {{ selectedIds.length }} 张卡片</span>
+                <div class="flex items-center gap-2">
+                    <span class="text-[10px] text-gray-500 select-none">⠿ 可拖动</span>
+                    <button @click="clearSelection" class="text-gray-400 hover:text-zinc-100">取消选择 ✕</button>
+                </div>
+            </div>
+            <div class="grid grid-cols-5 gap-1">
+                <button @click="batchChangeCategoryModal" class="bg-gray-700 hover:bg-blue-600 py-1.5 rounded transition font-medium">📁 移分组</button>
+                <button @click="showBatchTagModal = true" class="bg-gray-700 hover:bg-purple-600 py-1.5 rounded transition font-medium">🏷️ 贴标签</button>
+                <button @click="openAITagModal" class="bg-gray-700 hover:bg-amber-600 py-1.5 rounded transition font-medium">🤖 AI 打标</button>
+                <button @click="batchExportSelected" class="bg-gray-700 hover:bg-emerald-600 py-1.5 rounded transition font-medium">📦 导出</button>
+                <button @click="batchDeleteSelected" class="bg-gray-700 hover:bg-red-600 py-1.5 rounded transition font-medium" title="将选中的卡片批量移入回收站">🗑️ 删除</button>
+            </div>
+        </div>
+
         <!-- ================= [ 弹窗：单卡添加标签（子组件 SingleTagModal） ] ================= -->
         <single-tag-modal
             :show="tagModalVisible"
@@ -78,6 +104,18 @@
             @remove-batch-tag="removeBatchTag($event)"
             @toggle-common-tag="toggleBatchCommonTag($event)"
             @remove-system-common-tag="removeTagFromGlobalPool"
+        />
+
+        <!-- ================= [ 🏷️ 打标过程实时日志窗口（应用内；启动打标自动打开） ] =================
+             ⚠️ AR-36：组件内容器用 z-[60]（高于打标弹窗 z-50）——打标进行中两窗同开，过程窗口必须浮在最上；
+             不要再改回 z-50 靠模板顺序赌层级（本组件的挂载位置在 ai-tag-modal 之前）。 -->
+        <ai-tag-log-modal
+            :show="showAiTagLog"
+            :log="aiTagLog"
+            :running="isAITagging"
+            :progress="aiTaggingProgress"
+            @close="closeAiTagLog"
+            @clear="clearAiTagLog"
         />
 
         <!-- ================= [ 弹窗：AI 智能批量打标（子组件 AITagModal） ] ================= -->
@@ -154,6 +192,28 @@
             @toggle-rule="toggleAutoTagRule"
             @set-rules-enabled="setAutoTagRulesEnabled"
             @reset-disabled="resetAutoTagDisabledRules"
+        />
+
+        <!-- ================= [ 🗂️ 自动分组（收纳规则 + 预览 + 执行 + 回滚，S1~S4） ] ================= -->
+        <auto-group-modal
+            :show="showAutoGroupModal"
+            :profiles="autoGroupProfiles"
+            :last-run="autoGroupLastRun"
+            :scan="autoGroupScan"
+            :exec="autoGroupExec"
+            :rollback="autoGroupRollback"
+            :llm="autoGroupLlm"
+            :group-options="autoGroupGroupOptions"
+            :available-tags="globalAvailableTags"
+            @close="closeAutoGroupModal"
+            @save-profiles="saveAutoGroupProfiles"
+            @reset-profiles="resetAutoGroupProfiles"
+            @scan="scanAutoGroup($event)"
+            @execute="executeAutoGroup($event)"
+            @abort="abortAutoGroup"
+            @rollback="rollbackAutoGroup"
+            @llm-run="runLlmJudge()"
+            @llm-abort="abortLlmJudge"
         />
 
         <!-- ================= [ 弹窗：关系图谱（子组件 GraphModal） ] ================= -->
@@ -524,28 +584,7 @@
         <!-- ================= [ 全局 Toast 消息通知（子组件 ToastContainer） ] ================= -->
         <toast-container :toasts="toasts" />
 
-        <!-- ================= [ 批量操作悬浮控制台（可拖动：按住标题栏拖动，双击标题栏复位底部居中） ] ================= -->
-        <div v-if="selectedIds.length > 0"
-             class="fixed z-50 bg-gray-800/95 backdrop-blur-sm text-zinc-100 p-2.5 flex flex-col gap-1.5 shadow-2xl text-xs border border-gray-700 rounded-xl"
-             :style="batchBarStyle">
-            <div class="flex justify-between items-center px-1 cursor-grab select-none active:cursor-grabbing"
-                 title="按住此处可随意拖动；双击复位到底部居中"
-                 @mousedown="startBatchBarDrag"
-                 @dblclick="resetBatchBarPos">
-                <span class="font-bold text-blue-400">已勾选 {{ selectedIds.length }} 张卡片</span>
-                <div class="flex items-center gap-2">
-                    <span class="text-[10px] text-gray-500 select-none">⠿ 可拖动</span>
-                    <button @click="clearSelection" class="text-gray-400 hover:text-zinc-100">取消选择 ✕</button>
-                </div>
-            </div>
-            <div class="grid grid-cols-5 gap-1">
-                <button @click="batchChangeCategoryModal" class="bg-gray-700 hover:bg-blue-600 py-1.5 rounded transition font-medium">📁 移分组</button>
-                <button @click="showBatchTagModal = true" class="bg-gray-700 hover:bg-purple-600 py-1.5 rounded transition font-medium">🏷️ 贴标签</button>
-                <button @click="openAITagModal" class="bg-gray-700 hover:bg-amber-600 py-1.5 rounded transition font-medium">🤖 AI 打标</button>
-                <button @click="batchExportSelected" class="bg-gray-700 hover:bg-emerald-600 py-1.5 rounded transition font-medium">📦 导出</button>
-                <button @click="batchDeleteSelected" class="bg-gray-700 hover:bg-red-600 py-1.5 rounded transition font-medium" title="将选中的卡片批量移入回收站">🗑️ 删除</button>
-            </div>
-        </div>
+        <!-- ⚠️ 批量操作悬浮控制台已上移至弹窗区之前渲染（AR-35：放这里会因 DOM 顺序盖住所有弹窗）——搜索「批量操作悬浮控制台」找它 -->
 
     </div>
 </template>
@@ -585,7 +624,9 @@ import WbSnapshotModal from './WbSnapshotModal.vue'; // 🕒 世界书快照历�
 import ContextMenu from './ContextMenu.vue'; // 角色卡右键快捷菜单
 import WbContextMenu from './WbContextMenu.vue'; // 世界书右键快捷菜单
 import AiTagModal from './AITagModal.vue'; // AI 智能批量打标弹窗（⚠️ 注册名须用 AiTagModal，kebab 标签 ai-tag-modal 解析为 AiTagModal 而非 AITagModal）
+import AiTagLogModal from './AiTagLogModal.vue'; // 🏷️ 打标过程实时日志窗口（启动打标自动打开；替代系统弹框汇报）
 import AutoTagRulesModal from './AutoTagRulesModal.vue'; // 📝 自动打标规则表编辑弹窗（v2.1 可配置）
+import AutoGroupModal from './AutoGroupModal.vue'; // 🗂️ 自动分组弹窗（收纳规则 + 预览 + 执行 + 回滚，S1~S4）
 import HeaderBar from './HeaderBar.vue'; // 顶部菜单栏 + 紧凑工具栏
 import SidebarPanel from './SidebarPanel.vue'; // 左侧资源管理器（角色卡/世界书库）+ 拖拽把手
 import EditorPanel from './EditorPanel.vue'; // 右侧编辑器面板（角色卡编辑 + 世界书 IDE + 日志控制台）
@@ -594,6 +635,7 @@ import SnapshotModal from './SnapshotModal.vue'; // 📸 历史快照列表与�
 import PushModal from './PushModal.vue'; // 🚀 推送目标选择与执行对话框
 import { processFile, extractBookEntries, compileAutoTagRules, defaultAutoTagRules, normalizeCardData } from '../utils/cardLoader.js';
 import { DEFAULT_TAG_FUNNEL, normalizeTagFunnel, normalizeDisabledRules, resolveFunnelPlan, formatFunnelBadge, isFunnelEmpty } from '../utils/tagFunnel.js'; // 🏷️ P1：打标三层开关默认值/归一化/层决策（纯函数）；P2 起状态短标签也在此派生（供注册表命令的 badge 用）
+import { normalizeGroupProfiles, normalizeAutoGroupLastRun } from '../utils/autoGroup.js'; // 🗂️ 自动分组：分组档案/移动日志归一化（判定纯函数在同文件；执行器在 useAutoGroup）
 import { createCommandRegistry, evaluateWhen } from '../utils/commandRegistry.js'; // 🎛️ P2：命令注册表 + when 求值（菜单/命令面板/快捷键的唯一真相源）
 import { registerAppCommands } from '../composables/useCommands.js'; // 🎛️ P2：内置命令定义（从 HeaderBar 迁出）
 // normalizeCardData / isCharacterCardData / autoTagRules（cardLoader）与 parsePNGChunk / deepScanForJSON（pngParser）
@@ -609,6 +651,7 @@ import { useConfigPersistence } from '../composables/useConfigPersistence.js'; /
 import { useEmbeddedWorldbook } from '../composables/useEmbeddedWorldbook.js'; // 🌍 角色卡内嵌世界书编辑（条目派生/uid/折叠展开/触发词工具，从 App.vue 拆分）
 import { useStatusbarPreview } from '../composables/useStatusbarPreview.js'; // 📊 状态栏预览器（正则脚本渲染效果所见即所得 + 内置模板注入）
 import { useCardGroups } from '../composables/useCardGroups.js'; // 📁 角色卡分组/分类功能（拆分出的组合式函数）
+import { useAutoGroup } from '../composables/useAutoGroup.js'; // 🗂️ 卡片自动分组：执行/日志/回滚编排（判定层为 utils/autoGroup.js 纯函数）
 import { useDedupe } from '../composables/useDedupe.js'; // 🔍 查重与差异比对功能（拆分出的组合式函数）
 import { useWorldbooks } from '../composables/useWorldbooks.js'; // 🌍 世界书库与分组功能（拆分出的组合式函数）
 import { usePresets } from '../composables/usePresets.js'; // ⚙️ 酒馆预设管理功能
@@ -656,7 +699,7 @@ document.addEventListener('dragover', (e) => e.preventDefault());
 document.addEventListener('drop', (e) => e.preventDefault());
 
 export default {
-    components: { Section, DragOverlay, AppLoadingOverlay, ToastContainer, BatchTagModal, PromptModal, OptionSelectModal, SingleTagModal, DiskScanModal, UpdateModal, TextModal, ImageModal, ApiSettingsModal, /* ⛔ GlobalAssetModal 已下线（2026-09-20） */ CommandPaletteModal, GraphModal, WbGraphModal, DedupeModal, WbDedupeModal, PresetDedupeModal, PresetStitchModal, ContentDedupeModal, DiffModal, WbMergeModal, WbImportModal, GlobalEntrySearchModal, WbSnapshotModal, ContextMenu, WbContextMenu, AiTagModal, AutoTagRulesModal, HeaderBar, SidebarPanel, EditorPanel, PluginWorkspace, CardPluginModal, SnapshotModal, PushModal },
+    components: { Section, DragOverlay, AppLoadingOverlay, ToastContainer, BatchTagModal, PromptModal, OptionSelectModal, SingleTagModal, DiskScanModal, UpdateModal, TextModal, ImageModal, ApiSettingsModal, /* ⛔ GlobalAssetModal 已下线（2026-09-20） */ CommandPaletteModal, GraphModal, WbGraphModal, DedupeModal, WbDedupeModal, PresetDedupeModal, PresetStitchModal, ContentDedupeModal, DiffModal, WbMergeModal, WbImportModal, GlobalEntrySearchModal, WbSnapshotModal, ContextMenu, WbContextMenu, AiTagModal, AiTagLogModal, AutoTagRulesModal, AutoGroupModal, HeaderBar, SidebarPanel, EditorPanel, PluginWorkspace, CardPluginModal, SnapshotModal, PushModal },
     setup() {
         // 主题状态（localStorage 在自定义协议下可能不可用，做防御性读取；默认暗夜极客）
         let savedTheme = 'dark';
@@ -1440,7 +1483,22 @@ export default {
 
         // 分页状态
         const currentPage = ref(1);
-        const itemsPerPage = ref(18);
+        // 📄 每页显示数量（全库共享：角色卡 / 世界书 / 预设 / 插件 侧栏通用；localStorage 持久化）
+        //    ⚠️ itemsPerPage 经 ctx 暴露给 SidebarPanel（每页选择器），已从「未暴露基线」移除
+        const PAGE_SIZE_OPTIONS = [15, 25, 35, 45, 55, 65, 75, 85, 95, 105, 115];
+        const itemsPerPage = ref((() => {
+            try {
+                const saved = Number(localStorage.getItem('jsTavernPageSize'));
+                if (PAGE_SIZE_OPTIONS.includes(saved)) return saved;
+            } catch (e) { /* 忽略 */ }
+            return 25;
+        })());
+        const setItemsPerPage = (n) => {
+            const v = Number(n);
+            if (!PAGE_SIZE_OPTIONS.includes(v)) return;
+            itemsPerPage.value = v;
+            try { localStorage.setItem('jsTavernPageSize', String(v)); } catch (e) { /* 忽略 */ }
+        };
 
         // 自动贴标签规则 autoTagRules 已迁至 utils/cardLoader.js（纯常量，随 import 引入）
 
@@ -2283,6 +2341,13 @@ export default {
                             if (cfg.tagFunnel) {
                                 tagFunnel.value = normalizeTagFunnel(cfg.tagFunnel);
                             }
+                            // 🗂️ 自动分组：分组档案 + 移动日志（老配置无这两个键 → 保持默认空）
+                            if (Array.isArray(cfg.autoGroupProfiles)) {
+                                autoGroupProfiles.value = normalizeGroupProfiles(cfg.autoGroupProfiles);
+                            }
+                            if (cfg.autoGroupLastRun) {
+                                autoGroupLastRun.value = normalizeAutoGroupLastRun(cfg.autoGroupLastRun);
+                            }
                             // 自定义分组（空数组也要覆盖，尊重「全部删除」结果）
                             if (Array.isArray(cfg.customCategories)) {
                                 const clean = cfg.customCategories.filter(c => typeof c === 'string' && c.trim() !== '');
@@ -3020,6 +3085,14 @@ export default {
         // 唯一真相源：引擎（useAITools 短路）与 UI（按钮可用性 / 菜单状态提示）共用同一个 plan。
         // 默认值来自 tagFunnel.js 的 DEFAULT_TAG_FUNNEL（vector 默认关，与旧 useLocalVector 行为一致）。
         const tagFunnel = ref({ ...DEFAULT_TAG_FUNNEL });
+
+        // ================= 🗂️ 自动分组（声明式分组档案 + 移动日志；S1~S4） =================
+        // autoGroupProfiles：用户配置的「分组收纳条件」[{id, group, enabled, match:{type, pattern?}}]（可序列化）
+        // autoGroupLastRun ：最近自动分组的移动日志 { at, entries:[{cardName,fromGroup,toGroup,movedAt}], lastRollback? }
+        //   —— 回滚依据（按卡名 + 分组记录，不记绝对路径，见方案 §4.1）
+        // ⚠️ 判定/执行逻辑在 useAutoGroup（依赖 moveCardToGroup，须在其之后实例化）；此处只持可持久化状态。
+        const autoGroupProfiles = ref([]);
+        const autoGroupLastRun = ref(null);
 
         // 🆕 关闭/开启某条内置规则（规则表弹窗调用；立即落盘，规则即时生效）
         const toggleAutoTagRule = (name, enabled) => {
@@ -4790,6 +4863,7 @@ export default {
             builtinCatRenames, builtinCatHidden,
             autoTagRules, customKeywords,
             autoTagDisabledRules, tagFunnel,
+            autoGroupProfiles, autoGroupLastRun,
             apiEndpoint, apiKey, apiModel, apiType,
             theme, appSettings, sanitizeImportedTags, autoTagOnImport, snapshotConfig, localCategoryMap,
             sidebarWidth, viewMode, isCompactMode, sortBy,
@@ -4990,8 +5064,26 @@ export default {
             addNewCategory, currentCategoryDeletable, currentCategoryRenamable,
             deleteCustomCategory, renameCurrentCategory,
             currentCardCategory, handleCardCategoryChange, migrateOverlayKey, moveCardToGroup,
-            quickMoveGroup, batchChangeCategory, batchChangeCategoryModal, cleanupEmptyCategories
+            quickMoveGroup, batchChangeCategory, batchChangeCategoryModal, cleanupEmptyCategories,
+            cleanupEmptyGroupsPrompt, buildGroupOptions
         } = useCardGroups({ library, cardData, currentFolderPath, appConfig, selectedIds, customCategories, defaultCategories, removedDefaultKeys, currentCategoryKey, allCategories, isCategoryKnown, nativeAlert, confirmDialog, appPrompt, appSelect, getCategoryDisplayName, addLog, persistCardCategory, refreshLibrary, clearSelection, syncConfigToDisk });
+
+        // 🗂️ 卡片自动分组：组合式函数注入（判定纯函数见 utils/autoGroup.js；本处只管编排：扫描/执行/日志/回滚）
+        // ⚠️ 必须晚于 useCardGroups（注入其 moveCardToGroup —— **唯一合法移动原语**，负责三类按 path 派生键的迁移）；
+        //    ⚠️ 必须晚于 useConfigPersistence（注入 syncConfigToDiskDebounced）。
+        const {
+            showAutoGroupModal, openAutoGroupModal, closeAutoGroupModal,
+            autoGroupScan, autoGroupExec, autoGroupRollback, autoGroupGroupOptions,
+            autoGroupLlm, runLlmJudge, abortLlmJudge,
+            scanAutoGroup, executeAutoGroup, abortAutoGroup, rollbackAutoGroup,
+            saveAutoGroupProfiles, resetAutoGroupProfiles
+        } = useAutoGroup({
+            autoGroupProfiles, autoGroupLastRun,
+            library, allCategories, customCategories, currentCategoryKey, currentFolderPath, sanitizeImportedTags,
+            moveCardToGroup, buildGroupOptions, nativeAlert, confirmDialog, addLog, syncConfigToDiskDebounced,
+            // 🤖 LLM 判定层：统一 API 通道（sendChatMessage）+ 模型/回复提取工具（与 AI 打标/测卡同源）
+            apiEndpoint, apiKey, apiType, resolveApiModel, extractReplyContent
+        });
 
         // ✅ 批量操作：组合式函数注入（共享状态 selectedIds/lastSelectedIndex 与工具 clearSelection/cleanupEmptyCategories/paginatedLibrary 等保留或来自其他组合式函数）
         const {
@@ -5155,6 +5247,8 @@ export default {
         // ✨ AI 打标 / 翻译 / 格式升维：组合式函数注入（共享状态与 API 配置保留在 App.vue）
         const {
             showAITagModal, aiCandidateTags, aiCustomPrompt, aiTaggingProgress, isAITagging, openAITagModal, startAITagging,
+            // 📜 打标过程实时日志（窗口 + 日志流）
+            aiTagLog, showAiTagLog, pushTagLog, closeAiTagLog, clearAiTagLog,
             enableAIExtraction, customAIPrompt, newAICandidateTag,
             addAICandidateTag, addAICandidateTagManual, removeAICandidateTag,
             activeSystemPromptId, addSystemPromptPreset, deleteSystemPromptPreset,
@@ -5310,6 +5404,56 @@ export default {
                     clearSearch: () => { searchQueryInput.value = ''; },
                     setCategory: (k) => { currentCategoryKey.value = k; },
                     category: () => currentCategoryKey.value,
+                    cats: () => customCategories.value.slice(), // 🧹 e2e 环境校验：应用真实加载的自定义分组（副本，不传 Proxy）
+                    // 🏷️ 打标过程日志窗口（dev/e2e 用：开窗/写日志/状态/跑一次打标）
+                    aiTag: {
+                        openLog: () => { showAiTagLog.value = true; },
+                        closeLog: () => closeAiTagLog(),
+                        push: (t, lv) => pushTagLog(t, lv || 'info'),
+                        state: () => ({ show: showAiTagLog.value, len: aiTagLog.value.length, running: isAITagging.value }),
+                        run: async (n) => {
+                            const cards = library.value.slice(0, Math.max(1, Number(n) || 1));
+                            selectedIds.value = cards.map(c => c.id);
+                            await startAITagging();
+                            return true;
+                        }
+                    },
+                    // 🖱️ 选中前 N 张卡（dev/e2e 用：验证批量悬浮条/批量操作 UI）
+                    select: (n) => {
+                        selectedIds.value = library.value.slice(0, Math.max(1, Number(n) || 1)).map(c => c.id);
+                        return selectedIds.value.length;
+                    },
+                    // 🗂️ 自动分组端到端验收（dev-only）：驱动「扫描 → 执行 → 回滚」，并把结果映射为可序列化快照
+                    //    （plan.moves 含卡片活引用，直接 returnByValue 会炸 → 这里只返回可序列化的摘要）
+                    autoGroup: {
+                        open: () => openAutoGroupModal(),
+                        close: () => closeAutoGroupModal(),
+                        saveProfiles: (list) => { saveAutoGroupProfiles(list); return autoGroupProfiles.value.map(p => ({ group: p.group, type: p.match.type })); },
+                        scan: (includeGrouped) => {
+                            const p = scanAutoGroup({ includeGrouped: !!includeGrouped });
+                            if (!p) return null;
+                            return {
+                                counters: p.counters,
+                                moves: p.moves.map(m => ({ cardName: m.cardName, from: m.fromGroup, to: m.toGroup, reason: m.reason, source: m.source || 'rule', confidence: (m.llm && m.llm.confidence) || 0 })),
+                                skipped: p.skipped.map(s => ({ cardName: s.cardName, reason: s.reason })),
+                                targets: p.targetGroups,
+                                conflicts: p.conflicts.map(c => ({ cardName: c.cardName, winnerGroup: c.winnerGroup })),
+                                dupWarnings: p.duplicateWarnings.map(w => ({ targetGroup: w.targetGroup, fileName: w.fileName, count: w.cards.length }))
+                            };
+                        },
+                        execute: (ids) => executeAutoGroup(ids || null, { skipConfirm: true }), // e2e：跳过原生确认框（contextBridge 对象冻结、无法在页面里劫持）
+                        rollback: () => rollbackAutoGroup({ skipConfirm: true }),
+                        cleanupGroups: () => cleanupEmptyGroupsPrompt({ skipConfirm: true }), // DF-16：清理空分组（e2e 用）
+                        llm: (opts) => runLlmJudge(Object.assign({ skipConfirm: true }, opts || {})), // 🤖 LLM 分辨（e2e 用）
+                        llmState: () => autoGroupLlm.value,
+                        state: () => ({
+                            profiles: autoGroupProfiles.value,
+                            lastRun: autoGroupLastRun.value,
+                            exec: autoGroupExec.value,
+                            rollback: autoGroupRollback.value,
+                            scanAt: (autoGroupScan.value && autoGroupScan.value.at) || 0
+                        })
+                    },
                     /** 🔬 并发重入触发：同时发起 N 次刷新（不 await 前一次）——复现「快速连点刷新」 */
                     concurrentRefresh: async (n = 5) => {
                         const calls = [];
@@ -5497,6 +5641,7 @@ export default {
             showSnapshotModal, snapshotList, snapshotCardName, snapshotCardPath,
             openSnapshotModal, restoreSnapshot, openSnapshotFolder, closeSnapshotModal, deleteSnapshot, cleanAllSnapshots, cleanOrphanSnapshots,
             currentPage, totalPages,
+            itemsPerPage, pageSizeOptions: PAGE_SIZE_OPTIONS, setItemsPerPage,
             searchQuery, searchQueryInput, filteredLibrary, paginatedLibrary,
             selectFixedDirectory, addManualTag, changePage,
             exportLibraryDB, importLibraryDB,
@@ -5508,12 +5653,14 @@ export default {
             quickMoveGroup, exportCard, deleteCardItem, handleContextMenuAction,
             replaceCardImage,
             batchChangeCategory, batchAddTag,
-            batchChangeCategoryModal, batchExportSelected, batchDeleteSelected, cleanupEmptyCategories,
+            batchChangeCategoryModal, batchExportSelected, batchDeleteSelected, cleanupEmptyCategories, cleanupEmptyGroupsPrompt,
             showBatchTagModal, batchInputTags, batchMode, presetTagsLibrary,
             systemCommonTags, batchTagChips, toggleBatchCommonTag, removeBatchTag,
             tagLangMode, toggleTagLangMode, getPresetTagText, displayTagText,
             togglePresetTag, executeBatchTagSave,
             showAITagModal, aiCandidateTags, aiCustomPrompt, aiTaggingProgress, isAITagging, openAITagModal, startAITagging,
+            // 📜 打标过程实时日志窗口（模板挂载用）
+            aiTagLog, showAiTagLog, closeAiTagLog, clearAiTagLog,
             enableAIExtraction, customAIPrompt, newAICandidateTag,
             addAICandidateTag, addAICandidateTagManual, removeAICandidateTag,
             isTranslating, translateCardContent,
@@ -5533,6 +5680,13 @@ export default {
             showAutoTagRulesModal, autoTagRules, saveAutoTagRules, resetAutoTagRules,
             autoTagDisabledRules, toggleAutoTagRule, setAutoTagRulesEnabled, resetAutoTagDisabledRules,
             tagFunnel, tagFunnelPlan, autoTagRulesStats, setFunnelLayer,
+            // 🗂️ 自动分组（收纳规则 + 预览 + 执行 + 回滚）
+            autoGroupProfiles, autoGroupLastRun, showAutoGroupModal, openAutoGroupModal, closeAutoGroupModal,
+            autoGroupScan, autoGroupExec, autoGroupRollback, autoGroupGroupOptions,
+            // 🤖 LLM 判定层（模板经弹窗 props/emit 使用：:llm / @llm-run / @llm-abort）
+            autoGroupLlm, runLlmJudge, abortLlmJudge,
+            scanAutoGroup, executeAutoGroup, abortAutoGroup, rollbackAutoGroup,
+            saveAutoGroupProfiles, resetAutoGroupProfiles,
             // 🆕 P2：打标管线状态短标签 / 三层全关 / 查重目标命名 —— 注册表命令的 badge 与 titleFn 靠它们
             funnelBadge, funnelEmpty, dedupeTargetLabel,
             importAutoTagEnabled,

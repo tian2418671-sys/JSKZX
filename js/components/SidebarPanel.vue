@@ -113,6 +113,10 @@
                 <button v-if="currentCategoryRenamable" @click="renameCurrentCategory" class="px-1.5 py-1 bg-zinc-800 border border-zinc-700 rounded hover:bg-zinc-700 text-xs text-zinc-300 shrink-0" title="重命名分组">✏️</button>
                 <!-- 【修复】预设分组也可删除（仅系统必需的全部分组不可删），无需先改名才出删除按钮 -->
                 <button v-if="currentCategoryDeletable" @click="deleteCustomCategory(currentCategoryKey)" class="px-1.5 py-1 bg-zinc-800 border border-zinc-700 rounded hover:bg-red-600 hover:text-white text-xs text-zinc-300 shrink-0" title="删除当前分组">🗑️</button>
+                <!-- 🗂️ 自动分组（S1~S4）：按分组收纳条件把未分类卡片移进同名文件夹；先预览、可回滚 -->
+                <button @click="openAutoGroupModal" class="px-1.5 py-1 bg-zinc-800 border border-zinc-700 rounded hover:bg-sky-600 hover:text-white text-xs text-zinc-300 shrink-0" title="自动分组（收纳规则 + 预览 + 可回滚）">🗂️</button>
+                <!-- 🧹 清理空分组（DF-16）：0 卡片的空组（自定义/预设）一键清（含空文件夹；预设可恢复） -->
+                <button @click="cleanupEmptyGroupsPrompt" class="px-1.5 py-1 bg-zinc-800 border border-zinc-700 rounded hover:bg-emerald-600 hover:text-white text-xs text-zinc-300 shrink-0" title="清理空分组（0 卡片的空组，含空文件夹）">🧹</button>
             </div>
 
             <!-- 行2.5：快捷标签搜索（按大分类分组，点击直接填入搜索框并立即过滤） -->
@@ -263,13 +267,20 @@
             <div v-else-if="filteredLibrary.length === 0" class="flex flex-col items-center justify-center h-full text-zinc-500 text-xs text-center p-4">
                 🔍 当前筛选/搜索条件下<br>没有匹配的卡片
             </div>
+        </div>
 
-            <!-- 分页控制条 -->
-            <div class="flex items-center justify-between px-3 py-2 border-t border-zinc-800 bg-zinc-900 text-xs sticky bottom-0">
-                <button @click="changePage(currentPage - 1)" :disabled="currentPage === 1" class="px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 rounded-lg font-bold transition disabled:opacity-40 disabled:cursor-not-allowed">◀ 上一页</button>
-                <span class="text-zinc-400 font-mono font-bold">{{ currentPage }} / {{ totalPages }} <span class="text-zinc-600 font-normal">({{ filteredLibrary.length }})</span></span>
-                <button @click="changePage(currentPage + 1)" :disabled="currentPage === totalPages" class="px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 rounded-lg font-bold transition disabled:opacity-40 disabled:cursor-not-allowed">下一页 ▶</button>
-            </div>
+        <!-- 📄 分页控制条（单行紧凑 · 固定侧栏底部；每页数量全库共享） -->
+        <div v-if="viewMode === 'list'" class="flex items-center gap-1.5 px-2 py-1.5 border-t border-zinc-800 bg-zinc-900 shrink-0 text-[10px]">
+            <button @click="changePage(currentPage - 1)" :disabled="currentPage === 1" class="shrink-0 w-6 h-6 flex items-center justify-center bg-zinc-800 hover:bg-zinc-700 rounded transition disabled:opacity-40 disabled:cursor-not-allowed" title="上一页">◀</button>
+            <span class="text-zinc-400 font-mono font-bold shrink-0">{{ currentPage }} / {{ totalPages }}</span>
+            <span class="text-zinc-600 shrink-0">({{ filteredLibrary.length }})</span>
+            <span class="flex-1"></span>
+            <select :value="itemsPerPage" @change="setItemsPerPage($event.target.value)"
+                    class="h-6 shrink-0 bg-zinc-800 border border-zinc-700/60 rounded px-1 text-[10px] text-zinc-300 focus:outline-none focus:border-indigo-500/80"
+                    title="每页显示数量（角色卡 / 世界书 / 预设 / 插件 全库共享）">
+                <option v-for="n in pageSizeOptions" :key="n" :value="n">{{ n }}/页</option>
+            </select>
+            <button @click="changePage(currentPage + 1)" :disabled="currentPage === totalPages" class="shrink-0 w-6 h-6 flex items-center justify-center bg-zinc-800 hover:bg-zinc-700 rounded transition disabled:opacity-40 disabled:cursor-not-allowed" title="下一页">▶</button>
         </div>
 
         <!-- 🎴 网格视图（固定 2 列自适应竖卡 + 原生 2:3 比例） -->
@@ -313,12 +324,20 @@
                 🔍 当前筛选/搜索条件下<br>没有匹配的卡片
             </div>
 
-            <!-- 分页控制条 -->
-            <div class="flex items-center justify-between px-3 py-2 border-t border-zinc-800 bg-zinc-900 text-xs sticky bottom-0" style="grid-column: 1 / -1;">
-                <button @click="changePage(currentPage - 1)" :disabled="currentPage === 1" class="px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 rounded-lg font-bold transition disabled:opacity-40 disabled:cursor-not-allowed">◀ 上一页</button>
-                <span class="text-zinc-400 font-mono font-bold">{{ currentPage }} / {{ totalPages }} <span class="text-zinc-600 font-normal">({{ filteredLibrary.length }})</span></span>
-                <button @click="changePage(currentPage + 1)" :disabled="currentPage === totalPages" class="px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 rounded-lg font-bold transition disabled:opacity-40 disabled:cursor-not-allowed">下一页 ▶</button>
-            </div>
+        </div>
+
+        <!-- 📄 分页控制条（单行紧凑 · 固定侧栏底部；每页数量全库共享） -->
+        <div v-if="viewMode === 'grid'" class="flex items-center gap-1.5 px-2 py-1.5 border-t border-zinc-800 bg-zinc-900 shrink-0 text-[10px]">
+            <button @click="changePage(currentPage - 1)" :disabled="currentPage === 1" class="shrink-0 w-6 h-6 flex items-center justify-center bg-zinc-800 hover:bg-zinc-700 rounded transition disabled:opacity-40 disabled:cursor-not-allowed" title="上一页">◀</button>
+            <span class="text-zinc-400 font-mono font-bold shrink-0">{{ currentPage }} / {{ totalPages }}</span>
+            <span class="text-zinc-600 shrink-0">({{ filteredLibrary.length }})</span>
+            <span class="flex-1"></span>
+            <select :value="itemsPerPage" @change="setItemsPerPage($event.target.value)"
+                    class="h-6 shrink-0 bg-zinc-800 border border-zinc-700/60 rounded px-1 text-[10px] text-zinc-300 focus:outline-none focus:border-indigo-500/80"
+                    title="每页显示数量（角色卡 / 世界书 / 预设 / 插件 全库共享）">
+                <option v-for="n in pageSizeOptions" :key="n" :value="n">{{ n }}/页</option>
+            </select>
+            <button @click="changePage(currentPage + 1)" :disabled="currentPage === totalPages" class="shrink-0 w-6 h-6 flex items-center justify-center bg-zinc-800 hover:bg-zinc-700 rounded transition disabled:opacity-40 disabled:cursor-not-allowed" title="下一页">▶</button>
         </div>
 
         <!-- 批量操作栏已迁移至 App.vue 全局底部悬浮控制台（fixed bottom-4），不再挤占侧边栏 -->
@@ -453,7 +472,7 @@
 
             <!-- 世界书列表（筛选后） -->
             <div class="flex-1 overflow-y-auto custom-scrollbar p-2 space-y-1.5">
-                <div v-for="(wb, index) in filteredWorldbooks" :key="index"
+                <div v-for="(wb, index) in wbPageSlice" :key="index"
                      @click="activeWorldbook = wb"
                      @contextmenu.prevent="openWbContextMenu($event, wb)"
                      :class="activeWorldbook && activeWorldbook.path === wb.path ? 'bg-amber-600/20 border-amber-500/50' : 'bg-zinc-800/50 border-zinc-700/50 hover:bg-zinc-700'"
@@ -507,6 +526,20 @@
                     🔍 没有匹配的世界书
                 </div>
             </div>
+
+            <!-- 📄 分页控制条（单行紧凑 · 固定侧栏底部） -->
+            <div v-if="filteredWorldbooks.length > 0" class="flex items-center gap-1.5 px-2 py-1.5 border-t border-zinc-800 bg-zinc-900 shrink-0 text-[10px]">
+                <button @click="changeWbPage(wbPage - 1)" :disabled="wbPage === 1" class="shrink-0 w-6 h-6 flex items-center justify-center bg-zinc-800 hover:bg-zinc-700 rounded transition disabled:opacity-40 disabled:cursor-not-allowed" title="上一页">◀</button>
+                <span class="text-zinc-400 font-mono font-bold shrink-0">{{ wbPage }} / {{ wbTotalPages }}</span>
+                <span class="text-zinc-600 shrink-0">({{ filteredWorldbooks.length }})</span>
+                <span class="flex-1"></span>
+                <select :value="itemsPerPage" @change="setItemsPerPage($event.target.value)"
+                        class="h-6 shrink-0 bg-zinc-800 border border-zinc-700/60 rounded px-1 text-[10px] text-zinc-300 focus:outline-none focus:border-amber-500/80"
+                        title="每页显示数量（角色卡 / 世界书 / 预设 / 插件 全库共享）">
+                    <option v-for="n in pageSizeOptions" :key="n" :value="n">{{ n }}/页</option>
+                </select>
+                <button @click="changeWbPage(wbPage + 1)" :disabled="wbPage === wbTotalPages" class="shrink-0 w-6 h-6 flex items-center justify-center bg-zinc-800 hover:bg-zinc-700 rounded transition disabled:opacity-40 disabled:cursor-not-allowed" title="下一页">▶</button>
+            </div>
         </template>
 
         <!-- ============ ⚙️ 预设模式 ============ -->
@@ -533,7 +566,7 @@
             </div>
 
             <div class="flex-1 overflow-y-auto custom-scrollbar p-2 space-y-1.5">
-                <div v-for="(preset, index) in filteredPresets" :key="preset.path || index"
+                <div v-for="(preset, index) in presetPageSlice" :key="preset.path || index"
                      @click="activePreset = preset"
                      @contextmenu.prevent="openPresetContextMenu($event, preset)"
                      :class="activePreset && activePreset.path === preset.path ? 'bg-sky-600/20 border-sky-500/50' : 'bg-zinc-800/50 border-zinc-700/50 hover:bg-zinc-700'"
@@ -554,6 +587,20 @@
                 </div>
                 <div v-else-if="filteredPresets.length === 0" class="text-center py-8 text-zinc-500 text-xs">🔍 没有匹配的预设</div>
             </div>
+
+            <!-- 📄 分页控制条（单行紧凑 · 固定侧栏底部） -->
+            <div v-if="filteredPresets.length > 0" class="flex items-center gap-1.5 px-2 py-1.5 border-t border-zinc-800 bg-zinc-900 shrink-0 text-[10px]">
+                <button @click="changePresetPage(presetPage - 1)" :disabled="presetPage === 1" class="shrink-0 w-6 h-6 flex items-center justify-center bg-zinc-800 hover:bg-zinc-700 rounded transition disabled:opacity-40 disabled:cursor-not-allowed" title="上一页">◀</button>
+                <span class="text-zinc-400 font-mono font-bold shrink-0">{{ presetPage }} / {{ presetTotalPages }}</span>
+                <span class="text-zinc-600 shrink-0">({{ filteredPresets.length }})</span>
+                <span class="flex-1"></span>
+                <select :value="itemsPerPage" @change="setItemsPerPage($event.target.value)"
+                        class="h-6 shrink-0 bg-zinc-800 border border-zinc-700/60 rounded px-1 text-[10px] text-zinc-300 focus:outline-none focus:border-sky-500/80"
+                        title="每页显示数量（角色卡 / 世界书 / 预设 / 插件 全库共享）">
+                    <option v-for="n in pageSizeOptions" :key="n" :value="n">{{ n }}/页</option>
+                </select>
+                <button @click="changePresetPage(presetPage + 1)" :disabled="presetPage === presetTotalPages" class="shrink-0 w-6 h-6 flex items-center justify-center bg-zinc-800 hover:bg-zinc-700 rounded transition disabled:opacity-40 disabled:cursor-not-allowed" title="下一页">▶</button>
+            </div>
         </template>
 
         <!-- ============ 🧩 插件模式 ============ -->
@@ -573,7 +620,7 @@
 
             <div class="flex-1 overflow-y-auto custom-scrollbar p-2 space-y-1.5">
                 <!-- 🧩 插件树：总条目（插件）→ 子条目（内部文件，可展开/收起） -->
-                <div v-for="(plugin, index) in filteredPlugins" :key="plugin.id || index"
+                <div v-for="(plugin, index) in pluginPageSlice" :key="plugin.id || index"
                      class="rounded-lg border transition flex flex-col overflow-hidden"
                      :class="activePlugin && activePlugin.id === plugin.id ? 'border-violet-500/50 bg-violet-600/10' : 'border-zinc-700/50 bg-zinc-800/50'">
 
@@ -612,6 +659,20 @@
                 </div>
                 <div v-else-if="filteredPlugins.length === 0" class="text-center py-8 text-zinc-500 text-xs">🔍 没有匹配的插件</div>
             </div>
+
+            <!-- 📄 分页控制条（单行紧凑 · 固定侧栏底部） -->
+            <div v-if="filteredPlugins.length > 0" class="flex items-center gap-1.5 px-2 py-1.5 border-t border-zinc-800 bg-zinc-900 shrink-0 text-[10px]">
+                <button @click="changePluginPage(pluginPage - 1)" :disabled="pluginPage === 1" class="shrink-0 w-6 h-6 flex items-center justify-center bg-zinc-800 hover:bg-zinc-700 rounded transition disabled:opacity-40 disabled:cursor-not-allowed" title="上一页">◀</button>
+                <span class="text-zinc-400 font-mono font-bold shrink-0">{{ pluginPage }} / {{ pluginTotalPages }}</span>
+                <span class="text-zinc-600 shrink-0">({{ filteredPlugins.length }})</span>
+                <span class="flex-1"></span>
+                <select :value="itemsPerPage" @change="setItemsPerPage($event.target.value)"
+                        class="h-6 shrink-0 bg-zinc-800 border border-zinc-700/60 rounded px-1 text-[10px] text-zinc-300 focus:outline-none focus:border-violet-500/80"
+                        title="每页显示数量（角色卡 / 世界书 / 预设 / 插件 全库共享）">
+                    <option v-for="n in pageSizeOptions" :key="n" :value="n">{{ n }}/页</option>
+                </select>
+                <button @click="changePluginPage(pluginPage + 1)" :disabled="pluginPage === pluginTotalPages" class="shrink-0 w-6 h-6 flex items-center justify-center bg-zinc-800 hover:bg-zinc-700 rounded transition disabled:opacity-40 disabled:cursor-not-allowed" title="下一页">▶</button>
+            </div>
         </template>
 
     </aside>
@@ -627,7 +688,7 @@
 </template>
 
 <script>
-import { inject, ref, computed } from 'vue';
+import { inject, ref, computed, watch } from 'vue';
 import { groupTagsByCategory } from '../utils/tagCategories.js';
 
 export default {
@@ -653,6 +714,32 @@ export default {
 
         // ✅ [世界书模式] 顶部高级功能区折叠面板（URL导入/目录/分组/筛选收进面板，与角色卡模式一致）
         const showWbAdvanced = ref(false);
+
+        // 📄 [每页显示数量] 角色卡库分页已有（useSearch）；世界书/预设/插件三库的页码状态在此。
+        //    每页数量为全局共享（ctx.itemsPerPage，localStorage 持久化，侧栏各库选择器联动）
+        const wbPage = ref(1);
+        const presetPage = ref(1);
+        const pluginPage = ref(1);
+        // 通用分页器：listRef（ctx 过滤后列表 ref）→ [totalPages, pageSlice, changePage]，页越界自动收回
+        const makePager = (listRef, pageRef) => {
+            const totalPages = computed(() => Math.max(1, Math.ceil(((listRef && listRef.value) || []).length / (ctx.itemsPerPage.value || 25))));
+            watch(totalPages, (tp) => { if (pageRef.value > tp) pageRef.value = tp; });
+            const pageSlice = computed(() => {
+                const size = ctx.itemsPerPage.value || 25;
+                const p = Math.min(pageRef.value, totalPages.value);
+                return ((listRef && listRef.value) || []).slice((p - 1) * size, p * size);
+            });
+            const changePage = (p2) => { if (p2 >= 1 && p2 <= totalPages.value) pageRef.value = p2; };
+            return [totalPages, pageSlice, changePage];
+        };
+        const [wbTotalPages, wbPageSlice, changeWbPage] = makePager(ctx.filteredWorldbooks, wbPage);
+        const [presetTotalPages, presetPageSlice, changePresetPage] = makePager(ctx.filteredPresets, presetPage);
+        const [pluginTotalPages, pluginPageSlice, changePluginPage] = makePager(ctx.filteredPlugins, pluginPage);
+        // 搜索 / 筛选变化 → 对应库回第一页
+        watch(() => ctx.wbSearchQuery?.value, () => { wbPage.value = 1; });
+        watch(() => ctx.wbFilterType?.value, () => { wbPage.value = 1; });
+        watch(() => ctx.presetSearchQuery?.value, () => { presetPage.value = 1; });
+        watch(() => ctx.pluginSearchQuery?.value, () => { pluginPage.value = 1; });
 
         // 🏷️ [新增] 列表标签展示开关（控制列表项是否显示标签，可关掉节省空间；localStorage 持久化）
         const showListTags = ref((() => {
@@ -824,6 +911,8 @@ export default {
             addNewCategory: ctx.addNewCategory,
             renameCurrentCategory: ctx.renameCurrentCategory,
             deleteCustomCategory: ctx.deleteCustomCategory,
+            openAutoGroupModal: ctx.openAutoGroupModal, // 🗂️ 自动分组入口（分组管理按钮行）
+            cleanupEmptyGroupsPrompt: ctx.cleanupEmptyGroupsPrompt, // 🧹 清理空分组（DF-16）
             currentCategoryDeletable: ctx.currentCategoryDeletable,
             currentCategoryRenamable: ctx.currentCategoryRenamable,
             searchQueryInput: ctx.searchQueryInput,
@@ -907,6 +996,13 @@ export default {
             currentWbCategory: ctx.currentWbCategory,
             wbCategories: ctx.wbCategories,
             wbSearchQuery: ctx.wbSearchQuery,
+            // 📄 每页显示数量（全库共享选择器）+ 世界书/预设/插件三库分页
+            itemsPerPage: ctx.itemsPerPage,
+            pageSizeOptions: ctx.pageSizeOptions,
+            setItemsPerPage: ctx.setItemsPerPage,
+            wbPage, wbTotalPages, wbPageSlice, changeWbPage,
+            presetPage, presetTotalPages, presetPageSlice, changePresetPage,
+            pluginPage, pluginTotalPages, pluginPageSlice, changePluginPage,
             wbFilterType: ctx.wbFilterType,
             filteredWorldbooks: ctx.filteredWorldbooks,
             openWbMergeModal: ctx.openWbMergeModal,

@@ -46,7 +46,19 @@
                             <command-menu-item v-for="cmd in group.commands" :key="cmd.id" :cmd="cmd" :registry="registry" @executed="closeMenus()" />
                         </template>
                         <div class="h-px bg-zinc-700 my-1"></div>
-                        <div class="px-3 py-1.5 text-[10px] text-zinc-500 leading-relaxed">☑️ 选择 / 🏷️ 打标 / 📂 分类分组 已从「编辑」菜单并入本菜单（一个版本后移除本提示）</div>
+                        <div class="px-3 py-1.5 text-[10px] text-zinc-500 leading-relaxed">☑️ 选择 / 🏷️ 打标 已从「编辑」菜单并入本菜单；📁 分组相关命令已移至「📁 分组」菜单（2026-09-20）</div>
+                    </div>
+                </div>
+
+                <!-- 📁 分组(G)：分组管理 / 收纳规则 / 批量归类类命令的集合入口（2026-09-20 用户需求：分组命令集中到独立菜单） -->
+                <div class="relative" @mouseenter="setMenu('groups')" @mouseleave="closeMenus()">
+                    <button class="px-2 py-1 rounded hover:bg-zinc-800 hover:text-sky-300 transition font-bold" @click="setMenu('groups')">📁 分组(G)</button>
+                    <div :class="menuOpen === 'groups' ? 'flex' : 'hidden'" class="flex-col absolute top-full left-0 min-w-[260px] bg-zinc-800 border border-zinc-700 rounded shadow-xl py-1 z-50 text-xs">
+                        <template v-for="(group, gi) in commandsByMenu.groups || []" :key="gi">
+                            <div v-if="gi > 0" class="h-px bg-zinc-700 my-1"></div>
+                            <div v-if="group.sectionTitle" class="px-3 py-1 text-[10px] font-bold text-zinc-500">{{ group.sectionTitle }}</div>
+                            <command-menu-item v-for="cmd in group.commands" :key="cmd.id" :cmd="cmd" :registry="registry" @executed="closeMenus()" />
+                        </template>
                     </div>
                 </div>
 
@@ -384,7 +396,9 @@ export default {
         const commandsByMenu = computed(() => {
             const out = {};
             // 🆕 P2-2：菜单键与注册表 `menu` 字段一致（2026-09-20：「编辑」菜单已并入「标签」，故 key 列表不含 edit）
-            for (const key of ['file', 'tags', 'push', 'view', 'tools', 'maintenance', 'lab', 'help']) {
+            // ⚠️ 新增菜单必须「三处同加」：注册表 menu 字段 + 上方模板块 + 本数组 —— 漏加本数组会让下拉渲染成空白
+            //    （2026-09-20「分组」菜单踩过；pycheck「注册表菜单从未被渲染」已补防线）
+            for (const key of ['file', 'tags', 'groups', 'push', 'view', 'tools', 'maintenance', 'lab', 'help']) {
                 out[key] = registry.listByMenu(key, whenContext.value);
             }
             return out;

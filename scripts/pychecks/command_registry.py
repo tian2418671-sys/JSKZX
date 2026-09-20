@@ -141,6 +141,8 @@ def command_registry(ctx):
     # ---------- 引用侧检查 ----------
     known = set(ids)
     refs = 0
+    rendered_keys = set()      # 模板里真实引用的菜单键（commandsByMenu.xxx）
+    key_list_keys = set()      # `for (const key of [...])` 数组里的菜单键
     for path in sorted(set(ctx.glob("js/**/*.vue")) | set(ctx.glob("js/**/*.js"))):
         if path.replace("\\", "/").endswith("useCommands.js"):
             continue
@@ -156,22 +158,49 @@ def command_registry(ctx):
 
         for dotted, bracketed in MENU_REF_RE.findall(text):
             key = dotted or bracketed
-            if key and key not in menus:
-                problems.append(f"{path} 渲染了不存在的菜单键：commandsByMenu.{key}")
+            if key:
+                rendered_keys.add(key)
+                if key not in menus:
+                    problems.append(f"{path} 渲染了不存在的菜单键：commandsByMenu.{key}")
 
         for key_list in MENU_KEYS_RE.findall(text):
             for key in STR_IN_ARR_RE.findall(key_list):
-                if key and key not in menus:
-                    problems.append(f"{path} 的菜单键列表里含空菜单：{key}（没有任何命令归属于它）")
+                if key:
+                    key_list_keys.add(key)
+                    if key not in menus:
+                        problems.append(f"{path} 的菜单键列表里含空菜单：{key}（没有任何命令归属于它）")
+
+    # ---------- 渲染接线双向检查 ----------
+    # 由来（2026-09-20）：「分组」菜单三处只加了两处 —— 注册表 menu:'groups' 就位、HeaderBar 模板块也写了
+    # commandsByMenu.groups，但 commandsByMenu 计算里的 `for (const key of [...])` 数组漏加 'groups'
+    # → out.groups 从未被赋值 → 下拉渲染成**空白菜单**（原有两项都查不到：引用存在 ✓、数组内无空键 ✓）。
+    # 真实软件冒烟才发现。教训：模板引用 ≠ 渲染，只有 key 数组里的键才会真的把命令算出来。
+    RENDER_WHITELIST = {"settings", "toolbar"}  # 手写交错结构（按钮 @click 走 runCommand），非 commandsByMenu 驱动
+    # ① 模板引用了、但 key 数组没写 → out[key] 从未赋值 → 空渲染（本次故障形态）
+    for key in sorted(rendered_keys):
+        if key in key_list_keys or key in RENDER_WHITELIST:
+            continue
+        problems.append(
+            f"HeaderBar 模板引用了 commandsByMenu.{key}，但 commandsByMenu 的 key 数组里没有它"
+            f" → out.{key} 从未被赋值，菜单会渲染成空白（新增菜单要「注册表 + 模板块 + key 数组」三处同加）"
+        )
+    # ② 注册表里分配了命令的菜单，必须至少接上渲染（模板引用或 key 数组两者有其一）
+    for key in sorted(menus):
+        if key in rendered_keys or key in key_list_keys or key in RENDER_WHITELIST:
+            continue
+        problems.append(
+            f"注册表菜单「{key}」有命令但从未被渲染：HeaderBar 模板无 commandsByMenu.{key} 引用、"
+            f"key 数组里也没有 → 该菜单不会出现"
+        )
 
     if problems:
         ctx.note(
             "命令注册表问题：\n  " + "\n  ".join(problems[:24])
             + f"\n\n定义位置：{COMMANDS_JS}；渲染位置：js/components/HeaderBar.vue、js/components/CommandPaletteModal.vue"
         )
-        return failed(f"{len(problems)} 项注册表问题（id / 快捷键 / 引用不一致）")
+        return failed(f"{len(problems)} 项注册表问题（id / 快捷键 / 引用 / 渲染不一致）")
 
-    return ok(f"{len(ids)} 条命令 · {len(menus)} 个菜单键 · {refs} 处引用，id 与快捷键均无冲突")
+    return ok(f"{len(ids)} 条命令 · {len(menus)} 个菜单键 · {refs} 处引用，id、快捷键与渲染均一致")
 
 
 def command_ctx_refs(ctx):

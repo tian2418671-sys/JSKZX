@@ -113,7 +113,7 @@ export function normalizeExtensionPlugin(item) {
     const scripts = [];
     for (const entry of entryFiles) {
         const full = entry.replace(/^\//, '');
-        // Windows 上 collectExtensionFiles 用 path.join 生成反斜杠路径（E:\...\dist\index.js），
+        // Windows 上 collectExtensionFiles 用 path.join 生成反斜杠路径（绝对路径 + dist\index.js），
         // 而 manifest 声明的是正斜杠（dist/index.js），直接 endsWith 必然失配。
         // 统一归一为 / 再比较，确保 bundlePath 落到真实绝对路径而非相对路径。
         const normFull = full.replace(/\\/g, '/');

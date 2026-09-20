@@ -139,9 +139,46 @@ export function registerAppCommands(registry, ctx) {
             run: () => ctx.openAITagModal()
         },
         {
-            id: 'edit.batchCategory', title: '📂 批量修改分类分组', category: '标签',
-            menu: 'tags', section: 2, order: 20,
+            id: 'edit.batchCategory', title: '📂 批量修改分类分组（选中卡）…', category: '分组',
+            menu: 'groups', section: 2, order: 10,
+            tooltip: '把当前选中的卡片批量移入指定分组文件夹（物理移动，带路径派生键迁移）',
             run: () => ctx.batchChangeCategoryModal()
+        },
+        // 🆕 分组（G）菜单命令（2026-09-20 用户需求：分组相关命令集中到「📁 分组」菜单）
+        {
+            id: 'group.new', title: '➕ 新建分组…', category: '分组',
+            menu: 'groups', section: 1, order: 10, sectionTitle: '📁 分组管理', extraClass: 'hover:bg-sky-600',
+            tooltip: '在库目录下创建新的分组文件夹（与侧边栏「📁 分组」行的 ➕ 同款）',
+            run: () => ctx.addNewCategory()
+        },
+        {
+            id: 'group.rename', title: '✏️ 重命名当前分组…', category: '分组',
+            menu: 'groups', section: 1, order: 20,
+            disabled: () => !v(ctx.currentCategoryRenamable),
+            tooltip: '重命名侧边栏当前选中的分组（「全部/未分类」等视图模式不可重命名）',
+            run: () => ctx.renameCurrentCategory()
+        },
+        {
+            id: 'group.delete', title: '🗑️ 删除当前分组…', category: '分组',
+            menu: 'groups', section: 1, order: 30, danger: true, extraClass: 'hover:bg-rose-600 text-rose-400',
+            disabled: () => !v(ctx.currentCategoryDeletable),
+            tooltip: '删除侧边栏当前选中的分组（不删卡片，组内卡片归入未分类；有二次确认）',
+            run: () => ctx.deleteCustomCategory(v(ctx.currentCategoryKey))
+        },
+        // 🆕 自动分组（S1~S4）：按「分组收纳条件」把未分类卡片移进同名文件夹（先预览、后执行、可回滚）
+        //    ⚠️ sectionTitle 挂在本条（它成为该组第一条）——「组内第一条」的声明才生效（commandRegistry 只认第一条）
+        {
+            id: 'tag.autoGroup', title: '🗂️ 自动分组（收纳规则）…', category: '分组',
+            menu: 'groups', section: 2, order: 5, sectionTitle: '🗂️ 收纳与归类', extraClass: 'hover:bg-sky-600',
+            tooltip: '按分组声明的收纳条件把未分类卡片移进同名分组文件夹：只读预览 → 勾选执行 → 一键回滚（默认不碰已手动分组的卡）',
+            run: () => ctx.openAutoGroupModal()
+        },
+        // 🆕 清理空分组（DF-16）：0 卡片的空组（自定义/预设）批量清（含空文件夹；预设可恢复）
+        {
+            id: 'edit.cleanupEmptyGroups', title: '🧹 清理空分组…', category: '分组',
+            menu: 'groups', section: 2, order: 35,
+            tooltip: '列出 0 卡片的空分组（自定义/预设）：删除配置 + 空文件夹（仅空目录；预设隐藏后可在设置恢复）',
+            run: () => ctx.cleanupEmptyGroupsPrompt()
         },
         {
             id: 'edit.cleanGlobalTags', title: '🧹 清理无效全局标签', category: '标签',

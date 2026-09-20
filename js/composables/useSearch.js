@@ -425,6 +425,10 @@ export function useSearch({
     watch([searchQuery, currentCategoryKey], () => {
         currentPage.value = 1;
     });
+    // 每页数量变化时，当前页可能越过新的总页数 → 收回（防「切大页数后列表空白」）
+    watch(totalPages, (tp) => {
+        if (currentPage.value > tp) currentPage.value = Math.max(1, tp);
+    });
 
     // 换页逻辑
     const changePage = (page) => {

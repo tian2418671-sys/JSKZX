@@ -222,6 +222,34 @@ def script_registry(ctx):
     return warned(f"{len(missing)}/{len(scripts)} 个脚本未在 docs/ 里登记")
 
 
+def no_dev_paths_in_js(ctx):
+    """js 源码（含注释）不得出现**本机绝对路径**（如 `I:\\03\\...`、`E:\\AI\\...`）。
+
+    背景（为什么需要机器检查）：
+        · 字符串常量会随构建进入产物，甚至**直接展示给用户**（实测：推荐模板的「来源」文案
+          曾写死开发机路径，用户一眼看到「I:\\03\\角色色卡」——典型的信息泄出）；
+        · 注释路径虽不进产物，但同样属于「开发机噪音」，且容易复粘到文案里。
+    真实来源请写进 `docs/**`（内部文档）。
+    """
+    pattern = re.compile(r"[A-Za-z]:\\")
+    hits = []
+    for path in sorted(set(ctx.glob("js/**/*.js")) | set(ctx.glob("js/**/*.vue"))):
+        try:
+            text = ctx.read(path)
+        except Exception:
+            continue
+        for ln, raw in enumerate(text.splitlines(), 1):
+            if pattern.search(raw):
+                hits.append(f"{path}:{ln}: {raw.strip()[:140]}")
+    if hits:
+        ctx.note(
+            "本机绝对路径（会进构建产物 / 用户可见文案）：\n  " + "\n  ".join(hits[:20])
+            + "\n\n处理：改为中性描述（如「常见角色卡库命名习惯」）；真实来源写进 docs/**（内部文档）。"
+        )
+        return failed(f"{len(hits)} 处本机绝对路径出现在 js 源码")
+    return ok("js 源码无本机绝对路径")
+
+
 # ─────────────────────────── 卫生 ───────────────────────────
 def repo_hygiene(ctx):
     # ctx.glob 只返回文件（os.walk 的 filenames），所以缓存目录靠 .pyc 残留识别
@@ -257,6 +285,8 @@ def register(reg):
               tags=("docs",), severity="warn", paths=("package.json", "*.md", "docs/**")),
         Check("文档：对外文件无内部细节", release_notes_hygiene,
               tags=("docs",), severity="warn", paths=("RELEASE_NOTES.md",)),
+
+        Check("卫生：js 源码无本机绝对路径", no_dev_paths_in_js, tags=("docs",), paths=("js/**",)),
 
         Check("卫生：缓存与临时文件", repo_hygiene, tags=("hygiene",), severity="warn"),
     ])

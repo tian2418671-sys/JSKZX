@@ -6,6 +6,7 @@
 import { computed } from 'vue';
 import { migrateChatKeys } from './chat/chatStorage.js';
 import { migrateMemoryCard } from './chat/useChatMemory.js';
+import { collectEmptyGroups } from '../utils/groupCleanup.js'; // 🧹 空分组收集（DF-16，纯函数可单测）
 
 export function useCardGroups({
     // 共享状态
@@ -390,10 +391,77 @@ export function useCardGroups({
         }
     };
 
+    // 🧹 清理空分组（手动入口，DF-16）：列出「0 卡片」的自定义/预设分组 → 两步确认逐一清理
+    //   ① 自定义空组 → 删配置 + 空文件夹（仅空目录，主进程拒绝删非空）
+    //   ② 预设空组   → 隐藏（removedDefaultKeys，可在设置里恢复）+ 空文件夹
+    //   ⚠️ opts.skipConfirm 仅供 dev 端到端验收（产品路径永远走原生确认框）
+    const cleanupEmptyGroupsPrompt = async (opts = {}) => {
+        const quiet = !!(opts && opts.skipConfirm);
+        const { customEmpties, presetEmpties } = collectEmptyGroups({
+            customCategories: customCategories.value,
+            presetCategories: defaultCategories.value,
+            cards: library.value
+        });
+        if (!customEmpties.length && !presetEmpties.length) {
+            if (!quiet) await nativeAlert('没有空分组，当前库很干净。', 'info');
+            return { removedCustom: [], hiddenPresets: [] };
+        }
+        const delEmptyFolder = async (groupName) => {
+            if (window.electronAPI && typeof window.electronAPI.deleteEmptyGroupFolder === 'function' && currentFolderPath.value) {
+                try {
+                    await window.electronAPI.deleteEmptyGroupFolder({ libraryPath: currentFolderPath.value, groupName });
+                } catch (e) { /* 非空/占用由主进程拒绝；忽略 */ }
+            }
+        };
+        const removedCustom = [];
+        const hiddenPresets = [];
+        if (customEmpties.length) {
+            const ok1 = quiet ? true : await confirmDialog(
+                `发现 ${customEmpties.length} 个空的自定义分组：\n${customEmpties.join('、')}\n\n删除它们吗？（只删空文件夹，不会删除任何卡片）`
+            );
+            if (ok1) {
+                for (const name of customEmpties) {
+                    customCategories.value = customCategories.value.filter(c => c !== name);
+                    if (currentCategoryKey.value === name) currentCategoryKey.value = 'all';
+                    await delEmptyFolder(name);
+                    removedCustom.push(name);
+                }
+                addLog(`🧹 已清理 ${removedCustom.length} 个空分组：${removedCustom.join('、')}`, 'info');
+            }
+        }
+        if (presetEmpties.length) {
+            const names = presetEmpties.map(c => c.cn || c.key);
+            const ok2 = quiet ? true : await confirmDialog(
+                `另有 ${presetEmpties.length} 个空的预设分组：\n${names.join('、')}\n\n一并隐藏吗？（卡片不受影响；后续可在「设置」里恢复默认分组）`
+            );
+            if (ok2) {
+                for (const preset of presetEmpties) {
+                    if (!removedDefaultKeys.value.includes(preset.key)) removedDefaultKeys.value.push(preset.key);
+                    defaultCategories.value = defaultCategories.value.filter(c => c.key !== preset.key);
+                    if (currentCategoryKey.value === preset.key) currentCategoryKey.value = 'all';
+                    await delEmptyFolder(preset.cn || preset.key);
+                    hiddenPresets.push(preset.cn || preset.key);
+                }
+                addLog(`🧹 已隐藏 ${hiddenPresets.length} 个空预设分组：${hiddenPresets.join('、')}`, 'info');
+            }
+        }
+        // 💾 显式冲刷落盘（与其它管理操作同款）：不等 watch 防抖，立即写 app_config.json
+        if (removedCustom.length || hiddenPresets.length) {
+            try { syncConfigToDisk(); } catch (e) { /* 写盘失败不影响内存结果 */ }
+        }
+        const parts = [];
+        if (removedCustom.length) parts.push(`删除自定义空组 ${removedCustom.length} 个`);
+        if (hiddenPresets.length) parts.push(`隐藏预设空组 ${hiddenPresets.length} 个`);
+        if (parts.length && !quiet) await nativeAlert(`🧹 清理完成：${parts.join('；')}。`, 'info');
+        return { removedCustom, hiddenPresets };
+    };
+
     return {
         addNewCategory, currentCategoryDeletable, currentCategoryRenamable,
         deleteCustomCategory, renameCurrentCategory,
         currentCardCategory, handleCardCategoryChange, migrateOverlayKey, moveCardToGroup,
-        quickMoveGroup, batchChangeCategory, batchChangeCategoryModal, cleanupEmptyCategories
+        quickMoveGroup, batchChangeCategory, batchChangeCategoryModal, cleanupEmptyCategories,
+        cleanupEmptyGroupsPrompt, // 🧹 清理空分组（DF-16；侧栏按钮与「标签」菜单共用）
+        buildGroupOptions // 🗂️ 供自动分组复用（目标分组选项 = 与侧边栏同序；顺序即优先级）
     };
 }

@@ -73,6 +73,7 @@
 |---|---|
 | `chat-sidebar-test.mjs` | 测卡侧栏 7 分区（生产 `app://` 构建） |
 | `card-plugins-test.mjs` | **卡内插件页签**端到端（黑盒 DOM）：页签存在 / 面板渲染 / 徽标与条目数一致 / 展开内嵌代码编辑器 / ⛶ 全屏放大与 Esc 关闭 / 只读分组可展开 / 无渲染层报错。用法：实例带 `--remote-debugging-port=9351` + `$env:CDP_PORT="9351"; node scripts/card-plugins-test.mjs`；可选 `PLUGIN_CARD_TERMS`（找带插件卡的搜索词）、`TEST_ADD=1`（额外验「空容器卡一键新建」，**仅改内存不保存**） |
+| `auto-group-test.mjs` | **自动分组 + 清理空分组（DF-16）**端到端（隔离库真实物理移动 + 回滚）：①环境校验（预置分组已加载）②档案恢复 ③保存落盘（容错重试）④预览只读（计数 / 人外将新建 / 文件未动）⑤非法正则边界 ⑥执行（3 张真实移动 + 自动建文件夹 + 内存同步 + 未命中/已分组卡未动）⑦制造变动（删一张）⑧回滚（逆序还原 + 「已不存在」单列 + 日志清空）⑨清理空分组（配置空组 + 分组空文件夹删除、孤儿空目录保留、有卡分组不动）⑩🤖 LLM 分辨（本地 mock 服务端口 9358：1 批请求 / 请求体含判定标准与卡信息 / 建议入计划 / 重扫缓存并回 0 新请求 / DOM 默认不勾 / 真实移动 + 回滚）⑪无渲染层报错。用法：`node scripts/auto-group-test.mjs --prep` → 起 dev 实例（vite 5177 + `--remote-debugging-port=9359 --user-data-dir=%TEMP%\jsk-ag-profile`）→ `node scripts/auto-group-test.mjs` → `--cleanup`。⚠️ 只跑隔离库（脚本内含防呆）；⚠️ 重跑前先强杀同 profile 残留实例（旧实例关闭时 beforeunload 冲刷会回写旧配置） |
 | `chat-engine-test.mjs` | 测卡引擎管线（宏 / 世界书 / EJS / payload / 分段渲染 / swipe） |
 | `builtin-cat-test.mjs` | 内置大分类定制：改名 / 隐藏 / 恢复 / 清理还原（**结束时还原，不破坏用户数据**） |
 | `ai-category-modal-smoke.mjs` | AI 归类「自动建类」UI 冒烟（🆕 新建徽标与 optgroup 渲染） |
