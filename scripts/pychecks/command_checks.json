@@ -24,6 +24,18 @@
       "tags": ["info"],
       "severity": "warn",
       "paths": ["preload.js"]
+    },
+    {
+      "name": "架构：清洗白名单注入源（P1 防误清洗护栏）",
+      "cmd": [
+        "node",
+        "-e",
+        "const fs=require('fs');const t=fs.readFileSync('js/components/App.vue','utf8');const mis=/compiledAutoTagRules\\s*,\\s*customKeywords/.test(t);const good=t.includes('compiledAutoTagRules: autoTagRulesAllForClean');if(mis||!good){console.log(mis?'✗ useTags 注入源退回了 compiledAutoTagRules（带关闭清单）→ 已关闭规则的历史标签会被当外来标签物理清除（不可逆）':'✗ 未在 App.vue 找到 autoTagRulesAllForClean 注入，请核对 useTags 注入源');process.exit(1);}console.log('OK 清洗白名单注入源 = 完整规则集（autoTagRulesAllForClean）');"
+      ],
+      "tags": ["docs"],
+      "severity": "warn",
+      "timeout": 30,
+      "paths": ["js/components/App.vue"]
     }
   ]
 }

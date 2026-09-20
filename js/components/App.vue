@@ -102,6 +102,9 @@
             :fetch-model-status="fetchModelStatus"
             :is-a-i-tagging="isAITagging"
             :ai-tagging-progress="aiTaggingProgress"
+            :tag-funnel="tagFunnel"
+            :funnel-plan="tagFunnelPlan"
+            :rules-stats="autoTagRulesStats"
             :use-local-vector="useLocalVector"
             :vector-threshold="vectorThreshold"
             :vector-top-k="vectorTopK"
@@ -128,6 +131,7 @@
             @update:apiModel="apiModel = $event"
             @start-tagging="startAITagging"
             @remove-system-common-tag="removeTagFromGlobalPool"
+            @set-funnel-layer="setFunnelLayer"
             @update:useLocalVector="useLocalVector = $event"
             @update:vectorThreshold="vectorThreshold = $event"
             @update:vectorTopK="vectorTopK = $event"
@@ -141,11 +145,15 @@
             :show="showAutoTagRulesModal"
             :rules="autoTagRules"
             :custom-keywords="customKeywords"
+            :disabled-rules="autoTagDisabledRules"
             @close="showAutoTagRulesModal = false"
             @save="saveAutoTagRules"
             @reset="resetAutoTagRules"
             @add-keyword="addCustomKeyword"
             @remove-keyword="removeCustomKeyword"
+            @toggle-rule="toggleAutoTagRule"
+            @set-rules-enabled="setAutoTagRulesEnabled"
+            @reset-disabled="resetAutoTagDisabledRules"
         />
 
         <!-- ================= [ 弹窗：关系图谱（子组件 GraphModal） ] ================= -->
@@ -167,8 +175,12 @@
             @close="closeGraph"
         />
 
-        <!-- ================= [ 弹窗：全局资产中心（子组件 GlobalAssetModal） ] ================= -->
-        <!-- v-if 惰性挂载：避免加载/入库期间每次都触发 globalAllWorldbooks/globalAllRegexScripts 两处全库遍历 -->
+        <!-- ⛔ 已下线（2026-09-20，用户决定）：全局资产库功能关闭 —— 组件渲染注释掉，代码保留备查。
+             保留：showGlobalAssetModal / globalAssetTab 状态与 ctx 暴露（它们的 ref 被 ctx 引用，
+             删掉会造成子组件拿到 undefined；且 globalAllWorldbooks / globalAllRegexScripts 还被
+             「全库词条搜索」共用，不能一起注释）。
+             恢复：取消本段注释 + HeaderBar 工具栏按钮 + useCommands.js 的 toolbar.globalAssets 命令。
+        <template v-if="false && showGlobalAssetModal">
         <global-asset-modal
             v-if="showGlobalAssetModal"
             :show="showGlobalAssetModal"
@@ -177,6 +189,16 @@
             :all-regex-scripts="globalAllRegexScripts"
             @close="showGlobalAssetModal = false"
             @update:assetTab="globalAssetTab = $event"
+        />
+        </template>
+        -->
+
+        <!-- 🆕 P2：命令面板（Ctrl+Shift+P）—— 顶层挂载（项目历史坑：弹窗必须在 App.vue 顶层，否则 fixed 会跑偏） -->
+        <command-palette-modal
+            :show="showCommandPalette"
+            :commands="paletteCommands"
+            :registry="commandRegistry"
+            @close="showCommandPalette = false"
         />
 
         <!-- ================= [ 右键快捷菜单：角色卡（子组件 ContextMenu） ] ================= -->
@@ -326,7 +348,7 @@
             @resolve-group="resolvePresetDedupeGroup"
         />
 
-        <!-- ================= [ � 预设缝合中心弹窗（子组件 PresetStitchModal） ] ================= -->
+        <!-- ================= [ 🧵 预设缝合中心弹窗（子组件 PresetStitchModal） ] ================= -->
         <preset-stitch-modal
             :show="showPresetStitchModal"
             :targetMode="stitchTargetMode"
@@ -384,7 +406,7 @@
             @snippet-delete="deleteSnippet"
         />
 
-        <!-- ================= [ �🧬 内容级跨名称版本查重弹窗（子组件 ContentDedupeModal） ] ================= -->
+        <!-- ================= [ 🔍🧬 内容级跨名称版本查重弹窗（子组件 ContentDedupeModal） ] ================= -->
         <content-dedupe-modal
             :show="showContentDedupeModal"
             :groups="contentDuplicateGroups"
@@ -546,7 +568,8 @@ import TextModal from './TextModal.vue'; // 全屏大文本阅读/编辑弹窗
 import CardPluginModal from './CardPluginModal.vue'; // 🧩 卡内插件脚本全屏编辑器（复用 CodeEditor）
 import ImageModal from './ImageModal.vue'; // 高清立绘大图预览弹窗
 import ApiSettingsModal from './ApiSettingsModal.vue'; // API 引擎与模型设置弹窗
-import GlobalAssetModal from './GlobalAssetModal.vue'; // 全局世界书与正则资产中心弹窗
+import GlobalAssetModal from './GlobalAssetModal.vue'; // ⛔ 已下线（2026-09-20）：全局世界书与正则资产中心弹窗（保留备查，见模板注释）
+import CommandPaletteModal from './CommandPaletteModal.vue'; // 🎛️ P2：命令面板（Ctrl+Shift+P）
 import GraphModal from './GraphModal.vue'; // 角色宇宙关系图谱弹窗
 import WbGraphModal from './WbGraphModal.vue'; // 世界书词条逻辑关联图谱弹窗
 import DedupeModal from './DedupeModal.vue'; // 智能版本查重中心弹窗
@@ -570,6 +593,9 @@ import PluginWorkspace from './PluginWorkspace.vue'; // 🧩 插件工作区（�
 import SnapshotModal from './SnapshotModal.vue'; // 📸 历史快照列表与一键恢复弹窗
 import PushModal from './PushModal.vue'; // 🚀 推送目标选择与执行对话框
 import { processFile, extractBookEntries, compileAutoTagRules, defaultAutoTagRules, normalizeCardData } from '../utils/cardLoader.js';
+import { DEFAULT_TAG_FUNNEL, normalizeTagFunnel, normalizeDisabledRules, resolveFunnelPlan, formatFunnelBadge, isFunnelEmpty } from '../utils/tagFunnel.js'; // 🏷️ P1：打标三层开关默认值/归一化/层决策（纯函数）；P2 起状态短标签也在此派生（供注册表命令的 badge 用）
+import { createCommandRegistry, evaluateWhen } from '../utils/commandRegistry.js'; // 🎛️ P2：命令注册表 + when 求值（菜单/命令面板/快捷键的唯一真相源）
+import { registerAppCommands } from '../composables/useCommands.js'; // 🎛️ P2：内置命令定义（从 HeaderBar 迁出）
 // normalizeCardData / isCharacterCardData / autoTagRules（cardLoader）与 parsePNGChunk / deepScanForJSON（pngParser）
 // 已随导入入库域迁移至 useCardCrud 组合式函数，由其自行 import；
 // App.vue 仍需要 parsePNGChunk / deepScanForJSON（🔧 PK-14：瘦身卡正文回读的 readBuffer 兜底解析）
@@ -630,7 +656,7 @@ document.addEventListener('dragover', (e) => e.preventDefault());
 document.addEventListener('drop', (e) => e.preventDefault());
 
 export default {
-    components: { Section, DragOverlay, AppLoadingOverlay, ToastContainer, BatchTagModal, PromptModal, OptionSelectModal, SingleTagModal, DiskScanModal, UpdateModal, TextModal, ImageModal, ApiSettingsModal, GlobalAssetModal, GraphModal, WbGraphModal, DedupeModal, WbDedupeModal, PresetDedupeModal, PresetStitchModal, ContentDedupeModal, DiffModal, WbMergeModal, WbImportModal, GlobalEntrySearchModal, WbSnapshotModal, ContextMenu, WbContextMenu, AiTagModal, AutoTagRulesModal, HeaderBar, SidebarPanel, EditorPanel, PluginWorkspace, CardPluginModal, SnapshotModal, PushModal },
+    components: { Section, DragOverlay, AppLoadingOverlay, ToastContainer, BatchTagModal, PromptModal, OptionSelectModal, SingleTagModal, DiskScanModal, UpdateModal, TextModal, ImageModal, ApiSettingsModal, /* ⛔ GlobalAssetModal 已下线（2026-09-20） */ CommandPaletteModal, GraphModal, WbGraphModal, DedupeModal, WbDedupeModal, PresetDedupeModal, PresetStitchModal, ContentDedupeModal, DiffModal, WbMergeModal, WbImportModal, GlobalEntrySearchModal, WbSnapshotModal, ContextMenu, WbContextMenu, AiTagModal, AutoTagRulesModal, HeaderBar, SidebarPanel, EditorPanel, PluginWorkspace, CardPluginModal, SnapshotModal, PushModal },
     setup() {
         // 主题状态（localStorage 在自定义协议下可能不可用，做防御性读取；默认暗夜极客）
         let savedTheme = 'dark';
@@ -1247,6 +1273,14 @@ export default {
             if (!isMultiSelectMode.value) isMultiSelectMode.value = true;
             selectedIds.value = filteredLibrary.value.map(i => i.id);
             nativeAlert(`已全选 ${selectedIds.value.length} 张卡片。`, 'info');
+        };
+
+        // ☑️ 反选：当前过滤列表中「已选 → 取消、未选 → 选中」（与全选同一口径：只作用于当前搜索结果）
+        const selectInvertCards = () => {
+            if (!isMultiSelectMode.value) isMultiSelectMode.value = true;
+            const cur = new Set(selectedIds.value);
+            selectedIds.value = filteredLibrary.value.filter(i => !cur.has(i.id)).map(i => i.id);
+            nativeAlert(`已反选：当前选中 ${selectedIds.value.length} 张卡片。`, 'info');
         };
 
         // 清理全库所有卡片中的无效标签（空字符串/纯空白），并物理落盘
@@ -2241,6 +2275,14 @@ export default {
                             if (Array.isArray(cfg.customKeywords)) {
                                 customKeywords.value = cfg.customKeywords.filter(w => typeof w === 'string' && w.trim() !== '');
                             }
+                            // 🏷️ P1：内置规则关闭清单 + 打标三层漏斗开关
+                            //    老配置无这两个键 → 保持默认（内置规则全开 / 向量层关）＝ 与改动前行为一致
+                            if (Array.isArray(cfg.autoTagDisabledRules)) {
+                                autoTagDisabledRules.value = normalizeDisabledRules(cfg.autoTagDisabledRules);
+                            }
+                            if (cfg.tagFunnel) {
+                                tagFunnel.value = normalizeTagFunnel(cfg.tagFunnel);
+                            }
                             // 自定义分组（空数组也要覆盖，尊重「全部删除」结果）
                             if (Array.isArray(cfg.customCategories)) {
                                 const clean = cfg.customCategories.filter(c => typeof c === 'string' && c.trim() !== '');
@@ -2390,23 +2432,19 @@ export default {
 
             // 全局快捷键：Ctrl+S 保存 / Ctrl+O 打开角色库 / Ctrl+I 导入卡片
             const handleGlobalKeys = (e) => {
+                // 🆕 P2：**快捷键单一来源 = 命令注册表** —— 命中即执行并结束
+                //   Ctrl+S 智能保存 / Ctrl+O 打开库 / Ctrl+I 导入 / Ctrl+Shift+P 命令面板 均已注册（见 useCommands.js）
+                //   好处：改快捷键/改文案只改一处，不再散落在 keydown 分支里（改动前这里手写 4 个分支）
+                const shortcutId = commandRegistry.findShortcut(e, { appMode: appMode.value });
+                if (shortcutId) {
+                    e.preventDefault();
+                    commandRegistry.execute(shortcutId);
+                    return;
+                }
+                // 以下为**未注册为命令**的上下文相关快捷键（不适合出现在菜单/命令面板里）
                 if (!(e.ctrlKey || e.metaKey)) return;
                 const k = e.key.toLowerCase();
-                if (k === 's') {
-                    e.preventDefault();
-                    // 🧩 插件模式：插件代码页有未保存修改时优先保存插件（避免误触角色卡保存）
-                    if (appMode.value === 'plugins') {
-                        const pw = pluginWorkspaceRef.value;
-                        if (pw && typeof pw.saveCode === 'function' && pluginDirty.value) {
-                            pw.saveCode();
-                            return;
-                        }
-                    }
-                    saveCurrentAsset(); // 【修复】Ctrl+S 走智能保存路由，避免世界书模式下误保存角色卡
-                }
-                else if (k === 'o') { e.preventDefault(); selectFixedDirectory(); }
-                else if (k === 'i') { e.preventDefault(); importCards(); }
-                else if (k === 'a') {
+                if (k === 'a') {
                     // 批量模式下全选（输入框内不拦截，保留原生全选文本能力）
                     const tag = document.activeElement?.tagName;
                     if (tag === 'INPUT' || tag === 'TEXTAREA') return;
@@ -2966,12 +3004,71 @@ export default {
         const builtinCategoryDisplayName = (key) => builtinCatRenames.value[key] || ((TAG_CATEGORIES.find(c => c.key === key) || {}).name) || key;
 
 
-        // ================= 🏷️ 自动打标规则表（v2.1 可扩展 + 用户可配置） =================
+        // ================= 🏷️ 自动打标规则表（v2.1 可扩展 + 用户可配置；v2.2.13 P1：三层开关 + 关闭清单） =================
         // 存 [{name, regex}] 数组到 app_config.json（权威）；空数组 = 使用默认规则表。
-        // 编译结果 compiledAutoTagRules 注入 useCardCrud（导入自动分类）与 useAITools（打标第一层）。
+        // ⚠️ 编译结果有两个用途不同的集合，**不要混用**：
+        //   · compiledAutoTagRules    —— 受「内置规则关闭清单」影响 → 消费方 useCardCrud（导入自动分类）+ useAITools（打标①层）
+        //   · autoTagRulesAllForClean —— **不受开关影响**（完整集合）→ 消费方 useTags（「清洗历史外来标签」保留词表）
+        //     若把带关闭清单的集合给它，用户关掉某规则后，该规则历史产出的标签会被判为"外来标签"并被清洗（不可逆）→ docs/bugs AI 域同类。
         const autoTagRules = ref([]); // 用户配置的规则表（[{name, regex}]，字符串可序列化）
         const showAutoTagRulesModal = ref(false); // 规则编辑弹窗显隐
-        const compiledAutoTagRules = computed(() => compileAutoTagRules(autoTagRules.value));
+        const autoTagDisabledRules = ref([]); // 🆕 被关闭的内置规则名清单（默认空 = 全开 → 老配置零迁移；新内置规则自动默认开启）
+        const compiledAutoTagRules = computed(() => compileAutoTagRules(autoTagRules.value, autoTagDisabledRules.value));
+        const autoTagRulesAllForClean = computed(() => compileAutoTagRules(autoTagRules.value)); // 🆕 完整集合（仅供清洗白名单）
+
+        // ================= 🏷️ 打标三层漏斗开关（P1；规则 → 向量 → LLM） =================
+        // 唯一真相源：引擎（useAITools 短路）与 UI（按钮可用性 / 菜单状态提示）共用同一个 plan。
+        // 默认值来自 tagFunnel.js 的 DEFAULT_TAG_FUNNEL（vector 默认关，与旧 useLocalVector 行为一致）。
+        const tagFunnel = ref({ ...DEFAULT_TAG_FUNNEL });
+
+        // 🆕 关闭/开启某条内置规则（规则表弹窗调用；立即落盘，规则即时生效）
+        const toggleAutoTagRule = (name, enabled) => {
+            const n = String(name || '').trim();
+            if (!n) return;
+            const set = new Set(normalizeDisabledRules(autoTagDisabledRules.value));
+            if (enabled) set.delete(n); else set.add(n);
+            autoTagDisabledRules.value = Array.from(set);
+            syncConfigToDisk();
+        };
+        // 🆕 组级开关：一次开/关一组内置规则（group 名 → 该组全部规则名由 UI 传入）
+        const setAutoTagRulesEnabled = (names, enabled) => {
+            const list = normalizeDisabledRules(names);
+            if (!list.length) return;
+            const set = new Set(normalizeDisabledRules(autoTagDisabledRules.value));
+            for (const n of list) { if (enabled) set.delete(n); else set.add(n); }
+            autoTagDisabledRules.value = Array.from(set);
+            syncConfigToDisk();
+        };
+        // 🆕 一键恢复内置规则全开（清空关闭清单）
+        const resetAutoTagDisabledRules = () => {
+            autoTagDisabledRules.value = [];
+            syncConfigToDisk();
+        };
+        // 🆕 导入自动打标的**实际生效值**：①规则层关闭时自动失效（导入链路只走规则层）
+        //    这样 useCardCrud 无需感知 tagFunnel（保持零改动），同时避免"开关开着却没效果"被当成 bug
+        const importAutoTagEnabled = computed(() => autoTagOnImport.value && tagFunnel.value.rule);
+
+        // 🆕 P2：Ctrl+S 的智能保存路由（从 keydown handler 抽到此处，供命令注册表调用）
+        //   插件模式下若代码页有未保存修改 → 优先保存插件代码（避免误触角色卡保存）
+        const saveCurrentAssetSmart = () => {
+            if (appMode.value === 'plugins') {
+                const pw = pluginWorkspaceRef.value;
+                if (pw && typeof pw.saveCode === 'function' && pluginDirty.value) {
+                    pw.saveCode();
+                    return;
+                }
+            }
+            saveCurrentAsset(); // 智能路由：世界书模式保存世界书，卡片模式保存卡片
+        };
+
+        // 🆕 P2：命令注册表实例（此刻只创建；命令定义在 setup 尾部 ctx 就绪后统一注册 —— 避免 TDZ）
+        const commandRegistry = createCommandRegistry();
+        // 🆕 P2：命令面板（Ctrl+Shift+P）—— 命令列表来自注册表，按 `when` 过滤后传入
+        const showCommandPalette = ref(false);
+        const openCommandPalette = () => { showCommandPalette.value = true; };
+        const paletteCommands = computed(() =>
+            commandRegistry.list().filter(c => evaluateWhen(c.when, { appMode: appMode.value }))
+        );
 
         // 保存规则表（UI 编辑弹窗确认时调用；空数组 = 恢复默认规则）
         // ⚠️ syncConfigToDisk 定义于 useConfigPersistence（setup 尾部），此处仅声明函数体（用户交互时才执行，闭包安全）
@@ -4512,7 +4609,7 @@ export default {
         };
 
         // =========================================================
-        // � 条目级合并引擎：从其他世界书按需导入词条到当前书（弹窗 → 勾选 → 确认）
+        // 🔀 条目级合并引擎：从其他世界书按需导入词条到当前书（弹窗 → 勾选 → 确认）
         // =========================================================
         const showWbImportModal = ref(false);      // 导入弹窗显隐
         const importSourceBook = ref(null);        // 当前选中的源世界书
@@ -4692,6 +4789,7 @@ export default {
             customTagCategories, customTagAssignments,
             builtinCatRenames, builtinCatHidden,
             autoTagRules, customKeywords,
+            autoTagDisabledRules, tagFunnel,
             apiEndpoint, apiKey, apiModel, apiType,
             theme, appSettings, sanitizeImportedTags, autoTagOnImport, snapshotConfig, localCategoryMap,
             sidebarWidth, viewMode, isCompactMode, sortBy,
@@ -4701,7 +4799,7 @@ export default {
             presetStitchSnippets
         });
 
-        // �️ 自动打标规则表自动持久化保险（v2.1）：任何修改（保存/恢复默认）都自动落盘，
+        // 🛡️ 自动打标规则表自动持久化保险（v2.1）：任何修改（保存/恢复默认）都自动落盘，
         //    不依赖按钮显式调用；syncConfigToDisk 内部已有 isRestoringConfig 闸门防启动期误写。
         //    ⚠️ 必须放在 useConfigPersistence 之后（引用其返回的 syncConfigToDiskDebounced，闭包安全）。
         watch(autoTagRules, () => { syncConfigToDiskDebounced(); }, { deep: true });
@@ -4710,7 +4808,7 @@ export default {
         //    syncConfigToDisk 内部已有 isRestoringConfig 闸门，启动恢复期不会误写
         watch(presetStitchSnippets, () => { syncConfigToDiskDebounced(); }, { deep: true });
 
-        // �🌍 角色卡内嵌世界书编辑：组合式函数注入（条目派生/uid/折叠展开/触发词工具）
+        // 📚🌍 角色卡内嵌世界书编辑：组合式函数注入（条目派生/uid/折叠展开/触发词工具）
         // ⚠️ 调用时序：必须晚于 cardTokensCache 的定义（updateEntryKeys 运行时引用）；
         //    必须早于 useGraph（注入 worldbookExpanded）。引用方经解构同名 const，零改动。
         const {
@@ -4765,7 +4863,9 @@ export default {
             library, cardData, currentFolderPath, appConfig,
             customCategories, allCategories, isCategoryKnown,
             importedConfig, localCategoryMap, sanitizeImportedTags,
-            autoTagOnImport,
+            // 🆕 P1：导入自动打标改注入 importAutoTagEnabled（= autoTagOnImport && tagFunnel.rule）
+            //    这样 useCardCrud 内部零改动，却能保证"①规则层关闭时不再做无用功"
+            autoTagOnImport: importAutoTagEnabled,
             autoTagRules: compiledAutoTagRules,
             isDragging, dragCounter, importFileInput,
             // 横切服务
@@ -4885,7 +4985,7 @@ export default {
         // 🛡️ 打标期间跳过搜索索引全量重建的 watch 已移动到 useAITools 解构之后
         //    （原因：watch(isAITagging) 在 useAITools 解构前引用 isAITagging 会触发 TDZ：
         //     Cannot access 'Ms' before initialization —— vite build 不报错，运行时崩溃）
-        // �📁 角色卡分组/分类：组合式函数注入（状态仍在 App.vue，此处仅注入操作逻辑）
+        // 🗂️📁 角色卡分组/分类：组合式函数注入（状态仍在 App.vue，此处仅注入操作逻辑）
         const {
             addNewCategory, currentCategoryDeletable, currentCategoryRenamable,
             deleteCustomCategory, renameCurrentCategory,
@@ -4900,7 +5000,7 @@ export default {
             batchExportSelected, batchDeleteSelected, batchAddTag
         } = useBatch({ selectedIds, lastSelectedIndex, library, cardData, openFromLibrary, paginatedLibrary, reset, cleanupEmptyCategories, persistCardUpdate, deleteCardOverlays, nativeAlert, confirmDialog, appPrompt, clearSelection });
 
-        // � 换角色卡图：选择新立绘替换，成功后刷新路径/立绘，并展示校验校准结果
+        // 🖼️ 换角色卡图：选择新立绘替换，成功后刷新路径/立绘，并展示校验校准结果
         // （item 为空时自动定位当前打开的卡片；PNG 卡原地替换，WebP / JSON 卡升级为标准 PNG 卡）
         const replaceCardImage = async (item) => {
             if (!item) {
@@ -4942,7 +5042,7 @@ export default {
             }
         };
 
-        // �🔍 查重与差异比对：组合式函数注入（estimateCardTokens 为共享工具，保留在 App.vue）
+        // 📊🔍 查重与差异比对：组合式函数注入（estimateCardTokens 为共享工具，保留在 App.vue）
         const {
             showDedupeModal, duplicateGroups, startDedupeScan, resolveDedupeGroup,
             showWbDedupeModal, wbDuplicateGroups, startWorldbookDedupeScan, resolveWbDedupeGroup,
@@ -5065,9 +5165,47 @@ export default {
             useLocalVector, vectorThreshold, vectorTopK,
             vectorStatus, vectorDownloading, vectorDownloadProgress, vectorDownloadSource, vectorBatchProgress,
             initVectorEngine, deleteVectorCache
-        } = useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey, apiType, resolveApiModel, extractReplyContent, persistCardUpdate, refreshCardData, nativeAlert, confirmDialog, showToast, systemPromptPresets, autoTagRules: compiledAutoTagRules, syncConfigToDisk });
+        } = useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey, apiType, resolveApiModel, extractReplyContent, persistCardUpdate, refreshCardData, nativeAlert, confirmDialog, showToast, systemPromptPresets, autoTagRules: compiledAutoTagRules, tagFunnel, syncConfigToDisk });
 
-        // �️ 打标期间跳过搜索索引全量重建（必须在 useAITools 解构 isAITagging 之后注册）：
+        // ================= 🏷️ P1：三层开关的 UI 侧派生状态（与引擎共用同一个纯函数） =================
+        // ⚠️ 必须定义在 useAITools 解构**之后**：tagFunnelPlan 依赖 vectorStatus / aiCandidateTags（均来自该组合式函数）
+        const tagFunnelPlan = computed(() => resolveFunnelPlan({
+            funnel: tagFunnel.value,
+            vectorReady: !!(vectorStatus.value && vectorStatus.value.ready),
+            hasCandidateTags: aiCandidateTags.value.length > 0,
+            hasApiConfig: !!(apiEndpoint.value && apiEndpoint.value.trim())
+        }));
+        // 规则表生效统计（弹窗与设置菜单显示「生效 N / 关闭 M」）
+        const autoTagRulesStats = computed(() => {
+            const total = Array.isArray(defaultAutoTagRules) ? defaultAutoTagRules.length : 0;
+            const off = new Set(normalizeDisabledRules(autoTagDisabledRules.value));
+            let disabled = 0;
+            for (const r of defaultAutoTagRules) if (off.has(r.name)) disabled++;
+            return { total, enabled: total - disabled, disabled };
+        });
+        // 🆕 切换某一层开关 —— HeaderBar 设置子菜单与 AITagModal 管线区**共用此唯一写入口**（含落盘）
+        const setFunnelLayer = (layer, enabled) => {
+            if (!['rule', 'vector', 'llm'].includes(layer)) return;
+            tagFunnel.value = { ...tagFunnel.value, [layer]: !!enabled };
+            syncConfigToDisk();
+        };
+        // 🆕 P2：管线状态短标签 / 三层全关判定 —— **必须暴露到 ctx**。
+        //    P2 把菜单命令搬进注册表后，命令的 `badge()` / `badgeTitle()` 会读它们；
+        //    原先这两个 computed 只定义在 HeaderBar 内部，注册表引用 `ctx.funnelBadge` 拿到的是
+        //    `undefined` 而被 safeCall 吞掉 → 打标状态后缀静默消失（`scripts/pychecks/command_registry.py`
+        //    的「命令引用的 ctx 字段存在」检查就是为抓这类问题而加）。
+        const funnelBadge = computed(() => formatFunnelBadge(tagFunnel.value));
+        const funnelEmpty = computed(() => isFunnelEmpty(tagFunnel.value));
+        // 🆕 P2：查重类命令的标题后缀（「同名查重与版本清理（角色卡）」）—— 同样必须暴露到 ctx。
+        //    原先它只定义在 HeaderBar 内部，菜单命令引用 `ctx.dedupeTargetLabel` 拿到 undefined →
+        //    界面上直接显示成「（undefined）」（截图核对时发现）。
+        const dedupeTargetLabel = computed(() => {
+            if (appMode.value === 'worldbooks') return '世界书';
+            if (appMode.value === 'presets') return '预设';
+            return '角色卡';
+        });
+
+        // 🚦 打标期间跳过搜索索引全量重建（必须在 useAITools 解构 isAITagging 之后注册）：
         //    打标每改一张卡都会 triggerRef(library)，若此时重建索引 + Token 预热
         //    （几千张卡全量正则/分词），渲染进程 CPU/内存持续峰值 → native 崩溃
         //    （render-process-gone exitCode -36861）。改为标记 pending，打标结束后补建一次。
@@ -5094,7 +5232,7 @@ export default {
             }
         });
 
-        // �💬 聊天测卡：组合式函数注入（共享状态 apiEndpoint/apiKey/apiModel/apiType 与工具 resolveApiModel/extractReplyContent 保留在 App.vue）
+        // 🧪💬 聊天测卡：组合式函数注入（共享状态 apiEndpoint/apiKey/apiModel/apiType 与工具 resolveApiModel/extractReplyContent 保留在 App.vue）
         // 💬 旧 useChat 仅保留仍被其它域消费的部分：
         //    chatHistory → useGraph / useStatusbarPreview / 预设缝合等以 getter 注入；
         //    api* 配置与模型拉取 → ApiSettingsModal / AITagModal 仍在用。
@@ -5304,7 +5442,9 @@ export default {
             // 🛠️ 自定义大分类管理
             addCustomTagCategory, renameCustomTagCategory,
             removeCustomTagCategory, mergeDuplicateTagCategories, ensureUniqueCustomCategoryKeys, assignTagToCategory, assignTagsToCategory
-        } = useTags({ systemCommonTags, tagLangMode, library, sanitizeImportedTags, confirmDialog, nativeAlert, persistCardUpdate, cardData, searchQueryInput, selectedIds, clearSelection, syncConfigToDisk, createProgressToast, customTagCategories, customTagAssignments, compiledAutoTagRules, customKeywords });
+        // ⚠️ P1 白名单解耦：这里必须传 **完整规则集**（autoTagRulesAllForClean），不能用带关闭清单的 compiledAutoTagRules
+        //    —— 否则用户关掉某条内置规则后，该规则历史产出的标签会被判为"外来标签"并被清洗（不可逆）
+        } = useTags({ systemCommonTags, tagLangMode, library, sanitizeImportedTags, confirmDialog, nativeAlert, persistCardUpdate, cardData, searchQueryInput, selectedIds, clearSelection, syncConfigToDisk, createProgressToast, customTagCategories, customTagAssignments, compiledAutoTagRules: autoTagRulesAllForClean, customKeywords });
 
         // 🧠 标签大分类：向量模型辅助归类（三级策略②层——规则未命中的标签与分类描述语义匹配）
         //    vectorStatus.ready 后全量跑一次；标签池变化时增量跑。静默后台执行，
@@ -5321,7 +5461,7 @@ export default {
             theme, toggleTheme, appSettings, showApiModal, resetPersonalizationSettings, resetApiSettings,
             showExperimentalMenu, pushToTavern, showPushModal, currentOpenCardItem, currentPushTargetName, currentPushTargetHint, customPushTargets, currentCustomPushTarget, autoTagOnImport,
             useSillyTavernPushTarget, useCustomPushTarget, setCurrentCustomPushTarget, addCustomPushTarget, renameCurrentCustomPushTarget, removeCurrentCustomPushTarget,
-            viewOptions, importFileInput, handleImportFiles, importCards, downloadCardFromUrl, selectAllCards, cleanGlobalTagsPrompt, sanitizeImportedTags,
+            viewOptions, importFileInput, handleImportFiles, importCards, downloadCardFromUrl, selectAllCards, selectInvertCards, cleanGlobalTagsPrompt, sanitizeImportedTags,
             openBakFolder, openTrashFolder, openGlobalTrash, openChatTab,
             isScanningDisk, diskScanProgress, useSizeFilter, runDiskScan, showDiskScanModal,
             currentFolderPath, handleScanImported, refreshLibrary,
@@ -5389,8 +5529,15 @@ export default {
             systemPromptPresets, activeSystemPromptId, addSystemPromptPreset, deleteSystemPromptPreset, saveSystemPromptsToStorage, getCurrentSystemPromptContent, buildTaggingSystemPrompt,
             // 🚨 破限 (Jailbreak) 状态（对抗模型拒答/道德审查；localStorage 持久化）
             useJailbreak, jailbreakPrompt, jailbreakPresets,
-            // 🏷️ 自动打标规则表（v2.1 可配置）
+            // 🏷️ 自动打标规则表（v2.1 可配置）+ P1 三层漏斗开关 / 内置规则关闭清单
             showAutoTagRulesModal, autoTagRules, saveAutoTagRules, resetAutoTagRules,
+            autoTagDisabledRules, toggleAutoTagRule, setAutoTagRulesEnabled, resetAutoTagDisabledRules,
+            tagFunnel, tagFunnelPlan, autoTagRulesStats, setFunnelLayer,
+            // 🆕 P2：打标管线状态短标签 / 三层全关 / 查重目标命名 —— 注册表命令的 badge 与 titleFn 靠它们
+            funnelBadge, funnelEmpty, dedupeTargetLabel,
+            importAutoTagEnabled,
+            // 🆕 P2：命令注册表 / 命令面板 / 智能保存（菜单、工具栏、快捷键统一走注册表）
+            commandRegistry, showCommandPalette, openCommandPalette, paletteCommands, saveCurrentAssetSmart,
             // ✏️ 自定义关键词库（候选词池，可增删）
             customKeywords, addCustomKeyword, removeCustomKeyword,
             globalAvailableTags, newGlobalTagInput, addTagToGlobalPool, removeTagFromGlobalPool, clearAllTagsFromPool, batchRemoveTags, cleanForeignTagsFromLibrary, appendTagToSearch,
@@ -5526,9 +5673,9 @@ export default {
             setTheme,
             // 🚀 首屏加载状态
             isAppLoading,
-            // � 侧边栏宽度拖拽自定义
+            // 📏 侧边栏宽度拖拽自定义
             sidebarEl, sidebarWidth, sidebarStyle, startSidebarResize, resetSidebarWidth,
-            // �🔍 智能查重与版本清洗
+            // 🧹🔍 智能查重与版本清洗
             showDedupeModal, duplicateGroups, startDedupeScan, resolveDedupeGroup,
             // 🌍 世界书库筛选与对比查重
             wbSearchQuery, wbFilterType, filteredWorldbooks,
@@ -5586,7 +5733,22 @@ export default {
             chatSetVar: chatEngine.setVar,
             chatSegmentsOf: chatEngine.segmentsOf
         };
+
         provide('appCtx', ctx);
+
+        // ⚠️ AR-31：上面 `const ctx = {...}` 与 `provide('appCtx', ctx)` **必须保持紧邻、中间不放任何语句或注释** ——
+        //     `scripts/pychecks/ctx_exposure.py`（AR-13 防线）靠这两句的位置关系定位 ctx 正文；
+        //     插一行代码或一句注释都会让该自动检查失配（改为报「结构已变化」），防线静默宕机。
+        //     “ctx 就绪之后才能做的事”统一写到 `provide` **之后**（同一同步流程内，无时序差异）。
+
+        // 🆕 P2：注册内置命令 —— 必须在 ctx 就绪**之后**（命令执行体全部取自 ctx）
+        registerAppCommands(commandRegistry, ctx);
+        const _cmdProblems = commandRegistry.getProblems();
+        if (_cmdProblems.length) {
+            // 注册期问题（id 重复 / 快捷键冲突 / 缺字段）应在开发期暴露出来；生产不阻断启动
+            // 用 JSON 输出，否则控制台只会看到 [object Object]（P2 实测踩到过）
+            console.warn('[命令注册表] 注册期问题：', JSON.stringify(_cmdProblems));
+        }
         return ctx;
     }
 };

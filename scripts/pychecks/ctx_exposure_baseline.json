@@ -1,0 +1,21 @@
+{
+ "_说明": "AR-13 防线基线：App.vue 中「定义了 ref/computed 等但未暴露进 ctx 对象」的既有状态清单。新增的未暴露状态会被 ctx_exposure.py 拦下；已不再缺失的项可从本文件删除。",
+ "_生成": "2026-09-20（P1-S2 同期，F2 批复）",
+ "items": [
+  "autoTagRulesAllForClean",
+  "cardContentVersion",
+  "cardImportTimes",
+  "chatCardPathForEngine",
+  "compiledAutoTagRules",
+  "defaultCategories",
+  "importedConfig",
+  "itemsPerPage",
+  "lastSelectedIndex",
+  "localCategoryMap",
+  "pluginWorkspaceRef",
+  "promptModalDefault",
+  "removedDefaultKeys",
+  "textModalTargetRef",
+  "wbCategoryMap"
+ ]
+}

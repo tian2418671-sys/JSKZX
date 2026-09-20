@@ -19,50 +19,46 @@
                 <!-- 隐藏文件输入：供【文件→导入角色卡】使用 -->
                 <input ref="importFileInput" type="file" accept=".png,.webp,.jpg,.jpeg,.json" multiple class="hidden" @change="handleImportFiles">
 
-                <div class="relative group">
-                    <button class="px-2 py-1 rounded hover:bg-zinc-800 hover:text-zinc-100 transition">文件(F)</button>
-                    <div class="hidden group-hover:flex flex-col absolute top-full left-0 min-w-[210px] bg-zinc-800 border border-zinc-700 rounded shadow-xl py-1 z-50 text-xs">
-                        <button @click="selectFixedDirectory" class="px-3 py-1.5 text-left hover:bg-indigo-600 hover:text-white flex justify-between">📁 打开角色库目录... <span>Ctrl+O</span></button>
-                        <button @click="loadWorldbooks" class="px-3 py-1.5 text-left hover:bg-amber-600 hover:text-white flex justify-between">🌍 打开世界书目录...</button>
+                <div class="relative" @mouseenter="setMenu('file')" @mouseleave="closeMenus()">
+                    <button class="px-2 py-1 rounded hover:bg-zinc-800 hover:text-zinc-100 transition" @click="setMenu('file')">文件(F)</button>
+                    <div :class="menuOpen === 'file' ? 'flex' : 'hidden'" class="flex-col absolute top-full left-0 min-w-[210px] bg-zinc-800 border border-zinc-700 rounded shadow-xl py-1 z-50 text-xs">
+                        <!-- 🆕 P2：命令由注册表渲染（定义见 js/composables/useCommands.js）—— 位置/样式/顺序与改动前一致 -->
+                        <template v-for="(group, gi) in commandsByMenu.file || []" :key="gi">
+                            <div v-if="gi > 0" class="h-px bg-zinc-700 my-1"></div>
+                            <div v-if="group.sectionTitle" class="px-3 py-1 text-[10px] font-bold text-zinc-500">{{ group.sectionTitle }}</div>
+                            <command-menu-item v-for="cmd in group.commands" :key="cmd.id" :cmd="cmd" :registry="registry" @executed="closeMenus()" />
+                        </template>
+                        <!-- ⏳ P2-2：旧位置占位（一个版本后移除）—— 避免改版后找不到入口 -->
                         <div class="h-px bg-zinc-700 my-1"></div>
-                        <button @click="importCards" class="px-3 py-1.5 text-left hover:bg-indigo-600 hover:text-white flex justify-between">➕ 导入角色卡 <span>Ctrl+I</span></button>
-                        <button @click="downloadCardFromUrl" class="px-3 py-1.5 text-left hover:bg-indigo-600 hover:text-white flex justify-between">🌐 从链接导入角色卡...</button>
-                        <button @click="saveCurrentAsset" :disabled="!cardData && !activeWorldbook" class="px-3 py-1.5 text-left hover:bg-indigo-600 hover:text-white flex justify-between disabled:opacity-40 disabled:hover:bg-transparent disabled:cursor-not-allowed">💾 物理保存修改 <span>Ctrl+S</span></button>
-                        <div class="h-px bg-zinc-700 my-1"></div>
-                        <button @click="batchExportSelected" class="px-3 py-1.5 text-left hover:bg-indigo-600 hover:text-white">📦 导出选中卡片...</button>
-                        <div class="h-px bg-zinc-700 my-1"></div>
-                        <button @click="openBakFolder" class="px-3 py-1.5 text-left hover:bg-indigo-600 hover:text-white">⏱️ 查看历史快照 (.bak)</button>
-                        <button @click="openTrashFolder" class="px-3 py-1.5 text-left hover:bg-indigo-600 hover:text-white">🗑️ 查看回收站 (.trash)</button>
-                        <button @click="openGlobalTrash" class="px-3 py-1.5 text-left hover:bg-indigo-600 hover:text-white">🗑️ 打开全局回收站 (jsTavern_Trash)</button>
+                        <div class="px-3 py-1.5 text-[10px] text-zinc-500 leading-relaxed">
+                            ⏱️ 历史快照 / 🗑️ 回收站 已移到「🔧 维护」菜单
+                        </div>
                     </div>
                 </div>
 
-                <div class="relative group">
-                    <button class="px-2 py-1 rounded hover:bg-zinc-800 hover:text-zinc-100 transition">编辑(E)</button>
-                    <div class="hidden group-hover:flex flex-col absolute top-full left-0 min-w-[170px] bg-zinc-800 border border-zinc-700 rounded shadow-xl py-1 z-50 text-xs">
-                        <button @click="isMultiSelectMode = !isMultiSelectMode" class="px-3 py-1.5 text-left hover:bg-indigo-600 hover:text-white flex justify-between">
-                            ☑️ 批量选择模式 <span v-if="isMultiSelectMode">✓</span>
-                        </button>
-                        <button @click="selectAllCards" class="px-3 py-1.5 text-left hover:bg-indigo-600 hover:text-white">全选所有卡片</button>
+                <!-- 🏷️ 标签(T)：标签 / 打标 / 批量标签类命令的集合入口 -->
+                <div class="relative" @mouseenter="setMenu('tags')" @mouseleave="closeMenus()">
+                    <button class="px-2 py-1 rounded hover:bg-zinc-800 hover:text-emerald-300 transition font-bold" @click="setMenu('tags')">🏷️ 标签(T)</button>
+                    <div :class="menuOpen === 'tags' ? 'flex' : 'hidden'" class="flex-col absolute top-full left-0 min-w-[250px] bg-zinc-800 border border-zinc-700 rounded shadow-xl py-1 z-50 text-xs">
+                        <template v-for="(group, gi) in commandsByMenu.tags || []" :key="gi">
+                            <div v-if="gi > 0" class="h-px bg-zinc-700 my-1"></div>
+                            <div v-if="group.sectionTitle" class="px-3 py-1 text-[10px] font-bold text-zinc-500">{{ group.sectionTitle }}</div>
+                            <command-menu-item v-for="cmd in group.commands" :key="cmd.id" :cmd="cmd" :registry="registry" @executed="closeMenus()" />
+                        </template>
                         <div class="h-px bg-zinc-700 my-1"></div>
-                        <button @click="openAITagModal" class="px-3 py-1.5 text-left hover:bg-indigo-600 hover:text-white">🏷️ AI 智能批量打标</button>
-                        <button @click="batchChangeCategoryModal" class="px-3 py-1.5 text-left hover:bg-indigo-600 hover:text-white">📂 批量修改分类分组</button>
-                        <button @click="cleanGlobalTagsPrompt" class="px-3 py-1.5 text-left hover:bg-indigo-600 hover:text-white">🧹 清理无效全局标签</button>
-                        <div class="h-px bg-zinc-700 my-1"></div>
-                        <button @click="startSmartDedupe" class="px-3 py-1.5 text-left hover:bg-amber-600 hover:text-white flex items-center justify-between text-amber-400">
-                            <span>🔍 同名查重与版本清理（{{ dedupeTargetLabel }}）...</span>
-                        </button>
-                        <button @click="startContentDedupeScan" class="px-3 py-1.5 text-left hover:bg-purple-600 hover:text-white flex items-center justify-between text-purple-400">
-                            <span>🧬 版本查重：跨名称识别相似内容（{{ dedupeTargetLabel }}）...</span>
-                        </button>
+                        <div class="px-3 py-1.5 text-[10px] text-zinc-500 leading-relaxed">☑️ 选择 / 🏷️ 打标 / 📂 分类分组 已从「编辑」菜单并入本菜单（一个版本后移除本提示）</div>
                     </div>
                 </div>
 
-                <div class="relative group">
-                    <button class="px-2 py-1 rounded hover:bg-zinc-800 hover:text-emerald-400 transition font-bold">🚀 推送(P)</button>
-                    <div class="hidden group-hover:flex flex-col absolute top-full left-0 min-w-[240px] bg-zinc-800 border border-zinc-700 rounded shadow-xl py-1 z-50 text-xs">
+                <div class="relative" @mouseenter="setMenu('push')" @mouseleave="closeMenus()">
+                    <button class="px-2 py-1 rounded hover:bg-zinc-800 hover:text-emerald-400 transition font-bold" @click="setMenu('push')">🚀 推送(P)</button>
+                    <div :class="menuOpen === 'push' ? 'flex' : 'hidden'" class="flex-col absolute top-full left-0 min-w-[240px] bg-zinc-800 border border-zinc-700 rounded shadow-xl py-1 z-50 text-xs">
                         <div class="px-3 py-1.5 text-[10px] text-zinc-500 font-bold border-b border-zinc-700/50 mb-1">选择目标并推送勾选的卡片</div>
-                        <button @click="showPushModal = true" class="px-3 py-1.5 text-left hover:bg-emerald-600 hover:text-white font-medium">🚀 推送选中卡片...</button>
+                        <template v-for="(group, gi) in commandsByMenu.push || []" :key="gi">
+                            <div v-if="gi > 0" class="h-px bg-zinc-700 my-1"></div>
+                            <command-menu-item v-for="cmd in group.commands" :key="cmd.id" :cmd="cmd" :registry="registry" @executed="closeMenus()" />
+                        </template>
+                        <!-- 静态块：当前推送目标（非命令） -->
                         <div class="h-px bg-zinc-700 my-1"></div>
                         <div class="px-3 py-1.5 flex items-center justify-between gap-2">
                             <span class="text-zinc-400">🎯 当前目标</span>
@@ -72,50 +68,28 @@
                             </span>
                         </div>
                         <div class="px-3 pb-1.5 text-[10px] text-zinc-500 truncate" :title="currentPushTargetHint">{{ currentPushTargetHint }}</div>
-                        <div class="h-px bg-zinc-700 my-1"></div>
-                        <button @click="addCustomPushTarget" class="px-3 py-1.5 text-left hover:bg-emerald-600 hover:text-white">🗂️ 新增卡库目标...</button>
                     </div>
                 </div>
 
-                <div class="relative group">
-                    <button class="px-2 py-1 rounded hover:bg-zinc-800 hover:text-zinc-100 transition">窗口(W)</button>
-                    <div class="hidden group-hover:flex flex-col absolute top-full left-0 min-w-[220px] bg-zinc-800 border border-zinc-700 rounded shadow-xl py-1 z-50 text-xs">
-                        <button @click="viewOptions.showSidebar = !viewOptions.showSidebar" class="px-3 py-1.5 text-left hover:bg-indigo-600 hover:text-white flex justify-between items-center">
-                            <span>📁 侧边栏 (角色卡列表)</span> <span v-if="viewOptions.showSidebar" class="text-indigo-400 font-bold">✓</span>
-                        </button>
-                        <button @click="viewOptions.showToolbar = !viewOptions.showToolbar" class="px-3 py-1.5 text-left hover:bg-indigo-600 hover:text-white flex justify-between items-center">
-                            <span>🛠️ 快捷工具栏</span> <span v-if="viewOptions.showToolbar" class="text-indigo-400 font-bold">✓</span>
-                        </button>
-                        <div class="h-px bg-zinc-700 my-1"></div>
-                        <button @click="viewOptions.showAvatarPreview = !viewOptions.showAvatarPreview" class="px-3 py-1.5 text-left hover:bg-indigo-600 hover:text-white flex justify-between items-center">
-                            <span>🖼️ 高清大立绘面板</span> <span v-if="viewOptions.showAvatarPreview" class="text-indigo-400 font-bold">✓</span>
-                        </button>
-                        <button @click="viewOptions.showTokenStats = !viewOptions.showTokenStats" class="px-3 py-1.5 text-left hover:bg-indigo-600 hover:text-white flex justify-between items-center">
-                            <span>📊 Token 分析看板</span> <span v-if="viewOptions.showTokenStats" class="text-indigo-400 font-bold">✓</span>
-                        </button>
-                        <button @click="viewOptions.showWorldbook = !viewOptions.showWorldbook" class="px-3 py-1.5 text-left hover:bg-indigo-600 hover:text-white flex justify-between items-center">
-                            <span>🌍 世界书 Lorebook 区域</span> <span v-if="viewOptions.showWorldbook" class="text-indigo-400 font-bold">✓</span>
-                        </button>
-                        <button @click="viewOptions.showRegex = !viewOptions.showRegex" class="px-3 py-1.5 text-left hover:bg-indigo-600 hover:text-white flex justify-between items-center">
-                            <span>⚡ 正则脚本对照区</span> <span v-if="viewOptions.showRegex" class="text-indigo-400 font-bold">✓</span>
-                        </button>
-                        <button @click="viewOptions.showPlugins = !viewOptions.showPlugins" class="px-3 py-1.5 text-left hover:bg-indigo-600 hover:text-white flex justify-between items-center">
-                            <span>🧩 卡内插件页签</span> <span v-if="viewOptions.showPlugins" class="text-indigo-400 font-bold">✓</span>
-                        </button>
-                        <button @click="viewOptions.showRawJson = !viewOptions.showRawJson" class="px-3 py-1.5 text-left hover:bg-indigo-600 hover:text-white flex justify-between items-center">
-                            <span>📄 Raw JSON 代码区</span> <span v-if="viewOptions.showRawJson" class="text-indigo-400 font-bold">✓</span>
-                        </button>
+                <div class="relative" @mouseenter="setMenu('view')" @mouseleave="closeMenus()">
+                    <button class="px-2 py-1 rounded hover:bg-zinc-800 hover:text-zinc-100 transition" @click="setMenu('view')">视图(V)</button>
+                    <div :class="menuOpen === 'view' ? 'flex' : 'hidden'" class="flex-col absolute top-full left-0 min-w-[220px] bg-zinc-800 border border-zinc-700 rounded shadow-xl py-1 z-50 text-xs">
+                        <template v-for="(group, gi) in commandsByMenu.view || []" :key="gi">
+                            <div v-if="gi > 0" class="h-px bg-zinc-700 my-1"></div>
+                            <div v-if="group.sectionTitle" class="px-3 py-1 text-[10px] font-bold text-zinc-500">{{ group.sectionTitle }}</div>
+                            <command-menu-item v-for="cmd in group.commands" :key="cmd.id" :cmd="cmd" :registry="registry" @executed="closeMenus()" />
+                        </template>
                     </div>
                 </div>
 
-                <div class="relative group">
-                    <button class="px-2 py-1 rounded hover:bg-zinc-800 hover:text-zinc-100 transition">设置(S)</button>
-                    <div class="hidden group-hover:flex flex-col absolute top-full left-0 min-w-[200px] bg-zinc-800 border border-zinc-700 rounded shadow-xl py-1 z-50 text-xs">
-                        <button @click="showApiModal = true" class="px-3 py-2 text-left hover:bg-indigo-600 hover:text-white font-medium flex items-center justify-between border-b border-zinc-700/50">
+                <div class="relative" @mouseenter="setMenu('settings')" @mouseleave="closeMenus()">
+                    <button class="px-2 py-1 rounded hover:bg-zinc-800 hover:text-zinc-100 transition" @click="setMenu('settings')">设置(S)</button>
+                    <div :class="menuOpen === 'settings' ? 'flex' : 'hidden'" class="flex-col absolute top-full left-0 min-w-[200px] bg-zinc-800 border border-zinc-700 rounded shadow-xl py-1 z-50 text-xs">
+                        <button @click="runCommand('settings.api')" class="px-3 py-2 text-left hover:bg-indigo-600 hover:text-white font-medium flex items-center justify-between border-b border-zinc-700/50">
                             <span>⚡ API 引擎与模型设置...</span>
                             <span class="text-[10px] text-indigo-300">配置</span>
                         </button>
-                        <button @click="resetApiSettings" class="px-3 py-1.5 text-left hover:bg-rose-600 hover:text-white text-rose-400 border-b border-zinc-700/50">🔄 重置 API 接口参数</button>
+                        <button @click="runCommand('settings.resetApi')" class="px-3 py-1.5 text-left hover:bg-rose-600 hover:text-white text-rose-400 border-b border-zinc-700/50">🔄 重置 API 接口参数</button>
 
                         <!-- 🎨 外观与字号（二级子菜单，避免整条设置菜单过长） -->
                         <div class="relative group/appearance">
@@ -127,15 +101,20 @@
                         <div class="px-3 py-2 border-b border-zinc-700/50">
                             <span class="block text-zinc-400 mb-1.5">🎨 界面主题风格</span>
                             <div class="grid grid-cols-3 gap-1">
-                                <button @click="setTheme('dark')" :class="theme === 'dark' ? 'border-indigo-500 font-bold' : ''" class="px-1.5 py-1 bg-zinc-900 border text-[10px] rounded text-zinc-200">暗夜极客</button>
-                                <button @click="setTheme('slate')" :class="theme === 'slate' ? 'border-sky-500 font-bold' : ''" class="px-1.5 py-1 bg-slate-800 border text-[10px] rounded text-slate-200">雅致青灰</button>
-                                <button @click="setTheme('light')" :class="theme === 'light' ? 'border-amber-500 font-bold' : ''" class="px-1.5 py-1 bg-zinc-100 border text-[10px] rounded text-zinc-800">明亮白昼</button>
+                                <!-- 🔧 评审意见 二-2：这里与「视图 → 外观」**共用同一批 registry id**（状态单源） -->
+                                <button @click="runCommand('appearance.themeDark')" :class="theme === 'dark' ? 'border-indigo-500 font-bold' : ''" class="px-1.5 py-1 bg-zinc-900 border text-[10px] rounded text-zinc-200">暗夜极客</button>
+                                <button @click="runCommand('appearance.themeSlate')" :class="theme === 'slate' ? 'border-sky-500 font-bold' : ''" class="px-1.5 py-1 bg-slate-800 border text-[10px] rounded text-slate-200">雅致青灰</button>
+                                <button @click="runCommand('appearance.themeLight')" :class="theme === 'light' ? 'border-amber-500 font-bold' : ''" class="px-1.5 py-1 bg-zinc-100 border text-[10px] rounded text-zinc-800">明亮白昼</button>
                             </div>
                         </div>
                         <div class="px-3 py-2 border-b border-zinc-700/50">
                             <div class="flex items-center justify-between text-zinc-300 mb-1">
                                 <span>🖼️ 界面 UI 字号</span>
-                                <span class="text-indigo-400 font-mono font-bold">{{ uiFontSizeDraft }}px</span>
+                                <span class="flex items-center gap-1">
+                                    <button @click="runCommand('appearance.fontUiDown')" :disabled="appSettings.uiFontSize <= 10" class="w-4 h-4 leading-none text-[11px] bg-zinc-700 hover:bg-zinc-600 rounded disabled:opacity-40">−</button>
+                                    <span class="text-indigo-400 font-mono font-bold">{{ uiFontSizeDraft }}px</span>
+                                    <button @click="runCommand('appearance.fontUiUp')" :disabled="appSettings.uiFontSize >= 28" class="w-4 h-4 leading-none text-[11px] bg-zinc-700 hover:bg-zinc-600 rounded disabled:opacity-40">＋</button>
+                                </span>
                             </div>
                             <input type="range" v-model.number="uiFontSizeDraft" min="10" max="28" step="1" @change="commitUiFontSize" class="w-full h-1.5 bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-indigo-500">
                         </div>
@@ -146,7 +125,7 @@
                             </div>
                             <input type="range" v-model.number="fontSizeDraft" min="10" max="36" step="1" @change="commitFontSize" class="w-full h-1.5 bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-amber-500">
                         </div>
-                        <button @click="resetPersonalizationSettings" class="px-3 py-2 w-full text-left hover:bg-zinc-700 text-zinc-300 border-t border-zinc-700/50">🎨 重置界面外观与字号</button>
+                        <button @click="runCommand('appearance.reset')" class="px-3 py-2 w-full text-left hover:bg-zinc-700 text-zinc-300 border-t border-zinc-700/50">🎨 重置界面外观与字号</button>
                             </div>
                         </div>
 
@@ -182,12 +161,63 @@
                             <span class="block text-[10px] text-zinc-500 mt-1">开=用系统规则给清洗后的新卡自动打标+自动分类；关=不自动打标，留给你手动标；仅对新导入卡片生效</span>
                         </div>
                         <div class="px-3 py-2 border-b border-zinc-700/50">
-                            <button @click="cleanForeignTagsFromLibrary()" class="w-full px-2 py-1.5 text-left rounded hover:bg-amber-600 hover:text-white flex items-center justify-between gap-2">
-                                <span>🧹 清洗历史外来标签</span>
-                                <span class="text-[10px] text-zinc-500 group-hover:text-amber-100">执行</span>
-                            </button>
-                            <span class="block text-[10px] text-zinc-500 mt-1">清除开关开启前已收编进卡片的外来标签（保留系统标签库/自动规则/已归类标签），物理落盘</span>
+                            <span class="block text-[10px] text-zinc-500 mt-1 leading-relaxed">🧹 清洗历史外来标签 已移到「🧰 工具 → 🧹 整理与清理」菜单</span>
                         </div>
+                            </div>
+                        </div>
+
+                        <!-- 🆕 P1：打标与分类（三层漏斗开关 + 规则表，二级子菜单） -->
+                        <div class="relative group/tagging">
+                            <div class="px-3 py-1.5 flex items-center justify-between hover:bg-indigo-600 hover:text-white cursor-pointer">
+                                <span>🏷️ 打标与分类</span>
+                                <span class="text-zinc-500 group-hover/tagging:text-white">▸</span>
+                            </div>
+                            <div class="hidden group-hover/tagging:flex flex-col absolute left-full top-0 -mt-1 min-w-[330px] bg-zinc-800 border border-zinc-700 rounded shadow-2xl py-1 z-[60]">
+                                <!-- 三层开关 -->
+                                <div class="px-3 py-2 border-b border-zinc-700/50">
+                                    <span class="block text-[10px] text-zinc-500 mb-2">打标管线（① 规则 → ② 本地向量 → ③ LLM 兜底）</span>
+                                    <div class="space-y-2">
+                                        <div class="flex items-center justify-between gap-2">
+                                            <span class="text-zinc-300">① 规则匹配 <span class="text-[10px] text-zinc-500">零成本</span></span>
+                                            <button @click="setFunnelLayer('rule', !tagFunnel.rule)" :class="tagFunnel.rule ? 'bg-indigo-600' : 'bg-zinc-700'" class="w-9 h-5 rounded-full relative transition-colors shrink-0" title="关闭后不再用内置/自定义规则打标">
+                                                <span :class="tagFunnel.rule ? 'translate-x-4' : 'translate-x-0'" class="absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full transition-transform"></span>
+                                            </button>
+                                        </div>
+                                        <div class="flex items-center justify-between gap-2">
+                                            <span class="text-zinc-300">② 本地向量 <span class="text-[10px] text-zinc-500">免费离线（首次需下载模型）</span></span>
+                                            <button @click="setFunnelLayer('vector', !tagFunnel.vector)" :class="tagFunnel.vector ? 'bg-purple-600' : 'bg-zinc-700'" class="w-9 h-5 rounded-full relative transition-colors shrink-0" title="语义匹配补充标签（模型未就绪时会自动跳过并提示原因）">
+                                                <span :class="tagFunnel.vector ? 'translate-x-4' : 'translate-x-0'" class="absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full transition-transform"></span>
+                                            </button>
+                                        </div>
+                                        <div class="flex items-center justify-between gap-2">
+                                            <span class="text-zinc-300">③ LLM 兜底 <span class="text-[10px] text-zinc-500">消耗 Token</span></span>
+                                            <button @click="setFunnelLayer('llm', !tagFunnel.llm)" :class="tagFunnel.llm ? 'bg-blue-600' : 'bg-zinc-700'" class="w-9 h-5 rounded-full relative transition-colors shrink-0" title="关闭后不发起任何 API 请求">
+                                                <span :class="tagFunnel.llm ? 'translate-x-4' : 'translate-x-0'" class="absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full transition-transform"></span>
+                                            </button>
+                                        </div>
+                                    </div>
+                                    <div v-if="funnelEmpty" class="mt-2 text-[10px] text-rose-400 leading-relaxed">⚠️ 三层已全部关闭：打标无法执行（开始按钮会被禁用）。</div>
+                                </div>
+                                <!-- 内置规则表 -->
+                                <div class="px-3 py-2 border-b border-zinc-700/50">
+                                    <div class="flex items-center justify-between mb-1 gap-2">
+                                        <span class="text-zinc-300">内置规则表</span>
+                                        <span class="text-[10px] text-zinc-400">生效 {{ autoTagRulesStats.enabled }} / 关闭 {{ autoTagRulesStats.disabled }}</span>
+                                    </div>
+                                    <button @click="runCommand('settings.tagging.manageRules')" class="w-full px-2 py-1.5 text-left rounded hover:bg-indigo-600 hover:text-white flex items-center justify-between gap-2">
+                                        <span>📝 管理规则表（逐条开关）…</span>
+                                        <span class="text-[10px] text-zinc-500">打开</span>
+                                    </button>
+                                    <button @click="runCommand('settings.tagging.resetDisabled')" :disabled="autoTagRulesStats.disabled === 0" class="mt-1 w-full px-2 py-1.5 text-left rounded hover:bg-emerald-600 hover:text-white disabled:opacity-40 disabled:hover:bg-transparent flex items-center justify-between gap-2">
+                                        <span>↩️ 恢复内置规则全开</span>
+                                    </button>
+                                </div>
+                                <div class="px-3 py-2">
+                                    <span class="block text-[10px] text-zinc-500 leading-relaxed">
+                                        ①关闭后「导入时自动打标」同样不生效；<br>
+                                        规则开关<strong class="text-amber-500/90">不影响</strong>「清洗历史外来标签」的保留词表。
+                                    </span>
+                                </div>
                             </div>
                         </div>
 
@@ -231,29 +261,58 @@
                                 </div>
                             </div>
                             <span v-else class="block text-[10px] text-amber-500/80 mt-1">自动快照已关闭，可在卡片工具栏手动创建快照</span>
-                            <button @click="cleanAllSnapshots" class="mt-2 w-full px-2 py-1.5 bg-rose-600/80 hover:bg-rose-500 text-white text-[11px] font-medium rounded transition" title="删除库目录下所有 .bak_history 快照文件夹，释放硬盘空间">
-                                🧹 一键清理全部历史快照
-                            </button>
-                            <button @click="cleanOrphanSnapshots" class="mt-1.5 w-full px-2 py-1.5 bg-amber-600/80 hover:bg-amber-500 text-white text-[11px] font-medium rounded transition" title="仅删除「对应卡片已被删除」的孤儿快照目录，仍有卡片存活的快照会保留">
-                                🗑️ 清理孤儿快照（已删卡残留）
-                            </button>
+                            <span class="block text-[10px] text-zinc-500 mt-2 leading-relaxed">🧹 清理全部快照 / 🗑️ 清理孤儿快照 已移到「🔧 维护」菜单</span>
                         </div>
                             </div>
                         </div>
                         <div class="h-px bg-zinc-700/50 my-1 mx-2"></div>
-                        <button @click="checkForUpdatesManual" class="px-3 py-1.5 text-left hover:bg-emerald-600 hover:text-white flex items-center justify-between text-emerald-400 font-bold transition">
-                            <span>🔄 检查应用更新...</span>
-                        </button>
+                        <span class="block px-3 py-1.5 text-[10px] text-zinc-500">🔄 检查应用更新 已移到「帮助(H)」菜单</span>
                     </div>
                 </div>
 
-                <div class="relative group">
-                    <button class="px-2 py-1 rounded hover:bg-zinc-800 hover:text-amber-400 transition font-bold">🧪 实验与工具</button>
-                    <div class="hidden group-hover:flex flex-col absolute top-full left-0 min-w-[210px] bg-zinc-800 border border-zinc-700 rounded shadow-xl py-1 z-50 text-xs">
-                        <div class="px-3 py-1.5 text-xs text-zinc-500 font-bold border-b border-zinc-700/50 mb-1">本地资产检索 (I/O)</div>
-                        <button @click="showDiskScanModal = true" class="px-3 py-1.5 text-left hover:bg-indigo-600 hover:text-white">🛰️ 全盘打捞卡片</button>
-                        <div class="h-px bg-zinc-700 my-1"></div>
-                        <button @click="openChatTab" class="px-3 py-1.5 text-left hover:bg-amber-600 hover:text-white font-medium">💬 本地 AI 对话测卡</button>
+                <!-- 🧰 工具（稳定工具专区；⚠️ 实验性/不稳定功能一律放「🧪 实验」，两者不混放） -->
+                <div class="relative" @mouseenter="setMenu('tools')" @mouseleave="closeMenus()">
+                    <button class="px-2 py-1 rounded hover:bg-zinc-800 hover:text-sky-300 transition font-bold" @click="setMenu('tools')">🧰 工具(G)</button>
+                    <div :class="menuOpen === 'tools' ? 'flex' : 'hidden'" class="flex-col absolute top-full left-0 min-w-[250px] bg-zinc-800 border border-zinc-700 rounded shadow-xl py-1 z-50 text-xs">
+                        <template v-for="(group, gi) in commandsByMenu.tools || []" :key="gi">
+                            <div v-if="gi > 0" class="h-px bg-zinc-700 my-1"></div>
+                            <div v-if="group.sectionTitle" class="px-3 py-1 text-[10px] font-bold text-zinc-500">{{ group.sectionTitle }}</div>
+                            <command-menu-item v-for="cmd in group.commands" :key="cmd.id" :cmd="cmd" :registry="registry" @executed="closeMenus()" />
+                        </template>
+                    </div>
+                </div>
+
+                <!-- 🔧 维护（目录 / 回收站 / 快照清理） -->
+                <div class="relative" @mouseenter="setMenu('maintenance')" @mouseleave="closeMenus()">
+                    <button class="px-2 py-1 rounded hover:bg-zinc-800 hover:text-zinc-100 transition" @click="setMenu('maintenance')">🔧 维护(W)</button>
+                    <div :class="menuOpen === 'maintenance' ? 'flex' : 'hidden'" class="flex-col absolute top-full left-0 min-w-[230px] bg-zinc-800 border border-zinc-700 rounded shadow-xl py-1 z-50 text-xs">
+                        <template v-for="(group, gi) in commandsByMenu.maintenance || []" :key="gi">
+                            <div v-if="gi > 0" class="h-px bg-zinc-700 my-1"></div>
+                            <command-menu-item v-for="cmd in group.commands" :key="cmd.id" :cmd="cmd" :registry="registry" @executed="closeMenus()" />
+                        </template>
+                    </div>
+                </div>
+
+                <!-- 🧪 实验（早期 / 不稳定功能专区） -->
+                <div class="relative" @mouseenter="setMenu('lab')" @mouseleave="closeMenus()">
+                    <button class="px-2 py-1 rounded hover:bg-zinc-800 hover:text-amber-400 transition font-bold" @click="setMenu('lab')">🧪 实验(L)</button>
+                    <div :class="menuOpen === 'lab' ? 'flex' : 'hidden'" class="flex-col absolute top-full left-0 min-w-[230px] bg-zinc-800 border border-zinc-700 rounded shadow-xl py-1 z-50 text-xs">
+                        <template v-for="(group, gi) in commandsByMenu.lab || []" :key="gi">
+                            <div v-if="gi > 0" class="h-px bg-zinc-700 my-1"></div>
+                            <command-menu-item v-for="cmd in group.commands" :key="cmd.id" :cmd="cmd" :registry="registry" @executed="closeMenus()" />
+                        </template>
+                    </div>
+                </div>
+
+                <!-- 🆕 P2-2：「帮助」菜单（原先「检查应用更新」藏在设置菜单里） -->
+                <div class="relative" @mouseenter="setMenu('help')" @mouseleave="closeMenus()">
+                    <button class="px-2 py-1 rounded hover:bg-zinc-800 hover:text-zinc-100 transition" @click="setMenu('help')">帮助(H)</button>
+                    <div :class="menuOpen === 'help' ? 'flex' : 'hidden'" class="flex-col absolute top-full left-0 min-w-[210px] bg-zinc-800 border border-zinc-700 rounded shadow-xl py-1 z-50 text-xs">
+                        <template v-for="(group, gi) in commandsByMenu.help || []" :key="gi">
+                            <div v-if="gi > 0" class="h-px bg-zinc-700 my-1"></div>
+                            <div v-if="group.sectionTitle" class="px-3 py-1 text-[10px] font-bold text-zinc-500">{{ group.sectionTitle }}</div>
+                            <command-menu-item v-for="cmd in group.commands" :key="cmd.id" :cmd="cmd" :registry="registry" @executed="closeMenus()" />
+                        </template>
                     </div>
                 </div>
             </nav>
@@ -269,42 +328,75 @@
                 SillyTavern Core
             </span>
             <div class="h-4 w-px bg-zinc-700 shrink-0"></div>
-            <button @click="selectFixedDirectory" class="flex items-center gap-1.5 px-2 py-1 hover:bg-zinc-800 hover:text-zinc-100 rounded text-zinc-400 transition whitespace-nowrap shrink-0">📂 打开本地库</button>
-            <button @click="downloadCardFromUrl" title="从 URL 直链下载导入角色卡（Discord/GitHub 等 CDN）" class="flex items-center gap-1.5 px-2 py-1 hover:bg-zinc-800 hover:text-zinc-100 rounded text-zinc-400 transition whitespace-nowrap shrink-0">🌐 链接导入</button>
-            <button @click="openGraphSmart" class="flex items-center gap-1.5 px-2 py-1 hover:bg-zinc-800 hover:text-zinc-100 rounded text-zinc-400 transition whitespace-nowrap shrink-0" :title="appMode === 'worldbooks' ? '生成当前世界书的词条关联图谱' : '生成全库角色关系图谱'">
+            <button @click="runCommand('toolbar.graph')" class="flex items-center gap-1.5 px-2 py-1 hover:bg-zinc-800 hover:text-zinc-100 rounded text-zinc-400 transition whitespace-nowrap shrink-0" :title="appMode === 'worldbooks' ? '生成当前世界书的词条关联图谱' : '生成全库角色关系图谱'">
                 {{ appMode === 'worldbooks' ? '🌍' : '🌌' }} 关系图谱
             </button>
-            <button @click="showGlobalAssetModal = true" class="flex items-center gap-1.5 px-2 py-1 hover:bg-zinc-800 hover:text-zinc-100 rounded text-zinc-400 transition whitespace-nowrap shrink-0" title="查看全库收集的世界书与正则脚本">
+            <!-- ⛔ 已下线（2026-09-20，用户决定）：全局资产库入口隐藏（浏览器/菜单/快捷键均无其它入口）
+            <button @click="runCommand('toolbar.globalAssets')" class="flex items-center gap-1.5 px-2 py-1 hover:bg-zinc-800 hover:text-zinc-100 rounded text-zinc-400 transition whitespace-nowrap shrink-0" title="查看全库收集的世界书与正则脚本">
                 📚 全局资产库
             </button>
+            -->
+            <!-- 下线提示（一个版本后删除）：让习惯旧位置的你能确认是“功能下线”而不是“按钮丢了” -->
+            <span class="px-2 py-1 text-[10px] text-zinc-600 whitespace-nowrap shrink-0" title="全局资产库功能已关闭（后续将作为「扩展」重新提供）">📚 全局资产库已下线</span>
             <label class="flex items-center gap-1.5 px-2 py-1 hover:bg-zinc-800 hover:text-zinc-100 rounded text-zinc-400 transition cursor-pointer whitespace-nowrap shrink-0">
                 📥 恢复配置 <input type="file" class="hidden" accept=".json" @change="importLibraryDB">
             </label>
-            <button @click="toggleTheme" class="flex items-center gap-1.5 px-2 py-1 hover:bg-zinc-800 hover:text-zinc-100 rounded text-zinc-400 transition whitespace-nowrap shrink-0" title="循环切换三套主题 (暗夜/青灰/白昼)">
+            <button @click="runCommand('theme.toggle')" class="flex items-center gap-1.5 px-2 py-1 hover:bg-zinc-800 hover:text-zinc-100 rounded text-zinc-400 transition whitespace-nowrap shrink-0" title="循环切换三套主题 (暗夜/青灰/白昼)">
                 {{ theme === 'dark' ? '🌙 暗夜' : (theme === 'slate' ? '🌊 青灰' : '☀️ 白昼') }}
             </button>
         </div>
 
         <div class="flex items-center gap-3 shrink-0">
             <span class="text-xs text-zinc-500 whitespace-nowrap">总计: {{ library.length }} 张卡片</span>
-            <button @click="exportLibraryDB" class="flex items-center gap-1 px-2 py-1 bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 rounded text-zinc-300 transition whitespace-nowrap shrink-0">备份配置</button>
+            <button @click="runCommand('file.backupConfig')" class="flex items-center gap-1 px-2 py-1 bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 rounded text-zinc-300 transition whitespace-nowrap shrink-0">💾 备份配置</button>
         </div>
     </header>
 </template>
 
 <script>
 import { inject, computed, ref, watch } from 'vue';
+import CommandMenuItem from './CommandMenuItem.vue'; // 🎛️ P2：单命令按钮（菜单项 / 工具栏两种形态）
 
 export default {
     name: 'HeaderBar',
+    components: { CommandMenuItem },
     setup() {
         const ctx = inject('appCtx');
-        // 🎯 智能查重目标标签：随当前视图（角色卡/世界书/预设）动态变化
-        const dedupeTargetLabel = computed(() => {
-            if (ctx.appMode.value === 'worldbooks') return '世界书';
-            if (ctx.appMode.value === 'presets') return '预设';
-            return '角色卡';
+        // 🆕 P2：以下三个派生状态已**上移到 App.vue 的 ctx**（注册表命令的 `badge()` / `titleFn()` 也要用它们），
+        //    本组件直接用 ctx 上的同一份，避免“同一逻辑两份实现”（曾因只在本组件内部定义而导致菜单显示 undefined）。
+        const funnelBadge = ctx.funnelBadge;     // 打标管线短标签（规则✓ 向量✗ AI✓）
+        const funnelEmpty = ctx.funnelEmpty;     // 三层全关（模板里的警告文案用）
+
+        // ================= 🎛️ P2：命令注册表接线 =================
+        // 菜单/工具栏的❰命令❱由注册表提供（定义见 js/composables/useCommands.js）；本组件只决定"显示在哪、长什么样"。
+        // 这样同一命令不会在菜单/工具栏/快捷键各处重复定义（改动前 HeaderBar 内 47 处 @click 全硬编码）。
+        const registry = ctx.commandRegistry;
+        // 🆕 AR-34：顶部菜单的「显式关闭」通道。
+        //    原用纯 CSS `hidden group-hover:flex`，而 `:hover` 由鼠标位置决定、**点击不会改变它** →
+        //    点完菜单项菜单仍然开着（命令弹窗时更会与菜单叠在一起）。现改为状态控制：
+        //    容器 mouseenter 开 / mouseleave 关 / 菜单项执行后关。
+        const menuOpen = ref('');                       // '' = 全部关闭；否则为菜单 key
+        const setMenu = (key) => { menuOpen.value = key; };
+        const closeMenus = () => { menuOpen.value = ''; };
+        // `when` 求值上下文（v1 只支持单值比较：`appMode == 'xxx'`）
+        const whenContext = computed(() => ({ appMode: ctx.appMode.value }));
+        /** 按菜单取命令（已按 section 分组 → 模板在 section 变化处渲染分隔线） */
+        const commandsByMenu = computed(() => {
+            const out = {};
+            // 🆕 P2-2：菜单键与注册表 `menu` 字段一致（2026-09-20：「编辑」菜单已并入「标签」，故 key 列表不含 edit）
+            for (const key of ['file', 'tags', 'push', 'view', 'tools', 'maintenance', 'lab', 'help']) {
+                out[key] = registry.listByMenu(key, whenContext.value);
+            }
+            return out;
         });
+        // 说明：设置菜单是「命令 + 开关/滑块/子菜单」交错结构，保持手写渲染，但**数据源同样走注册表**
+        //      （按钮的 @click 调用 runCommand('settings.xxx')）—— 工具栏同理。
+        /** 执行命令（供手写样式的按钮调用）
+         *  🆕 AR-34：执行后一并关闭菜单 —— 设置菜单里的命令是手写按钮，不走 CommandMenuItem 的 @executed，
+         *  所以这里是它们唯一的公共入口，一行即可覆盖全部手写入口（工具栏按钮调用它是空操作，无影响）。 */
+        const runCommand = (id) => { registry.execute(id); closeMenus(); };
+        // 🎯 智能查重目标标签（“角色卡 / 世界书 / 预设”）：同样改由 ctx 提供（注册表命令标题用）
+        const dedupeTargetLabel = ctx.dedupeTargetLabel;
 
         // 🔧 字号滑块性能修复：滑块绑定本地草稿值（拖动只更新旁边数字，零全局副作用），
         //    松手(@change)才提交到全局 appSettings——避免拖动期间每帧触发全局 CSS 变量
@@ -371,6 +463,21 @@ export default {
             importLibraryDB: ctx.importLibraryDB,
             exportLibraryDB: ctx.exportLibraryDB,
             toggleTheme: ctx.toggleTheme,
+            // 🆕 P1：打标三层开关（设置子菜单用）+ 管线状态提示（编辑菜单用）
+            tagFunnel: ctx.tagFunnel,
+            autoTagRulesStats: ctx.autoTagRulesStats,
+            setFunnelLayer: ctx.setFunnelLayer,
+            resetAutoTagDisabledRules: ctx.resetAutoTagDisabledRules,
+            funnelBadge,
+            funnelEmpty,
+            // 🆕 P2：命令注册表渲染入口（菜单按钮 v-for + 手写按钮的 runCommand）
+            registry,
+            commandsByMenu,
+            runCommand,
+            // 🆕 AR-34：菜单开关状态（模板里的 @mouseenter/@mouseleave/:class 用）
+            menuOpen,
+            setMenu,
+            closeMenus,
             library: ctx.library
         };
     }

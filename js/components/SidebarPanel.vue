@@ -400,7 +400,7 @@
                             💾 落盘
                         </button>
                     </div>
-                    <!-- � JSONL 导入 + 📦 批量导出 -->
+                    <!-- 📥 JSONL 导入 + 📦 批量导出 -->
                     <div class="flex items-center gap-1.5">
                         <label class="flex-1 flex items-center justify-center gap-1.5 px-3 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs rounded border border-zinc-700/60 cursor-pointer transition shadow-sm"
                                title="导入 JSONL / Rentry 格式世界书（逐行解析）">

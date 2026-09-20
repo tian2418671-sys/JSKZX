@@ -228,7 +228,7 @@ export function useSearch({
                 });
             }
             if (sortBy.value === 'time') {
-                // � 本地文件最新：纯本地文件时间（创建→修改）降序
+                // 📅 本地文件最新：纯本地文件时间（创建→修改）降序
                 return arr.sort((a, b) => {
                     try {
                         return (pickTimeLocal(b) - pickTimeLocal(a))
