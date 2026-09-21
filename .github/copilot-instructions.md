@@ -1,7 +1,7 @@
 # 项目协作指令 · JSK管理（SillyTavern 角色卡管理器）
 
 > 本文件由 AI 助手**自动加载**。开工前请**先读 [`START-HERE.md`](../START-HERE.md) → [`AI交接指导.md`](../AI交接指导.md)**。
-> 当前版本 **v2.2.14**（Electron 43 + Vue 3 + Vite 8；`npm test` = 403 用例）。
+> 当前版本 **v2.2.13**（Electron 43 + Vue 3 + Vite 8；`npm test` = 403 用例）。
 
 ## 铁律（违反会出事）
 
