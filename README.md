@@ -228,7 +228,7 @@ npm run build
 │       ├── cardLoader.js   # 卡片读取、数据规范化（V1/V2/V3 兼容）、extractBookEntries 安全提取
 │       ├── pngParser.js    # PNG/WebP tEXt/iTXt 块解析、深度扫描提取 JSON
 │       └── tokenEstimate.js# Token 估算工具（App 与 TextModal 共享）
-├── test/                   # node:test 单元测试（402 用例 / 35 个文件）
+├── test/                   # node:test 单元测试（403 用例 / 35 个文件）
 ├── build/                  # 打包资源（icon.ico、generate-icon.ps1）
 ├── web/                    # Vite 构建产物（gitignore）
 └── dist/                   # electron-builder 打包产物（gitignore）
@@ -536,7 +536,7 @@ nativeAlert('保存成功', 'info');                   // type 仅支持 none/in
 ### 提交前自查清单
 
 - [ ] `node --check` / `get_errors` 无语法错误
-- [ ] `npm test` 单测全绿（402 用例）
+- [ ] `npm test` 单测全绿（403 用例）
 - [ ] 新增成员已加入 `setup()` 的 `return` 与 `ctx`
 - [ ] IPC 传参已 `JSON.parse(JSON.stringify(...))` 剥离 Proxy
 - [ ] 未引入外部 CDN / 未使用 `prompt`/`confirm`/`alert` / 未对 `cardData` 深层响应式
