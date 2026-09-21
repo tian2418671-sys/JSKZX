@@ -5,13 +5,21 @@
  */
 import { ref } from 'vue';
 import { alignEntryLists, summarizeAlignment, normalizeEntries } from '../utils/entryAlign.js';
+import { diffContentForDisplay } from '../utils/textDiff.js';
 
 export function useDedupe({
     library, worldbooks, activeWorldbook, cardData,
     presets, activePreset, appMode,
     estimateCardTokens,
-    nativeAlert, confirmDialog, addLog, reset, cleanupEmptyCategories, deleteCardOverlays
+    nativeAlert, confirmDialog, addLog, reset, cleanupEmptyCategories, deleteCardOverlays,
+    // 🔔 T1：非阻塞反馈（由 App.vue 经 ctx 注入；本仓库没有 $toast，也没有 useToast.js）。
+    //    成功路径用 showToast（不打断用户），失败路径仍走 nativeAlert 保留可复制的文件名详情。
+    showToast
 }) {
+    /** 统一的「成功反馈」出口：Toast 缺失时静默降级（不抛错，老调用方也能跑） */
+    const toastOk = (message, duration = 3000) => {
+        if (typeof showToast === 'function') showToast(message, 'success', duration);
+    };
     // =========================================================
     // 🔍 智能查重与版本清洗系统
     // =========================================================
@@ -49,7 +57,9 @@ export function useDedupe({
             const potentialGroups = Object.entries(groups).filter(([name, cards]) => cards.length > 1);
 
             if (potentialGroups.length === 0) {
-                nativeAlert('🎉 恭喜！当前库中极为整洁，未发现同名重复的角色卡！', 'info');
+                // 🔔 T1：纯信息型结论不再用模态框打断（无详情可复制），走 Toast
+                if (typeof showToast === 'function') showToast('🎉 恭喜！当前库中极为整洁，未发现同名重复的角色卡！', 'success', 4000);
+                else nativeAlert('🎉 恭喜！当前库中极为整洁，未发现同名重复的角色卡！', 'info');
                 return;
             }
 
@@ -151,11 +161,13 @@ export function useDedupe({
             await cleanupEmptyCategories(); // 🧹 自动清理空分组
 
             // 🔧 分项结果提示（渲染进程无 path 模块，用 split 取文件名）
+            // 🔔 T1：成功走非阻塞 Toast；有失败项时 Toast 报数 + nativeAlert 保留可复制的文件名详情
             if (failedPaths.size > 0) {
                 const names = [...failedPaths].map(p => p.split(/[\\/]/).pop()).join('、');
+                if (typeof showToast === 'function') showToast(`已清理 ${res.count} 张，${failedPaths.size} 张失败（可能被占用）`, 'warning', 5000);
                 nativeAlert(`已清理 ${res.count} 张；${failedPaths.size} 张失败（可能被其他程序占用）：\n${names}`, 'warning');
             } else {
-                nativeAlert(`清理成功！已将 ${res.count} 张冗余卡片移入回收站。`, 'info');
+                toastOk(`清理成功！已将 ${res.count} 张冗余卡片移入回收站。`);
             }
         } else {
             nativeAlert(`清理失败: ${(res && res.error) || '未知错误'}`, 'error');
@@ -206,7 +218,8 @@ export function useDedupe({
             const potentialGroups = Object.entries(groups).filter(([_, list]) => list.length > 1);
 
             if (potentialGroups.length === 0) {
-                nativeAlert('🎉 恭喜！当前库中未发现同名的重复世界书！', 'info');
+                if (typeof showToast === 'function') showToast('🎉 恭喜！当前库中未发现同名的重复世界书！', 'success', 4000);
+                else nativeAlert('🎉 恭喜！当前库中未发现同名的重复世界书！', 'info');
                 return;
             }
 
@@ -300,9 +313,10 @@ export function useDedupe({
 
             if (failedPaths.size > 0) {
                 const names = [...failedPaths].map(p => p.split(/[\\/]/).pop()).join('、');
+                if (typeof showToast === 'function') showToast(`已清理 ${res.count} 本，${failedPaths.size} 本失败（可能被占用）`, 'warning', 5000);
                 nativeAlert(`已清理 ${res.count} 本；${failedPaths.size} 本失败（可能被占用）：\n${names}`, 'warning');
             } else {
-                nativeAlert(`清理完成！已移入回收站 ${res.count} 本世界书。`, 'info');
+                toastOk(`清理完成！已移入回收站 ${res.count} 本世界书。`);
             }
         } else {
             nativeAlert(`清理失败: ${(res && res.error) || '未知错误'}`, 'error');
@@ -387,7 +401,8 @@ export function useDedupe({
 
             const potentialGroups = Object.entries(groups).filter(([_, list]) => list.length > 1);
             if (potentialGroups.length === 0) {
-                nativeAlert('🎉 恭喜！当前库中未发现同名的重复预设！', 'info');
+                if (typeof showToast === 'function') showToast('🎉 恭喜！当前库中未发现同名的重复预设！', 'success', 4000);
+                else nativeAlert('🎉 恭喜！当前库中未发现同名的重复预设！', 'info');
                 return;
             }
 
@@ -473,9 +488,10 @@ export function useDedupe({
 
             if (failedPaths.size > 0) {
                 const names = [...failedPaths].map(p => p.split(/[\\/]/).pop()).join('、');
+                if (typeof showToast === 'function') showToast(`已清理 ${res.count} 个，${failedPaths.size} 个失败（可能被占用）`, 'warning', 5000);
                 nativeAlert(`已清理 ${res.count} 个；${failedPaths.size} 个失败（可能被占用）：\n${names}`, 'warning');
             } else {
-                nativeAlert(`清理完成！已移入回收站 ${res.count} 个预设。`, 'info');
+                toastOk(`清理完成！已移入回收站 ${res.count} 个预设。`);
             }
         } else {
             nativeAlert(`清理失败: ${(res && res.error) || '未知错误'}`, 'error');
@@ -490,37 +506,18 @@ export function useDedupe({
     const diffCompareItem = ref(null);
     const diffFieldResults = ref([]);
 
-    // 智能句级切块算法 (取代简陋的段落比对，精确到每一个标点符号)
-    const chunkTextForDiff = (text) => {
-        if (!text) return [];
-        try {
-            // 按标点或换行进行精细分句，保留标点，极大提升长段落对比体验
-            return text.split(/(?<=[。！？.!?\n]+)/).map(s => s.trim()).filter(Boolean);
-        } catch (e) {
-            // 兜底降级
-            return text.split('\n').map(s => s.trim()).filter(Boolean);
-        }
-    };
-
-    const computeTextDiffLines = (str1 = '', str2 = '') => {
-        const chunks1 = chunkTextForDiff(str1);
-        const chunks2 = chunkTextForDiff(str2);
-
-        const set1 = new Set(chunks1);
-        const set2 = new Set(chunks2);
-
-        const res1 = chunks1.map(chunk => ({
-            text: chunk,
-            type: set2.has(chunk) ? 'same' : 'removed'
-        }));
-
-        const res2 = chunks2.map(chunk => ({
-            text: chunk,
-            type: set1.has(chunk) ? 'same' : 'added'
-        }));
-
-        return { masterLines: res1, compareLines: res2 };
-    };
+    /**
+     * 行级差异（🎨 2026-09-21 改造）。
+     *
+     * 旧实现是「按标点切块 + 集合匹配」：不保留位置（同一句出现在别处就算相同），
+     * 且两侧是**各自独立的滚动容器** → 行与行对不齐；长正文或小改动肉眼看不出来。
+     * 现在改为 `diffContentForDisplay`：行级 LCS 对齐 + 变更行**行内精确高亮**，
+     * 两侧共用同一份 `rows`（行号一一对应）→ 组件顺序渲染即天然对齐。
+     *
+     * ⚠️ 返回结构从 `{ masterLines, compareLines }` 变为 `{ rows, stats }`；
+     *    `DiffModal` 已同步改为渲染 `rows`（并保留 `diffLines` 旧分支做兼容）。
+     */
+    const computeTextDiffLines = (str1 = '', str2 = '') => diffContentForDisplay(str1, str2);
 
     // 全能通用比对唤起 (自动识别世界书 / 角色卡)
     const openDiffDetailModal = (masterItem, compareItem) => {
@@ -605,6 +602,7 @@ export function useDedupe({
                 isSame: isTextSame,
                 len1: `${text1.length} 字`,
                 len2: `${text2.length} 字`,
+                // 🎨 行级着色（两侧行号一一对应，变更行加底色 + 行内高亮）
                 diffText: isTextSame ? null : computeTextDiffLines(text1, text2),
                 hint: '正文总集无逐行差异可展开，逐条对比见「🧩 词条级对齐」。'
             });
@@ -826,7 +824,8 @@ export function useDedupe({
             });
             const n = valid.length;
             if (n < 2) {
-                nativeAlert('🎉 未发现可判定的内容重复项（内容过短的项已跳过）。', 'info');
+                if (typeof showToast === 'function') showToast('🎉 未发现可判定的内容重复项（内容过短的项已跳过）。', 'success', 4000);
+                else nativeAlert('🎉 未发现可判定的内容重复项（内容过短的项已跳过）。', 'info');
                 return;
             }
 
@@ -875,7 +874,8 @@ export function useDedupe({
             });
 
             if (rawGroups.length === 0) {
-                nativeAlert('🎉 未发现内容高度相似的重复项！', 'info');
+                if (typeof showToast === 'function') showToast('🎉 未发现内容高度相似的重复项！', 'success', 4000);
+                else nativeAlert('🎉 未发现内容高度相似的重复项！', 'info');
                 return;
             }
 
@@ -957,9 +957,10 @@ export function useDedupe({
 
             if (failedPaths.size > 0) {
                 const names = [...failedPaths].map(p => p.split(/[\\/]/).pop()).join('、');
+                if (typeof showToast === 'function') showToast(`已清理 ${res.count} 个，${failedPaths.size} 个失败（可能被占用）`, 'warning', 5000);
                 nativeAlert(`已清理 ${res.count} 个；${failedPaths.size} 个失败（可能被占用）：\n${names}`, 'warning');
             } else {
-                nativeAlert(`清理完成！已将 ${res.count} 个疑似重复版本移入回收站。`, 'info');
+                toastOk(`清理完成！已将 ${res.count} 个疑似重复版本移入回收站。`);
             }
         } else {
             nativeAlert(`清理失败: ${(res && res.error) || '未知错误'}`, 'error');

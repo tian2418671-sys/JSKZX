@@ -5142,7 +5142,7 @@ export default {
             showContentDedupeModal, contentDuplicateGroups, startContentDedupeScan, resolveContentDedupeGroup,
             startSmartDedupe,
             showDiffDetailModal, diffMasterItem, diffCompareItem, diffFieldResults, openDiffDetailModal
-        } = useDedupe({ library, worldbooks, activeWorldbook, cardData, presets, activePreset, appMode, estimateCardTokens, nativeAlert, confirmDialog, addLog, reset, cleanupEmptyCategories, deleteCardOverlays });
+        } = useDedupe({ library, worldbooks, activeWorldbook, cardData, presets, activePreset, appMode, estimateCardTokens, nativeAlert, confirmDialog, addLog, reset, cleanupEmptyCategories, deleteCardOverlays, showToast });
 
         // 🌍 世界书库与分组：组合式函数注入（共享状态 worldbooks/wbCategoryMap 等保留在 App.vue）
         const {
@@ -5151,6 +5151,7 @@ export default {
             handleWorldbookFolderSelect, deleteWorldbook, duplicateWorldbook,
             openWbContextMenu, closeWbContextMenu, openWbInFolder,
             wbCategories, changeWbCategory, filteredWorldbooks,
+            wbScanProgress, isWbScanning, wbScanPercent,
             reportSkipped, wbEntryCount, ensureWorldbookLoaded, selectWorldbook
         } = useWorldbooks({ worldbooks, activeWorldbook, lastWorldbookDirPath, wbSearchQuery, wbFilterType, currentWbCategory, wbCategoryMap, saveWbCategoriesMap, syncWorldbooksToDisk, appMode, appPrompt, nativeAlert, confirmDialog, addLog, contextMenu, closeContextMenu });
 
@@ -5836,6 +5837,8 @@ export default {
             showDedupeModal, duplicateGroups, startDedupeScan, resolveDedupeGroup,
             // 🌍 世界书库筛选与对比查重
             wbSearchQuery, wbFilterType, filteredWorldbooks,
+            // 📊 T2 世界书扫描真进度条（phase/done/total/current + 百分比）
+            wbScanProgress, isWbScanning, wbScanPercent,
             showWbDedupeModal, wbDuplicateGroups, startWorldbookDedupeScan, resolveWbDedupeGroup,
             // ⚙️ 预设查重 + 🧬 内容级版本查重 + 🎯 智能查重统一入口（按当前视图自动分发）
             showPresetDedupeModal, presetDuplicateGroups, startPresetDedupeScan, resolvePresetDedupeGroup,

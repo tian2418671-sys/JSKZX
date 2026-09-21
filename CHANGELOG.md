@@ -5,11 +5,12 @@
 
 ---
 
-## 🩹 未发布 · 查重 / 扫描 / 检索全链路修复（Phase 1 + Phase 2，2026-09-21）
+## 🩹 未发布 · 查重 / 扫描 / 检索全链路修复（Phase 1 + Phase 2 + Phase 3，2026-09-21）
 
 > 规格：[`docs/规格与计划/查重扫描与检索-最终方案.md`](docs/规格与计划/查重扫描与检索-最终方案.md)
 > ｜ 流水：[`实施工作日志.md`](docs/规格与计划/查重扫描与检索-实施工作日志.md)
 > ｜ 待办：[`剩余任务.md`](docs/规格与计划/查重扫描与检索-剩余任务.md)
+> ｜ 移动版：[`移动版同步-待办清单.md`](docs/规格与计划/移动版同步-待办清单.md)（独立成文）
 
 ### ✨ 用户可感知的变化
 - **世界书「查看词条差异」不再崩**：词条数不同的两本书以前一开就渲染报错（词条数相同才不崩）；现在正常打开
@@ -19,6 +20,16 @@
   现在能识别，且**被跳过的文件会在日志里点名**（数量 + 文件名 + 原因）；超大书按需加载并标「按需」
 - **搜索更准**：修掉「搜『系统』却命中只含『体系 传统』的卡」；且**索引建好前后结果不再不一致**
 - **搜索不再漏卡**：索引构建中 / 刷新未收尾时不再出现「明明有却搜不到」
+- **搜索不卡了**：库很大时输入英文前缀（如 `syst`）以前每敲一个字母都要卡一下（万卡库实测 19~44ms/次），
+  现在快 **20~70 倍**（0.5~1.3ms），且**搜到的结果和以前完全一致**（不改变匹配语义）
+- **清理完有明确反馈**：查重 / 清理操作完成后弹出成功提示（以前只有失败才提示，成功时静默）
+- **扫描有真进度条**：扫描世界书目录时显示进度条 + 当前文件名 + 百分比，平滑推到 100%（以前只有一个「扫描中」状态）
+- **修掉「点世界书库 / 导入世界书就整个侧边栏消失」**：以前点「🌍 世界书库」或导入世界书后整个左侧栏消失且回不来，
+  现在正常显示（详见缺陷 AR-40）
+- **查重对比「一眼看出改了哪里」**：以前打开对比后词条正文是**纯色文本**，正文一长或只改几个字就看不出来；
+  现在**变更行有底色**（红=本端缺失 / 绿=对端新增 / 琥珀=双方都有但内容变了），
+  且**只把真正不同的那几个字/词标亮**（如只改了「并散发着微弱的蓝光」就只标这半句）；
+  两侧还带**行号**且**逐行对齐**（以前左右各自滚动、行与行对不上）
 
 ### 🧩 实现要点（内部）
 - **Phase 1（P0）**：新增 `js/utils/entryAlign.js`（`keyOf` 三级回退 + 带侧标识 + 一对一配对的外连接对齐）；
@@ -27,22 +38,51 @@
 - **Phase 2（P1）**：
   - `useSearch.js`：就绪判定 `cardCount > 0 && !building && cardCount >= library.length`；查空回落内存匹配；
     **候选集短语复核**（去掉 `&& searchIndex.cardCount === 0`，改对候选集复算，同卡文本 Map 缓存）
-  - `main.js`：新增 `SCAN_INLINE_MAX_BYTES=5MB` / `SCAN_PARSE_MAX_BYTES=50MB` / `SCAN_HEAVY_CONCURRENCY=3` / `SCAN_CACHE_VERSION=2`；
-    分级处理（≤5MB 32 并发 / 5~50MB 3 并发 / >50MB 只回元数据）；结果补 `size/mtime/entryCount/heavy/dataLoaded`；
+  - `main.js`：新增 `SCAN_INLINE_MAX_BYTES=5MB` / `SCAN_PARSE_MAX_BYTES=50MB` / `SCAN_HEAVY_CONCURRENCY` / `SCAN_CACHE_VERSION=2`；
+    分级处理（≤5MB 32 并发 / 5~50MB 低并发 / >50MB 只回元数据）；结果补 `size/mtime/entryCount/heavy/dataLoaded`；
     返回体新增 `skipped`；**预检未命中改写 `valid:null`**（不再固化否定）；`scanCache` 加版本号；**世界书 + 预设两侧同改**
   - `useWorldbooks.js` / `usePresets.js`：`reportSkipped`（跳过可见化）；`wbEntryCount` / `selectWorldbook` / `ensureWorldbookLoaded`（懒加载）
   - `SidebarPanel.vue`：词条数改用 `wbEntryCount`；点击走 `selectWorldbook`；「按需」徽标
-- **缺陷编号**：AR-39 / DF-17 / DF-18 / DF-19 / PK-18（PK-19 待 Phase 3）
+- **Phase 3（P2 / 速度）**：
+  - **T1 Toast**：`useDedupe.js` 注入 `showToast`（**未新建 `useToast.js`**，走 ctx 注入）+ `toastOk()` 统一成功出口
+    （`showToast` 缺失时静默降级）；覆盖 4 条链路（角色卡 / 世界书 / 预设 / 内容级）的「清理成功」与「未发现重复」；
+    `App.vue` 的 `useDedupe({...})` 调用处补传 `showToast`（原本**没传**）
+  - **T2 真进度条**（四步接线）：`main.js` 新增 `sendWbProgress` + 轻量预扫 `countJson`（只 readdir，不 parse）算准 `total`，
+    `handleOne` 用 `try/finally` 保证所有路径推进 `done`，节流「每 ≥20 个或 ≥120ms」；`preload.js` 暴露 `onWbScanProgress`；
+    `useWorldbooks.js` 新增 `wbScanProgress` / `isWbScanning` / `wbScanPercent`（`finally` 复位）；
+    `SidebarPanel.vue` 渲染进度条，**刻意放在模式切换之外**（启动自动恢复扫描时也可见）
+  - **T3 拉丁前缀优化（PK-19）**：`searchIndex.js` 新增 `_buildBigram()`（token 二元组 → token **下标** `Int32Array`，
+    换表时同步重建）+ 重写 `_getMatches()`（取**最稀有** bigram 候选集做 `includes` 精筛；桶不存在则精确剪枝）；
+    **降级保障**（单字符 / `bigramDirty` / 下标异常 → 回退全表扫，只慢不错）；`push(...cards)` 改循环追加（防展开上限）；`stats()` 增 `bigramCount/bigramDirty`
+  - **T6 调参**：`SCAN_HEAVY_CONCURRENCY` **3 → 2**（实测并发 2→12 耗时仅改善 3%，但内存增量 59MB → 118~146MB）
+- **AR-40 修复**：`SidebarPanel.vue` 的 setup return 补 `wbEntryCount` / `selectWorldbook`（模板调用了但未绑定 → 渲染期 TypeError 卸载组件）
+- **AR-41 修复（差异着色）**：新增 `js/utils/textDiff.js` —— 行级 LCS 对齐（先剥公共前缀/后缀行控规模）
+  + 变更块内「删+增」**配对为 `changed`**（而非拆两条）+ 行内 token 级精确高亮（拉丁按整词 / CJK 按单字符）
+  + 超长降级（>1500 行转位置比对、单行规模积 >25 万整段标记、全篇预算 300 万，**降级后仍严格对齐**）；
+  `DiffModal.vue` 两侧共用同一份 `rows`（带行号，某侧缺失给 `null` 占位）→ 天然对齐；
+  新增 `rowClass` / `hlClass` / `keyClass`（行底色 + 行内高亮 + 触发词 chips 着色）；
+  `useDedupe.js` 的 `computeTextDiffLines` 改为调用新工具（删除已成死代码的 `chunkTextForDiff`）
+- **缺陷编号**：AR-39 / AR-40 / AR-41 / DF-17 / DF-18 / DF-19 / PK-18 / PK-19
 
 ### 🔬 验证
-- `npm test` → **445 pass / 0 fail**（38 个文件；原 403 + 新增 42）
-- `npm run build:web` 无错；`get_errors` 全清
+- `npm test` → **471 pass / 0 fail**（原 403 → Phase 1+2 的 445 → Phase 3 的 460 → AR-41 的 471）
+- `npm run build:web` 无错；`get_errors` 全清；`check-doc-links.mjs` 208 链接全解析
 - **真实启动冒烟**（dev 模式 + 隔离 profile + CDP）：
   - `scripts/_probe-diff-align.mjs` → **15/15**（差异弹窗 UI 级；含旧代码条件对照 `oldCrashed === true`）
   - `scripts/_probe-scan-gate.mjs` → **12/12**（真实目录 6MB 书 `bigRecognized=true`、`skipped` 可见、二次扫描走缓存仍在）
   - `scripts/_probe-search-phrase.mjs` → **8/8**（真实搜索框输入「系统」，两路径均不命中「体系 传统」诱饵卡）
-- **测试有效性反向验证**：临时回退 `needPhraseCheck` → 用例失败（`['卡A']` → `['卡A','卡C']`），证明用例有效
+  - `scripts/_probe-wb-scan-progress.mjs` → **9/9**（T2：单次 IPC 收到 10 条进度事件，旧实现 0 条；`total` 准确、`done` 单调、终态 `done===total`）
+  - `scripts/_probe-wb-sidebar-crash.mjs` → **8/8**（AR-40：点世界书库 / 反复切模式 → `aside` 存活、无 `_ctx.*` 错误）
+  - `scripts/_probe-diff-coloring.mjs` → **15/15**（AR-41：三种行底色齐备、11 处行内精确高亮、两侧行号列数量相等、无渲染期错误）
+- **测试有效性反向验证**：临时回退 `needPhraseCheck` → 用例失败（`['卡A']` → `['卡A','卡C']`）；
+  临时移除 `selectWorldbook` 绑定 → `sidebarBindings.test.mjs` 失败并点名该符号
+- **真实库实测（T4~T6，`H:\01\全局世界书` 39 本 / 53.6MB）**：
+  - T4 头部预检误杀率 **0%**（唯一「未命中」的是酒馆预设，属正确拒绝）→ 无需放宽
+  - T5 `entries[0]` 静默拒绝 **0 例**（被拒 4 本全是无 `entries` 的快捷回复配置）→ 无需修改
+  - T6 并发调参依据见上（`SCAN_HEAVY_CONCURRENCY` 3 → 2）
 - 新单测：`test/dedupeEntryAlign.test.mjs`（20）+ `test/searchPhrase.test.mjs`（9）+ `test/scanGate.test.mjs`（13）
+  + `test/latinPrefix.test.mjs`（10，PK-19 结果一致性）+ `test/sidebarBindings.test.mjs`（5，AR-40 绑定完整性 + 3 条自检）
+  + `test/textDiff.test.mjs`（11，AR-41 行对齐 + 行内高亮 + 两侧不得错位）
 - **未发布**：本轮改动已提交源码与文档，**未打包、未推送 Release**
 
 ---

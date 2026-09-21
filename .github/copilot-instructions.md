@@ -1,7 +1,7 @@
 # 项目协作指令 · JSK管理（SillyTavern 角色卡管理器）
 
 > 本文件由 AI 助手**自动加载**。开工前请**先读 [`START-HERE.md`](../START-HERE.md) → [`AI交接指导.md`](../AI交接指导.md)**。
-> 当前版本 **v2.2.13**（Electron 43 + Vue 3 + Vite 8；`npm test` = 445 用例）。
+> 当前版本 **v2.2.13**（Electron 43 + Vue 3 + Vite 8；`npm test` = 471 用例）。
 
 ## 铁律（违反会出事）
 
@@ -19,7 +19,7 @@
 | 找什么 | 去哪 |
 |---|---|
 | 接手须知、架构、标准工作流、高频缺陷地图 | [`AI交接指导.md`](../AI交接指导.md) |
-| 历史缺陷与坑（**117 条**，按领域） | [`docs/bugs/README.md`](docs/bugs/README.md) |
+| 历史缺陷与坑（**119 条**，按领域） | [`docs/bugs/README.md`](docs/bugs/README.md) |
 | 代码片段 / 实测技术数据 / 外部 API 参考 / 脚本清单 | [`docs/技术支持/README.md`](docs/技术支持/README.md) |
 | 发版流程（产物校验、OTA 验证、回滚、检查单） | [`docs/发布/一条龙-发布流程.md`](docs/发布/一条龙-发布流程.md) |
 | 实现规格与后续计划 | [`docs/规格与计划/`](docs/规格与计划/README.md) |
@@ -44,3 +44,16 @@ node scripts/check-doc-links.mjs                 # 文档相对链接校验
 - 大库调试 / 端到端一律用**隔离 profile**：`--user-data-dir=%TEMP%\xxx`，绝不碰 `%APPDATA%\sillytavern-card-manager`。
 - 崩溃排查第一现场：`userData/crash.log`（渲染进程）与 `userData/Crashpad/*.dmp`（原生）。
 - 探针读应用单例状态**必须**走 `window.__jskDiag.*`；自己 `import()` 会拿到另一个模块实例，读数全错。
+
+## AI 工具链（本机通用）
+
+> 用户级指令（所有工作区自动加载）：`%APPDATA%\Code\User\prompts\instructions\ai-extension-workflow.instructions.md`
+> 通用原则：**装了就要用** —— 终端 CLI 优先（可闭环验证）→ VS Code 命令（UI 效果）→ 文件工作流。
+
+| 场景 | 工具 |
+| --- | --- |
+| `docs/**` / 根 md 的检查与修复 | `npx --yes markdownlint-cli2 "docs/**/*.md" "*.md" --fix` |
+| 全工作区 md 检查 | VS Code 命令 `markdownlint.lintWorkspace` |
+| 文档导出 PDF / HTML / EPUB | VS Code 命令 `md.exportPdf` / `md.exportHtml` / `md.exportEpub`（nettrash，须目标 md 为活动编辑器） |
+
+写 Markdown 请遵守 lint 规则（标题空行 / 代码块标语言 / 列表空行）。

@@ -42,6 +42,26 @@
             </button>
         </div>
 
+        <!-- 📊 T2 真进度条：**放在模式切换之外**，任何视图下扫描都能看到 ——
+             启动自动恢复世界书库时 appMode 可能还是 characters，挂在世界书视图内会让
+             「启动即扫描」这段完全看不到进度（点了没反应 = 判定坏了，对照 AR-38）。
+             平滑前推至 100% 后由 composable 的 finally 复位。 -->
+        <div v-if="isWbScanning" class="px-3 py-2 border-b border-zinc-800 bg-zinc-900 shrink-0 z-30">
+            <div class="flex items-center justify-between mb-1.5">
+                <span class="text-[11px] font-bold text-emerald-400">📊 正在扫描世界书目录…</span>
+                <span class="text-[11px] font-mono text-zinc-400">
+                    {{ wbScanProgress.done }} / {{ wbScanProgress.total || '?' }}
+                    <span v-if="wbScanProgress.total" class="text-emerald-400">（{{ wbScanPercent }}%）</span>
+                </span>
+            </div>
+            <div class="h-1.5 w-full bg-zinc-800 rounded-full overflow-hidden">
+                <div class="h-full bg-gradient-to-r from-emerald-600 to-emerald-400 transition-all duration-200 ease-out"
+                     :style="{ width: wbScanPercent + '%' }"></div>
+            </div>
+            <div v-if="wbScanProgress.current" class="mt-1 text-[10px] text-zinc-500 truncate"
+                 :title="wbScanProgress.current">📄 {{ wbScanProgress.current }}</div>
+        </div>
+
         <!-- ============ 角色卡模式 ============ -->
         <template v-if="appMode === 'characters'">
         <!-- ✅ [UI 方案1] 顶部搜索区：行1=搜索+多选+扫描+漏斗，行2=分类+排序 -->
@@ -1006,6 +1026,10 @@ export default {
             pluginPage, pluginTotalPages, pluginPageSlice, changePluginPage,
             wbFilterType: ctx.wbFilterType,
             filteredWorldbooks: ctx.filteredWorldbooks,
+            // 📊 T2 世界书扫描真进度条
+            wbScanProgress: ctx.wbScanProgress,
+            isWbScanning: ctx.isWbScanning,
+            wbScanPercent: ctx.wbScanPercent,
             openWbMergeModal: ctx.openWbMergeModal,
             openGlobalEntrySearch: ctx.openGlobalEntrySearch,
             importWbFromJsonl: ctx.importWbFromJsonl,
@@ -1019,6 +1043,13 @@ export default {
                 return String(n);
             },
             activeWorldbook: ctx.activeWorldbook,
+            // 🛡️ AR-40：`wbEntryCount` / `selectWorldbook` 被世界书列表模板调用
+            //    （`{{ wbEntryCount(wb) }} 词条`、`@click="selectWorldbook(wb)"`），
+            //    漏绑定 → 渲染期 `_ctx.X is not a function` → **整个侧边栏被卸载消失**。
+            //    它们只被世界书分支用到，故其他三个模式一直正常、极易漏测
+            //    （详见 docs/bugs/BUG-架构与渲染.md AR-40）。
+            wbEntryCount: ctx.wbEntryCount,
+            selectWorldbook: ctx.selectWorldbook,
             openWbContextMenu: ctx.openWbContextMenu,
             openWbInFolder: ctx.openWbInFolder,
             renameWorldbook: ctx.renameWorldbook,

@@ -20,6 +20,35 @@ export function useWorldbooks({
     const importUrl = ref('');          // 网址导入输入框绑定
     const isImportingWb = ref(false);   // 导入中 loading 状态
 
+    // 📊 T2 真进度条（2026-09-21）：世界书扫描是**单次 IPC 一次性返回**，渲染层在 await
+    //    期间拿不到任何进度（上百本书时用户只能干等、误以为卡死）。现在主进程按文件分批
+    //    推 `wb:scan-progress`，这里订阅并暴露给 UI。
+    //    ⚠️ 与角色卡 `diskScanProgress`（走 'scan-progress'）是**两条独立通道**，互不干扰。
+    const wbScanProgress = ref({ phase: 'idle', done: 0, total: 0, current: '' });
+    const isWbScanning = computed(() => wbScanProgress.value.phase === 'scanning' || wbScanProgress.value.phase === 'parsing');
+    /** 0~100（total 未知时返回 0，避免出现 NaN 或假进度） */
+    const wbScanPercent = computed(() => {
+        const { done, total } = wbScanProgress.value;
+        if (!total) return 0;
+        return Math.min(100, Math.round((done / total) * 100));
+    });
+    // 订阅只在首次调用时建立（removeAllListeners + on 的既有范式本身也防重复绑定）
+    let wbProgressBound = false;
+    const bindWbScanProgress = () => {
+        if (wbProgressBound) return;
+        if (!window.electronAPI || typeof window.electronAPI.onWbScanProgress !== 'function') return;
+        window.electronAPI.onWbScanProgress((p) => {
+            if (!p || typeof p !== 'object') return;
+            wbScanProgress.value = {
+                phase: p.phase || 'parsing',
+                done: Number(p.done) || 0,
+                total: Number(p.total) || 0,
+                current: p.current || ''
+            };
+        });
+        wbProgressBound = true;
+    };
+
     // 📢 DF-18：把「被跳过的文件」以可感知方式反馈给用户（计数 + 可展开文件名 + 原因）
     //    静默丢弃 = 用户以为软件坏了；这里至少落一条日志，超限/解析失败都点名。
     const reportSkipped = (kind, skipped) => {
@@ -84,10 +113,10 @@ export function useWorldbooks({
     const loadWorldbooks = async () => {
         const dirPath = await window.electronAPI.selectGenericFolder();
         if (!dirPath) return;
-        await scanWorldbookDir(dirPath);
-        // 【修复】打开世界书目录后自动切换到世界书模式，界面立即显示世界书列表
-        // （此前 appMode 不切换，用户打开世界书目录后界面仍停留在角色卡，误以为"没分开"）
+        // 📊 T2：**先切模式再扫描** —— 进度条挂在世界书视图里，若等扫描结束才切，
+        //    用户在整个扫描期间都看不到进度（点了没反应 = 判定坏了，对照 AR-38）。
         appMode.value = 'worldbooks';
+        await scanWorldbookDir(dirPath);
     };
 
     // 扫描指定世界书目录（供手动选择与启动自动恢复共用；自动持久化记忆路径）
@@ -97,27 +126,36 @@ export function useWorldbooks({
         try { localStorage.setItem('jsTavern_lastWbDir', dirPath); } catch (e) { /* 忽略 */ }
 
         addLog(`开始扫描世界书目录: ${dirPath}`);
-        const res = await window.electronAPI.scanWorldbooks(dirPath);
-        if (res.success) {
-            // 统一清洗：确保每本世界书的 entries 均为纯数组（兼容旧版/第三方工具的对象字典格式）
-            // 🛡️ DF-18：heavy（>50MB 未解析）的书 data 为 null，跳过清洗（按需懒加载）
-            res.data.forEach(wb => {
-                if (wb.data && wb.data.entries && typeof wb.data.entries === 'object' && !Array.isArray(wb.data.entries)) {
-                    wb.data.entries = Object.values(wb.data.entries);
+        // 📊 T2：先绑进度订阅并置「扫描中」—— 进度条要在大目录 await 期间就能显示，
+        //    否则用户面对的是「点了没反应」（对照 AR-38 的教训：可点但零反馈 = 判定坏了）
+        bindWbScanProgress();
+        wbScanProgress.value = { phase: 'scanning', done: 0, total: 0, current: '' };
+        try {
+            const res = await window.electronAPI.scanWorldbooks(dirPath);
+            if (res.success) {
+                // 统一清洗：确保每本世界书的 entries 均为纯数组（兼容旧版/第三方工具的对象字典格式）
+                // 🛡️ DF-18：heavy（>50MB 未解析）的书 data 为 null，跳过清洗（按需懒加载）
+                res.data.forEach(wb => {
+                    if (wb.data && wb.data.entries && typeof wb.data.entries === 'object' && !Array.isArray(wb.data.entries)) {
+                        wb.data.entries = Object.values(wb.data.entries);
+                    }
+                });
+                worldbooks.value = res.data;
+                // 【修复】重扫后按路径重绑当前编辑对象，找不到则清空，避免编辑已失效的旧对象
+                if (activeWorldbook.value) {
+                    const prevPath = activeWorldbook.value.path;
+                    activeWorldbook.value = res.data.find(w => w.path === prevPath) || null;
                 }
-            });
-            worldbooks.value = res.data;
-            // 【修复】重扫后按路径重绑当前编辑对象，找不到则清空，避免编辑已失效的旧对象
-            if (activeWorldbook.value) {
-                const prevPath = activeWorldbook.value.path;
-                activeWorldbook.value = res.data.find(w => w.path === prevPath) || null;
+                addLog(`扫描完成，共加载 ${res.data.length} 本世界书`, 'success');
+                // 📢 DF-18：被跳过的文件必须可见（不再静默丢弃 —— 静默会让人以为软件坏了，对照 AR-38）
+                reportSkipped('世界书', res.skipped);
+            } else {
+                addLog(`扫描失败: ${res.error}`, 'error');
+                nativeAlert(`世界书扫描失败: ${res.error}`, 'error');
             }
-            addLog(`扫描完成，共加载 ${res.data.length} 本世界书`, 'success');
-            // 📢 DF-18：被跳过的文件必须可见（不再静默丢弃 —— 静默会让人以为软件坏了，对照 AR-38）
-            reportSkipped('世界书', res.skipped);
-        } else {
-            addLog(`扫描失败: ${res.error}`, 'error');
-            nativeAlert(`世界书扫描失败: ${res.error}`, 'error');
+        } finally {
+            // 📊 T2：无论成功 / 失败 / 抛异常都要收起进度条 —— 否则会永远停在中间
+            wbScanProgress.value = { phase: 'idle', done: 0, total: 0, current: '' };
         }
     };
 
@@ -559,6 +597,8 @@ export function useWorldbooks({
         handleWorldbookFolderSelect, deleteWorldbook, duplicateWorldbook,
         openWbContextMenu, closeWbContextMenu, openWbInFolder,
         wbCategories, changeWbCategory, filteredWorldbooks,
+        // 📊 T2 真进度条：扫描中状态 / 进度对象 / 百分比
+        wbScanProgress, isWbScanning, wbScanPercent,
         // 📢 DF-18：跳过可见化 + 超大书懒加载
         reportSkipped, wbEntryCount, ensureWorldbookLoaded, selectWorldbook
     };

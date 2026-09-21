@@ -66,6 +66,18 @@
 | `_heap-audit.mjs` | 堆构成审计（按字段拆「文本 vs 对象开销」） |
 | `_probe-index.mjs` / `_probe-index2.mjs` | 索引诊断（包装 `__jskDiag.idx` 的 clear / buildAsync；第二个抓运行期 console 看重建是否被合并） |
 | `_probe-regex-ui.mjs` | 正则/状态栏增删 UI 端到端（含原生确认框应答） |
+| `_probe-wb-scan-progress.mjs` | **T2 真进度条**端到端：真实目录 + 真实 IPC，断言单次 `wb:scan` 期间收到多条 `wb:scan-progress`（旧实现 0 条）、`total` 准确、`done` 单调不减、终态 `done===total`、带 `current`、窗口不白屏。用法：`$env:CDP_PORT=9360; $env:SCAN_DIR="<目录>"; node scripts/_probe-wb-scan-progress.mjs` |
+| `_probe-wb-sidebar-crash.mjs` | **AR-40**端到端：点「🌍 世界书库」/ 反复切模式 → 断言侧栏 `<aside>` **未被卸载**、无 `_ctx.* is not a function` 渲染期错误。用法：`$env:CDP_PORT=9365; node scripts/_probe-wb-sidebar-crash.mjs`（需 dev 模式实例） |
+
+### 离线探针（不需起应用）
+
+| 脚本 | 用途 |
+|---|---|
+| `_probe-latin-prefix.mjs` / `_probe-latin-prefix-options.mjs` | **PK-19** 拉丁前缀检索：前者量「全表扫 vs 现状」的代价曲线；后者做**三方案对照**（有序数组前缀区间 / 首字母桶 / bigram 桶）的**正确性 + 速度 + 内存**，并把「结果必须与基线逐条一致」作为硬判据 —— 实测 `(a)(b)` 破坏子串语义、`(c)` 全对且快 20~70 倍 |
+| `_probe-scan-head-check.mjs` | **T4/T5** 构造实验：造多种「`entries` 位置 / 首条形态」的世界书，逐字复刻主进程的头部预检与 `isValidWorldbook` 判据，算误杀率；并二分出「`entries` 被挤出前 64KB 的体积门槛」 |
+| `_probe-real-head-check.mjs` | **T4 真实库**：扫指定目录每本书的 `entries` **字节偏移**（4MB 分块扫描，不整文件载入）vs 64KB 头窗，输出误杀清单与误杀率。用法：`node scripts/_probe-real-head-check.mjs "H:\01\全局世界书"` |
+| `_probe-real-validity.mjs` | **T5 真实库**：逐本跑 `isValidWorldbook`（含「扫前 20 条」的候选修法对照），列出被拒清单 + 首条形态 + 字典形态统计。用法：`node scripts/_probe-real-validity.mjs "H:\01\全局世界书"` |
+| `_probe-heavy-concurrency.mjs` | **T6** 分级扫描并发：逐字复刻 `handleOne`（**必须 `fs.promises` 真异步**），在多并发档量 耗时 / 堆峰值 / 判定一致性；生产常量**从 `main.js` 动态读取**（改参数无需同步注释）。用法：`node --expose-gc scripts/_probe-heavy-concurrency.mjs "H:\01\全局世界书" 1 2 3 6 12` |
 
 ### 端到端 / 热测试
 

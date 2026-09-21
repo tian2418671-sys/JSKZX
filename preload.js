@@ -95,6 +95,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     pushToCustomDir: (paths, targetDir) => ipcRenderer.invoke('library:pushToFolder', paths, targetDir),
     // 🌍 世界书专属通道：扫描目录下的 .json 世界书（返回含 entries 字段的合法世界书列表）
     scanWorldbooks: (dirPath) => ipcRenderer.invoke('wb:scan', dirPath),
+    // 🌍 世界书专属通道：接收扫描进度心跳（T2 真进度条）
+    //    ⚠️ 与角色卡 `onScanProgress`（'scan-progress'）是**两条独立通道**：
+    //       世界书扫描是单次 IPC 调用，必须在调用内推进度，不能复用角色卡的心跳。
+    onWbScanProgress: (callback) => {
+        ipcRenderer.removeAllListeners('wb:scan-progress'); // 防止重复绑定
+        ipcRenderer.on('wb:scan-progress', (event, data) => callback(data));
+    },
     // 🌍 世界书专属通道：物理覆写世界书文件（保存前自动 .bak_history 快照备份）
     saveWorldbook: (params) => ipcRenderer.invoke('wb:save', params),
     // 🌍 世界书专属通道：从网络拉取世界书 JSON（主进程转发，绕开渲染层 CORS）

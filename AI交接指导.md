@@ -23,7 +23,7 @@
 | 仓库 | `https://github.com/tian2418671-sys/JSKZX.git`（远端 `origin`） |
 | 分支 | 本地 `master`（与 origin 同步） |
 | 构建产物 | `sillytavern-card-manager-<版本>.exe`（NSIS 安装版）+ `latest.yml` + `.exe.blockmap` + zip 绿色版 |
-| 测试 | `npm test` = `node --test "test/**/*.test.mjs"` → 当前 **445 用例全绿**（38 个测试文件） |
+| 测试 | `npm test` = `node --test "test/**/*.test.mjs"` → 当前 **471 用例全绿**（41 个测试文件） |
 | 规模 | `js/components/` 41 个 SFC、`js/composables/` 37 个模块（含 `chat/` 引擎 16 个）、`js/utils/` 解析与索引工具 |
 | 用户习惯 | 说「**一条龙服务**」= 升版本号 → 更新文档三件套 → 打包 → 提交推送 → 发 GitHub Release（含 `latest.yml` 保 OTA） |
 | 典型库 | 日常小库 `E:\AI\酒馆工具\角色卡`（75 张）；压测大库 `I:\03\角色色卡`（11,186 张 / 9.76GB）；2 万卡副本由脚本现造 |
@@ -64,7 +64,13 @@ node scripts/release-check.mjs                   # 语法 + 单测 + 构建 + �
 - 已知遗留（非阻塞）：
   - `js/components/App.vue` 有十余处 `U+FFFD` 乱码**在注释里**（不影响功能，未修）；
   - 冷启动真机复测（重启电脑后跑 `node scripts/measure-startup.mjs --label 冷启动`）尚未做；
-  - 移动版（`JSK管理APP`）**未同步**本轮桌面版修复。
+  - 移动版（`JSK管理APP`）**未同步**桌面版修复 → 待办已**独立成文**：
+    [`docs/规格与计划/移动版同步-待办清单.md`](docs/规格与计划/移动版同步-待办清单.md)（M1~M7 逐项取证要点）。
+
+> **后续进展（2026-09-21）**：查重 / 扫描 / 检索全链路修复 **Phase 1+2+3 已全部落地**
+> （AR-39 / AR-40 / AR-41 / DF-17 / DF-18 / DF-19 / PK-18 / PK-19；471 用例全绿；**未打包、未推送 Release**）。
+> 详见 [`docs/规格与计划/查重扫描与检索-最终方案.md`](docs/规格与计划/查重扫描与检索-最终方案.md) 与
+> [`剩余任务.md`](docs/规格与计划/查重扫描与检索-剩余任务.md)（Phase 3 已完成）。
 
 ---
 

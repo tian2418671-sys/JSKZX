@@ -76,9 +76,21 @@
                                         <div v-if="p.a" class="space-y-1">
                                             <div v-if="payloadFor(p).keysA.length" class="flex flex-wrap gap-1">
                                                 <span v-for="k in payloadFor(p).keysA" :key="k"
-                                                      class="bg-zinc-800 text-zinc-300 border border-zinc-700 px-1.5 py-0.5 rounded text-[10px]">{{ k }}</span>
+                                                      class="border px-1.5 py-0.5 rounded text-[10px]"
+                                                      :class="keyClass(payloadFor(p), k, 'a')">{{ k }}</span>
                                             </div>
-                                            <div class="text-zinc-400 whitespace-pre-wrap break-words max-h-[220px] overflow-y-auto custom-scrollbar">{{ payloadFor(p).contentA || '（无正文）' }}</div>
+                                            <!-- 🎨 行对齐差异着色：变更行红/绿底 + 行内精确高亮 -->
+                                            <div v-if="p.side === 'both' && payloadFor(p).changed"
+                                                 class="text-zinc-400 max-h-[220px] overflow-y-auto custom-scrollbar rounded border border-zinc-800/60 bg-black/20">
+                                                <div v-for="(row, rIdx) in payloadFor(p).diffRows" :key="rIdx"
+                                                     class="flex gap-2 px-1 py-px leading-relaxed"
+                                                     :class="rowClass(row.kind)">
+                                                    <span class="shrink-0 w-7 text-right text-[9px] text-zinc-600 select-none">{{ row.a ? row.a.no : '' }}</span>
+                                                    <span class="min-w-0 whitespace-pre-wrap break-words"><template v-if="row.a"><template v-for="(sg, sIdx) in row.a.segs" :key="sIdx"><span :class="sg.hl ? hlClass(row.kind) : ''">{{ sg.text }}</span></template></template><span v-else class="text-zinc-700">·</span></span>
+                                                </div>
+                                            </div>
+                                            <!-- 未变更 / 单侧新增：无差异可着色，原样输出 -->
+                                            <div v-else class="text-zinc-400 whitespace-pre-wrap break-words max-h-[220px] overflow-y-auto custom-scrollbar">{{ payloadFor(p).contentA || '（无正文）' }}</div>
                                         </div>
                                         <div v-else class="text-zinc-600 italic">本端无此词条</div>
                                     </div>
@@ -87,9 +99,19 @@
                                         <div v-if="p.b" class="space-y-1">
                                             <div v-if="payloadFor(p).keysB.length" class="flex flex-wrap gap-1">
                                                 <span v-for="k in payloadFor(p).keysB" :key="k"
-                                                      class="bg-zinc-800 text-zinc-300 border border-zinc-700 px-1.5 py-0.5 rounded text-[10px]">{{ k }}</span>
+                                                      class="border px-1.5 py-0.5 rounded text-[10px]"
+                                                      :class="keyClass(payloadFor(p), k, 'b')">{{ k }}</span>
                                             </div>
-                                            <div class="text-zinc-400 whitespace-pre-wrap break-words max-h-[220px] overflow-y-auto custom-scrollbar">{{ payloadFor(p).contentB || '（无正文）' }}</div>
+                                            <div v-if="p.side === 'both' && payloadFor(p).changed"
+                                                 class="text-zinc-400 max-h-[220px] overflow-y-auto custom-scrollbar rounded border border-zinc-800/60 bg-black/20">
+                                                <div v-for="(row, rIdx) in payloadFor(p).diffRows" :key="rIdx"
+                                                     class="flex gap-2 px-1 py-px leading-relaxed"
+                                                     :class="rowClass(row.kind)">
+                                                    <span class="shrink-0 w-7 text-right text-[9px] text-zinc-600 select-none">{{ row.b ? row.b.no : '' }}</span>
+                                                    <span class="min-w-0 whitespace-pre-wrap break-words"><template v-if="row.b"><template v-for="(sg, sIdx) in row.b.segs" :key="sIdx"><span :class="sg.hl ? hlClass(row.kind) : ''">{{ sg.text }}</span></template></template><span v-else class="text-zinc-700">·</span></span>
+                                                </div>
+                                            </div>
+                                            <div v-else class="text-zinc-400 whitespace-pre-wrap break-words max-h-[220px] overflow-y-auto custom-scrollbar">{{ payloadFor(p).contentB || '（无正文）' }}</div>
                                         </div>
                                         <div v-else class="text-zinc-600 italic">本端无此词条</div>
                                     </div>
@@ -126,16 +148,37 @@
                         </div>
                         <!-- 🛡️ 行级比对必须有 diffText 才渲染：diffText 是「有差异才有值」的可空字段，
                              直读 f.diffText.masterLines 会 null.masterLines → 渲染期 TypeError（AR-39） -->
+                        <!-- 🎨 改为「行对齐」渲染：两侧共用同一份 rows（行号一一对应）→ 天然对齐，
+                             变更行加底色 + 行内精确高亮（此前两侧各自滚动、行与行对不齐） -->
                         <div v-else-if="f.diffText" class="grid grid-cols-2 gap-3 text-xs font-mono">
+                            <div class="bg-zinc-950/80 border border-zinc-800 rounded p-2.5 max-h-[300px] overflow-y-auto custom-scrollbar leading-relaxed">
+                                <div v-for="(row, rIdx) in f.diffText.rows" :key="rIdx"
+                                     class="flex gap-2 px-1 py-px rounded-sm"
+                                     :class="rowClass(row.kind)">
+                                    <span class="shrink-0 w-8 text-right text-[9px] text-zinc-600 select-none">{{ row.a ? row.a.no : '' }}</span>
+                                    <span class="min-w-0 whitespace-pre-wrap break-words"><template v-if="row.a"><template v-for="(sg, sIdx) in row.a.segs" :key="sIdx"><span :class="sg.hl ? hlClass(row.kind) : ''">{{ sg.text }}</span></template></template><span v-else class="text-zinc-700">·</span></span>
+                                </div>
+                            </div>
+                            <div class="bg-zinc-950/80 border border-zinc-800 rounded p-2.5 max-h-[300px] overflow-y-auto custom-scrollbar leading-relaxed">
+                                <div v-for="(row, rIdx) in f.diffText.rows" :key="rIdx"
+                                     class="flex gap-2 px-1 py-px rounded-sm"
+                                     :class="rowClass(row.kind)">
+                                    <span class="shrink-0 w-8 text-right text-[9px] text-zinc-600 select-none">{{ row.b ? row.b.no : '' }}</span>
+                                    <span class="min-w-0 whitespace-pre-wrap break-words"><template v-if="row.b"><template v-for="(sg, sIdx) in row.b.segs" :key="sIdx"><span :class="sg.hl ? hlClass(row.kind) : ''">{{ sg.text }}</span></template></template><span v-else class="text-zinc-700">·</span></span>
+                                </div>
+                            </div>
+                        </div>
+                        <!-- 🎨 兼容旧结构（masterLines/compareLines）：万一有未改造的调用方，仍能正常渲染 -->
+                        <div v-else-if="f.diffLines" class="grid grid-cols-2 gap-3 text-xs font-mono">
                             <div class="bg-zinc-950/80 border border-zinc-800 rounded p-2.5 max-h-[300px] overflow-y-auto custom-scrollbar whitespace-pre-wrap leading-relaxed">
-                                <template v-for="(line, lIdx) in f.diffText.masterLines" :key="lIdx">
+                                <template v-for="(line, lIdx) in f.diffLines.masterLines" :key="lIdx">
                                     <div :class="line.type === 'removed' ? 'bg-rose-950/60 text-rose-300 border-l-2 border-rose-500 px-1 my-0.5' : 'text-zinc-500 opacity-50'">
                                         {{ line.text || ' ' }}
                                     </div>
                                 </template>
                             </div>
                             <div class="bg-zinc-950/80 border border-zinc-800 rounded p-2.5 max-h-[300px] overflow-y-auto custom-scrollbar whitespace-pre-wrap leading-relaxed">
-                                <template v-for="(line, lIdx) in f.diffText.compareLines" :key="lIdx">
+                                <template v-for="(line, lIdx) in f.diffLines.compareLines" :key="lIdx">
                                     <div :class="line.type === 'added' ? 'bg-emerald-950/60 text-emerald-300 border-l-2 border-emerald-500 px-1 my-0.5' : 'text-zinc-500 opacity-50'">
                                         {{ line.text || ' ' }}
                                     </div>
@@ -156,6 +199,7 @@
 
 <script>
 import { prepareDiffPayload } from '../utils/entryAlign.js';
+import { diffContentForDisplay } from '../utils/textDiff.js';
 
 export default {
     name: 'DiffModal',
@@ -170,6 +214,31 @@ export default {
         return { _payloadCache: new WeakMap() };
     },
     methods: {
+        // 🎨 行底色：区分「新增 / 缺失 / 变更」三类，扫一眼就能定位
+        //    ⚠️ 用左版视角：added = 右版独有（绿）→ 对左版而言是「本端缺失」
+        rowClass(kind) {
+            if (kind === 'removed') return 'bg-rose-950/40';
+            if (kind === 'added') return 'bg-emerald-950/40';
+            if (kind === 'changed') return 'bg-amber-950/25';
+            return '';
+        },
+        // 🎨 行内高亮：变更行里的具体字符/词加底色（比整行变色精确得多）
+        hlClass(kind) {
+            if (kind === 'removed') return 'bg-rose-500/40 text-rose-100 rounded-sm px-px';
+            if (kind === 'added') return 'bg-emerald-500/40 text-emerald-100 rounded-sm px-px';
+            return 'bg-amber-500/35 text-amber-100 rounded-sm px-px';
+        },
+        // 🎨 触发词底色：本侧独有的词标红（缺）/ 绿（多），两侧都有的保持中性
+        //    用户报的场景是「条目内容」看不出差异，但触发词改了同样该一眼看到。
+        keyClass(payload, key, side) {
+            if (!payload.changed) return 'bg-zinc-800 text-zinc-300 border-zinc-700';
+            const inA = payload.keysA.includes(key);
+            const inB = payload.keysB.includes(key);
+            if (inA && inB) return 'bg-zinc-800 text-zinc-300 border-zinc-700';
+            // side='a' 且只在 A 出现 → 右版缺失（红）；side='b' 且只在 B 出现 → 新增（绿）
+            if (side === 'a') return 'bg-rose-900/50 text-rose-200 border-rose-500/40';
+            return 'bg-emerald-900/50 text-emerald-200 border-emerald-500/40';
+        },
         // 依据数据形态返回类型图标：世界书 🌍 / 预设 ⚙️ / 角色卡 🎎
         iconFor(item) {
             if (!item || !item.data) return '🎎';
@@ -185,11 +254,16 @@ export default {
             return p.split(/[\\/]/).pop() || '';
         },
         // 🧩 词条对载荷（缓存：同一 pair 在模板里被读多次，避免重复构造）
+        //    🎨 顺带在缓存里预计算「行对齐差异」（两侧共用同一份 rows → 天然对齐）
         payloadFor(pair) {
             if (!pair || typeof pair !== 'object') return prepareDiffPayload(null, null);
             const cached = this._payloadCache.get(pair);
             if (cached) return cached;
             const payload = prepareDiffPayload(pair.a, pair.b);
+            // 只在「两侧都有内容且确实有改动」时才做行级 diff（避免无谓开销）
+            payload.diffRows = payload.changed
+                ? diffContentForDisplay(payload.contentA, payload.contentB).rows
+                : [];
             this._payloadCache.set(pair, payload);
             return payload;
         }

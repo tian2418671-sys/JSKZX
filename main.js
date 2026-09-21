@@ -999,7 +999,11 @@ const MAX_WB_FETCH_BYTES     = 50 * 1024 * 1024; // 世界书 URL 拉取上限
 //   > SCAN_PARSE_MAX_BYTES           → 不 parse，只回元数据（size/mtime），正文按需 readText
 const SCAN_INLINE_MAX_BYTES = 5 * 1024 * 1024;   // 5MB：内联 data 的上限（与旧行为一致）
 const SCAN_PARSE_MAX_BYTES  = 50 * 1024 * 1024;  // 50MB：仍解析的上限（超过只回元数据）
-const SCAN_HEAVY_CONCURRENCY = 3;                // 5~50MB 档的并发度（远低于常规 32）
+// 📊 T6 实测定参（2026-09-21，真实库 6 本大书 / 49.2MB）：
+//   并发 2→12 耗时仅改善 3%（191ms → 184ms），但堆峰值增量从 **59MB 涨到 118~146MB**。
+//   ⇒ 瓶颈在磁盘 I/O 与 JSON.parse，**不在并发度**；提高并发只是白吃内存。
+//   故由原保守估值 3 下调为 2（内存减半、速度无损）。详见 docs/bugs/BUG-数据与文件.md DF-18 补充。
+const SCAN_HEAVY_CONCURRENCY = 2;                // 5~50MB 档的并发度（远低于常规 32；实测 2 为最优）
 const SCAN_CACHE_VERSION = 2;                    // 🔁 缓存结构版本：升版即整体失效，让旧误杀判定自愈
 const MAX_PLUGIN_SCRIPT_BYTES   = 2 * 1024 * 1024;  // 🧩 单个插件脚本读取上限（超大文件跳过）
 const SCAN_FILE_BATCH        = 64;               // 扫描文件批并发
@@ -2575,10 +2579,53 @@ app.whenReady().then(() => {
       const results = [];
       const skipped = [];   // 📢 DF-18：被跳过的文件必须可见（数量 + 路径 + 原因），不再静默丢弃
 
+      // 📊 T2 真进度条（2026-09-21）：`wb:scan` 旧形态是**单次 IPC 一次性返回** ——
+      //    渲染层在 await 期间拿不到任何进度，上百本书时用户只能干等（窗口看似卡死）。
+      //    现在按文件分批 `event.sender.send('wb:scan-progress', {...})` 推送。
+      //    ⚠️ 与角色卡 `scan-progress` 的区别：那条链路本身是分多次 IPC 调用才推得动心跳，
+      //       世界书这边必须**在同一次调用内**推 —— 故用独立通道名，互不干扰。
+      //    total 由「只 readdir、不 parse」的轻量预扫得出（readdir 成本远低于 readFile+parse）。
+      const progressState = { done: 0, total: 0, lastSent: 0, lastAt: 0 };
+      const sendWbProgress = (phase, current) => {
+        try {
+          event.sender.send('wb:scan-progress', {
+            phase, done: progressState.done, total: progressState.total,
+            current: current ? path.basename(current) : ''
+          });
+        } catch (e) { /* 渲染层已销毁等 → 忽略，绝不影响扫描 */ }
+      };
+
       // 深度递归扫描（不限层级；跳过隐藏文件/目录）
       // 🛡️ v1.8.5：realpath + visited 集合防符号链接/junction 环路（指回祖先目录的
       //    链接会让递归无限循环、results 无限膨胀直至内存耗尽）
       const visitedDirs = new Set();
+
+      // 🔢 T2 预扫计数：只 readdir（不 stat、不 readFile、不 parse），产出准确 total。
+      //    规则必须与下方 walk **严格一致**（深度上限 5 / 隐藏文件跳过 / skipFolders 剪枝 /
+      //    只认 .json），否则进度条会「走不满 100%」或「超 100%」。
+      //    ⚠️ 用独立的 visited 集合 —— 与 walk 共用会让 walk 认为「目录都已访问」而漏扫全部文件。
+      const countVisited = new Set();
+      const countJson = async (dir, depth = 0) => {
+        let realDir;
+        try { realDir = fs.realpathSync(dir); } catch (e) { return; }
+        if (countVisited.has(realDir)) return;
+        countVisited.add(realDir);
+        let entries;
+        try { entries = await fs.promises.readdir(dir, { withFileTypes: true }); } catch (e) { return; }
+        for (const entry of entries) {
+          if (entry.name.startsWith('.')) continue;
+          if (entry.isFile() && path.extname(entry.name).toLowerCase() === '.json') progressState.total++;
+        }
+        // 与 walk 同款深度剪枝：depth>=5 只处理本层文件、不再下钻
+        if (depth >= 5) return;
+        for (const entry of entries) {
+          if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
+          if (skipFolders.includes(entry.name.toLowerCase())) continue;
+          await countJson(path.join(dir, entry.name), depth + 1);
+        }
+      };
+      await countJson(dirPath);
+      sendWbProgress('scanning');   // 先推一次「发现完成」，让进度条立刻出现（total 已就绪）
       // 🚀 v1.8.6 性能优化：目录递归串行（防环路），目录内 JSON 32 路并发解析——
       //    旧版逐个 readFile+JSON.parse，大目录（数百 JSON）串行耗时数秒；并发后毫秒级。
       const SCAN_JSON_BATCH = 32;
@@ -2623,6 +2670,7 @@ app.whenReady().then(() => {
 
         // 单文件处理（常规 / 大文件共用；>50MB 时只回元数据，正文按需 readText）
         const handleOne = async (fullPath) => {
+          // 📊 T2：无论成功 / 跳过 / 报错都要推进进度，故用 try/finally 兜底
           try {
             const st = statOf.get(fullPath);
             const mt = Math.round(st.mtimeMs);
@@ -2681,6 +2729,17 @@ app.whenReady().then(() => {
             // 损坏或非标准 JSON：记入 skipped（不再完全静默）
             console.warn('[wb:scan] 跳过非世界书文件:', path.basename(fullPath), parseErr.message);
             skipped.push({ path: fullPath, size: (statOf.get(fullPath) || {}).size || 0, reason: '解析失败：' + parseErr.message });
+          } finally {
+            // 📊 T2：进度推进（含所有 early return 与异常路径）
+            //    节流：每 ≥20 个文件或 ≥120ms 推一次 —— 数百文件也只有十几次 IPC，
+            //    既保证进度条平滑前推，又不因高频 send 拖慢扫描本身。
+            progressState.done++;
+            const now = Date.now();
+            if (progressState.done - progressState.lastSent >= 20 || now - progressState.lastAt >= 120) {
+              progressState.lastSent = progressState.done;
+              progressState.lastAt = now;
+              sendWbProgress('parsing', fullPath);
+            }
           }
         };
 
@@ -2699,9 +2758,14 @@ app.whenReady().then(() => {
 
       await walk(dirPath);
       saveScanCache();
+      // � T2：终态进度（done=total）—— 渲染层据此把进度条推到 100% 再收起
+      progressState.done = progressState.total;
+      sendWbProgress('done');
       // 📢 DF-18：skipped 一并回传（渲染层显示「N 个文件被跳过」+ 可展开文件名）
       return { success: true, data: results, skipped };
     } catch (err) {
+      // 📊 T2：失败也要收尾，否则进度条会永远停在中间（渲染层收不到 done 无法复位）
+      try { sendWbProgress('done'); } catch (e) { /* 忽略 */ }
       return { success: false, error: err.message };
     }
   });
