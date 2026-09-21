@@ -5150,7 +5150,8 @@ export default {
             loadWorldbooks, scanWorldbookDir, importWorldbookFromUrl, renameWorldbook,
             handleWorldbookFolderSelect, deleteWorldbook, duplicateWorldbook,
             openWbContextMenu, closeWbContextMenu, openWbInFolder,
-            wbCategories, changeWbCategory, filteredWorldbooks
+            wbCategories, changeWbCategory, filteredWorldbooks,
+            reportSkipped, wbEntryCount, ensureWorldbookLoaded, selectWorldbook
         } = useWorldbooks({ worldbooks, activeWorldbook, lastWorldbookDirPath, wbSearchQuery, wbFilterType, currentWbCategory, wbCategoryMap, saveWbCategoriesMap, syncWorldbooksToDisk, appMode, appPrompt, nativeAlert, confirmDialog, addLog, contextMenu, closeContextMenu });
 
         // 📚 世界书词条深度编辑 (Entry IDE)：组合式函数注入（activeWorldbook 等共享状态保留在 App.vue）
@@ -5760,6 +5761,8 @@ export default {
             // 🌍 世界书双引擎模式
             appMode, worldbooks, activeWorldbook, lastWorldbookDirPath, editorLogs, showEditorLogs, addLog,
             loadWorldbooks, scanWorldbookDir, saveActiveWorldbook, exportActiveWorldbook, exportFilteredWorldbook, saveCurrentAsset,
+            // 📢 DF-18：跳过可见化 + 超大世界书懒加载（侧栏用）
+            wbEntryCount, selectWorldbook, ensureWorldbookLoaded,
             // ⚙️ 预设管理
             presets, activePreset, lastPresetDirPath,
             presetSearchQuery, isImportingPreset, importPresetUrl,

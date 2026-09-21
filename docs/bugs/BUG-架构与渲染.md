@@ -372,6 +372,29 @@
   前置条件不满足时必须**就地给出「为什么 + 怎么做」**，拦截逻辑应成对配提示，不得静默失败。
 - **来源**：2026-09-21 用户报告（自动分组「重新扫描」；自查确认为引导缺失引发的乌龙）
 
+### AR-39 ｜ 🔴 世界书「查看词条差异」必崩：`diffText` 为 `null` 时模板直读其属性（渲染期 TypeError）
+- **现象**（2026-09-21 排查）：查重结果里点「查看词条差异」，**词条数不同**的世界书**一开就渲染报错**（弹窗打不开 / 白屏）；
+  词条数相同的世界书**能正常打开**。用户感知为「有的书能看、有的书一看就崩」。
+- **根因**（两处叠加，纯渲染期错误、编译期查不出）：
+  ① `js/composables/useDedupe.js` 的「📚 世界书词条总数 (Entries Count)」字段构造为
+  `isSame: entries1.length === entries2.length`，**且 `diffText: null`**；
+  ② `js/components/DiffModal.vue` 的 `v-else` 分支（`isSame === false` 时进入）**直接读** `f.diffText.masterLines` / `f.diffText.compareLines`
+  → `null.masterLines` → **TypeError**。
+  词条数相同 → `isSame: true` → 走「已自动折叠」文案分支 → 不碰 `diffText` → 因此**不崩**（这解释了"有的能开有的崩"）。
+  次要崩点：同一模板里 `masterItem.path.split(/[\\/]/).pop()` / `compareItem.path...` **未判空**，`path` 缺失时同样抛错。
+- **修复**（`js/components/DiffModal.vue`）：
+  ① 行级比对分支包 `v-if="f.diffText"`，并在 `isSame === false` 且无 `diffText` 时渲染**占位文案**
+  （「词条数不同，详见『🧩 词条级对齐』」）——**只加 `v-if` 不加占位会让该行留白，观感像坏了**；
+  ② `masterItem?.path` / `compareItem?.path` 判空后再 `split`。
+- **验证**（2026-09-21 已修复并通过）：`npm test` **423 全绿**（新增 `test/dedupeEntryAlign.test.mjs` 20 条）+ `npm run build:web` 无错 +
+  **真实 UI 级冒烟**（dev 模式 + CDP，`scripts/_probe-diff-align.mjs`，**15/15 通过**）：
+  注入「A 3 条 / B 5 条（2 新增 1 删除）」两本测试书 → 真实调用 `openDiffDetailModal` 未抛错、弹窗可见（1264×761）、
+  DOM 含「🧩 词条级对齐」/ 绿色 `[新增]` / 红色 `[缺失]` / 「本端无此词条」、词条总数行有占位文案、**无渲染期 TypeError**。
+  另用旧代码条件（`f.diffText.masterLines`）对照，确认 `oldCrashed === true` —— **证明该用例确实能抓到本缺陷**。
+- **防再犯**：**模板里读 `x.y.z` 前必须确认 `x.y` 存在**——`diffText` 是"可空字段"（同文件里 `isSame ? null : computeTextDiffLines(...)` 是通用写法），
+  凡是这种"差异时才有值"的字段，模板一律 `v-if` 守卫。`vite build` 只验编译，**这类渲染期 TypeError 只有冒烟能抓到**。
+- **来源**：2026-09-21 查重链路专项排查（[`../规格与计划/查重扫描与检索-最终方案.md`](../规格与计划/查重扫描与检索-最终方案.md) §2.2）
+
 > 📌 测卡区的两条新缺陷（状态栏空白、翻页控件不可见）归 **CT 领域**：[CT-13 / CT-14](BUG-测卡工作区.md)。
 
 ---

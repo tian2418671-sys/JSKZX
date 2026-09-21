@@ -988,6 +988,19 @@ const MIN_CARD_FILE_SIZE = 40960;
 // 🔢 魔法数字常量化（代码审查修复 9）：集中定义散落的大小上限 / 批次 / 进度 / 缺省值
 const MAX_URL_DOWNLOAD_BYTES = 20 * 1024 * 1024; // 角色卡 URL 下载上限
 const MAX_WB_FETCH_BYTES     = 50 * 1024 * 1024; // 世界书 URL 拉取上限
+
+// ================= 世界书 / 预设 扫描闸门分级（DF-18，2026-09-21） =================
+// 旧写法是写死的 `if (st.size > 5 * 1024 * 1024) return;` —— **静默丢弃**：
+//   无日志、无 UI、不进任何统计，用户只看到「这本大书不见了」→ 判定软件坏了。
+// 现在分三级（**不能一刀切抬到 50MB**：扫描是 32 路并发 Promise.all，
+//   每任务 readFile + JSON.parse，50MB × 32 会把 OOM 从渲染进程搬到主进程）：
+//   ≤ SCAN_INLINE_MAX_BYTES          → 维持原状（内联 data，绝大多数文件在这一档）
+//   ≤ SCAN_PARSE_MAX_BYTES           → 仍 parse，但走**低并发批次**（不占用 32 并发）
+//   > SCAN_PARSE_MAX_BYTES           → 不 parse，只回元数据（size/mtime），正文按需 readText
+const SCAN_INLINE_MAX_BYTES = 5 * 1024 * 1024;   // 5MB：内联 data 的上限（与旧行为一致）
+const SCAN_PARSE_MAX_BYTES  = 50 * 1024 * 1024;  // 50MB：仍解析的上限（超过只回元数据）
+const SCAN_HEAVY_CONCURRENCY = 3;                // 5~50MB 档的并发度（远低于常规 32）
+const SCAN_CACHE_VERSION = 2;                    // 🔁 缓存结构版本：升版即整体失效，让旧误杀判定自愈
 const MAX_PLUGIN_SCRIPT_BYTES   = 2 * 1024 * 1024;  // 🧩 单个插件脚本读取上限（超大文件跳过）
 const SCAN_FILE_BATCH        = 64;               // 扫描文件批并发
 const SCAN_PROGRESS_STEP     = 100;              // 每 N 个文件上报一次进度
@@ -2471,14 +2484,28 @@ app.whenReady().then(() => {
   // 🚀 v1.8.6 扫描结果增量缓存：目录文件 mtime 未变则跳过 readFile+JSON.parse，
   //    大目录（如 H:\01 含数百 JSON）二次启动从数秒降至毫秒级。
   //    只缓存 { mtime, valid } 标记（不存 data，避免体积膨胀）；有效文件仍需读取 data。
+  // 🔁 DF-18 缓存自愈（2026-09-21）：缓存里的 `valid:false` 是**否定判定**，一旦被误判就会**永久固化**
+  //    （用户机器上表现为「这本大书永远扫不到」，即使修好了预检逻辑也不会自愈）。
+  //    对策：① 结构版本号 —— 升版即整体失效重扫；② `valid:null` 表示"未判定/待重试"，不参与跳过。
   const scanCachePath = path.join(app.getPath('userData'), 'scan_cache.json');
   let scanCache = null;
   const loadScanCache = () => {
     if (scanCache) return scanCache;
     try {
-      if (fs.existsSync(scanCachePath)) scanCache = JSON.parse(fs.readFileSync(scanCachePath, 'utf-8'));
+      if (fs.existsSync(scanCachePath)) {
+        const raw = JSON.parse(fs.readFileSync(scanCachePath, 'utf-8'));
+        // 🔁 版本不符 → 整体丢弃（让旧的误杀判定自愈）
+        if (raw && typeof raw === 'object' && raw.__v === SCAN_CACHE_VERSION) {
+          scanCache = raw;
+        } else {
+          console.warn('[scanCache] 缓存版本不符（旧=' + (raw && raw.__v) + ' 新=' + SCAN_CACHE_VERSION + '），已丢弃重建');
+        }
+      }
     } catch (e) { /* 缓存损坏忽略 */ }
     if (!scanCache || typeof scanCache !== 'object') scanCache = {};
+    scanCache.__v = SCAN_CACHE_VERSION;
+    if (!scanCache.worldbook || typeof scanCache.worldbook !== 'object') scanCache.worldbook = {};
+    if (!scanCache.preset || typeof scanCache.preset !== 'object') scanCache.preset = {};
     return scanCache;
   };
   const saveScanCache = () => {
@@ -2546,6 +2573,7 @@ app.whenReady().then(() => {
         addAllowedRoot(dirPath);
       }
       const results = [];
+      const skipped = [];   // 📢 DF-18：被跳过的文件必须可见（数量 + 路径 + 原因），不再静默丢弃
 
       // 深度递归扫描（不限层级；跳过隐藏文件/目录）
       // 🛡️ v1.8.5：realpath + visited 集合防符号链接/junction 环路（指回祖先目录的
@@ -2577,46 +2605,102 @@ app.whenReady().then(() => {
         if (depth >= 5) return;
         // 本目录 JSON 并发解析（严格防伪校验：确保只拦截真正的世界书 JSON）
         const cache = (loadScanCache().worldbook = loadScanCache().worldbook || {});
-        for (let i = 0; i < jsonFiles.length; i += SCAN_JSON_BATCH) {
-          const batch = jsonFiles.slice(i, i + SCAN_JSON_BATCH);
-          await Promise.all(batch.map(async (fullPath) => {
-            try {
-              const st = await fs.promises.stat(fullPath);
-              if (st.size > 5 * 1024 * 1024) return;
-              const mt = Math.round(st.mtimeMs);
-              const cached = cache[fullPath];
-              // 🚀 增量缓存：已知无效且 mtime 未变 → 跳过 readFile+JSON.parse
-              if (cached && cached.mtime === mt && cached.valid === false) return;
-              // 🚀 大文件预检：世界书必有 entries 字段；超过 512KB 的先读头 64KB 查关键字，
-              //    不含则跳过（避免 readFile+JSON.parse 大文件——目录里常有 table_data/模板等大 JSON）
-              if (st.size > 512 * 1024) {
-                let fh;
-                try {
-                  fh = await fs.promises.open(fullPath, 'r');
-                  const head = Buffer.alloc(64 * 1024);
-                  await fh.read(head, 0, head.length, 0);
-                  if (!head.toString('utf-8').includes('"entries"')) { cache[fullPath] = { mtime: mt, valid: false }; return; }
-                } finally { if (fh) await fh.close().catch(() => {}); }
-              }
-              const content = await fs.promises.readFile(fullPath, 'utf-8');
-              const wbData = JSON.parse(content);
-              const valid = isValidWorldbook(wbData);
-              cache[fullPath] = { mtime: mt, valid };
-              if (valid) {
-                results.push({ path: fullPath, name: path.basename(fullPath), data: wbData });
-              }
-            } catch (parseErr) {
-              // 静默跳过损坏或非标准 JSON 文件
-              console.warn('[wb:scan] 跳过非世界书文件:', path.basename(fullPath), parseErr.message);
-            }
-          }));
+
+        // 📊 DF-18 分级：先 stat 一遍，把「大文件」与「常规」分开 ——
+        //    常规维持 32 并发；大文件单独低并发批次，避免 50MB × 32 打爆主进程。
+        const statOf = new Map();
+        await Promise.all(jsonFiles.map(async (fullPath) => {
+          try { statOf.set(fullPath, await fs.promises.stat(fullPath)); } catch (e) { /* 按不可读处理 */ }
+        }));
+        const normalFiles = [];
+        const heavyFiles = [];
+        for (const fullPath of jsonFiles) {
+          const st = statOf.get(fullPath);
+          if (!st) { skipped.push({ path: fullPath, size: 0, reason: '文件无法读取（stat 失败）' }); continue; }
+          if (st.size > SCAN_INLINE_MAX_BYTES) heavyFiles.push(fullPath);
+          else normalFiles.push(fullPath);
         }
+
+        // 单文件处理（常规 / 大文件共用；>50MB 时只回元数据，正文按需 readText）
+        const handleOne = async (fullPath) => {
+          try {
+            const st = statOf.get(fullPath);
+            const mt = Math.round(st.mtimeMs);
+            const cached = cache[fullPath];
+            // 🚀 增量缓存：已知无效且 mtime 未变 → 跳过 readFile+JSON.parse
+            //    ⚠️ DF-18：只认 `valid === false`（明确否定）；`valid === null` 表示"未判定/待重试"，**不跳过**
+            if (cached && cached.mtime === mt && cached.valid === false) {
+              skipped.push({ path: fullPath, size: st.size, reason: '此前已判定为非世界书（缓存，mtime 未变）' });
+              return;
+            }
+            // 超大文件（>50MB）：不 parse，只回元数据（正文按需 readText 懒加载）
+            if (st.size > SCAN_PARSE_MAX_BYTES) {
+              results.push({
+                path: fullPath, name: path.basename(fullPath),
+                size: st.size, mtime: st.mtimeMs, entryCount: null,
+                heavy: true, dataLoaded: false, data: null
+              });
+              cache[fullPath] = { mtime: mt, valid: null };  // 未判定 → 下次仍重试
+              return;
+            }
+            // 🚀 大文件预检：世界书必有 entries 字段；超过 512KB 的先读头 64KB 查关键字，
+            //    不含则跳过（避免 readFile+JSON.parse 大文件——目录里常有 table_data/模板等大 JSON）
+            //    ⚠️ DF-18：预检未命中**不再写 valid:false**，改写 valid:null（未判定）——
+            //       否则 `entries` 在后段的大书会被误杀且**永久固化**，即使修好逻辑也不自愈。
+            if (st.size > 512 * 1024) {
+              let fh;
+              try {
+                fh = await fs.promises.open(fullPath, 'r');
+                const head = Buffer.alloc(64 * 1024);
+                const readRes = await fh.read(head, 0, head.length, 0);
+                const bytes = (readRes && typeof readRes.bytesRead === 'number') ? readRes.bytesRead : head.length;
+                if (!head.subarray(0, bytes).toString('utf-8').includes('"entries"')) {
+                  cache[fullPath] = { mtime: mt, valid: null };   // 未判定（不固化否定）
+                  skipped.push({ path: fullPath, size: st.size, reason: '大文件头部 64KB 未发现 "entries" 关键字（下次仍会重试）' });
+                  return;
+                }
+              } finally { if (fh) await fh.close().catch(() => {}); }
+            }
+            const content = await fs.promises.readFile(fullPath, 'utf-8');
+            const wbData = JSON.parse(content);
+            const valid = isValidWorldbook(wbData);
+            cache[fullPath] = { mtime: mt, valid };
+            if (valid) {
+              const entriesArr = Array.isArray(wbData.entries) ? wbData.entries : [];
+              results.push({
+                path: fullPath, name: path.basename(fullPath),
+                size: st.size, mtime: st.mtimeMs, entryCount: entriesArr.length,
+                // heavy = 大文件（>5MB，走低并发档）；用于界面提示与懒加载判断
+                heavy: st.size > SCAN_INLINE_MAX_BYTES,
+                dataLoaded: true, data: wbData
+              });
+            } else {
+              skipped.push({ path: fullPath, size: st.size, reason: '结构校验未通过（不是标准世界书）' });
+            }
+          } catch (parseErr) {
+            // 损坏或非标准 JSON：记入 skipped（不再完全静默）
+            console.warn('[wb:scan] 跳过非世界书文件:', path.basename(fullPath), parseErr.message);
+            skipped.push({ path: fullPath, size: (statOf.get(fullPath) || {}).size || 0, reason: '解析失败：' + parseErr.message });
+          }
+        };
+
+        // 常规档 32 并发；大文件档低并发（SCAN_HEAVY_CONCURRENCY）
+        for (let i = 0; i < normalFiles.length; i += SCAN_JSON_BATCH) {
+          const batch = normalFiles.slice(i, i + SCAN_JSON_BATCH);
+          await Promise.all(batch.map(f => handleOne(f)));
+        }
+        for (let i = 0; i < heavyFiles.length; i += SCAN_HEAVY_CONCURRENCY) {
+          const batch = heavyFiles.slice(i, i + SCAN_HEAVY_CONCURRENCY);
+          await Promise.all(batch.map(f => handleOne(f)));
+        }
+
         for (const d of dirs) await walk(d, depth + 1); // 递归子目录
       };
 
       await walk(dirPath);
       saveScanCache();
-      return { success: true, data: results };
+      // 📢 DF-18：skipped 一并回传（渲染层显示「N 个文件被跳过」+ 可展开文件名）
+      return { success: true, data: results, skipped };
     } catch (err) {
       return { success: false, error: err.message };
     }
@@ -2930,6 +3014,7 @@ app.whenReady().then(() => {
       }
 
       const results = [];
+      const skipped = [];   // 📢 DF-18：预设侧同款可见化（与 wb:scan 一致）
       const visitedDirs = new Set();
       // 🚀 v1.8.6 性能优化：目录递归串行（防环路），目录内 JSON 32 路并发解析
       const SCAN_JSON_BATCH = 32;
@@ -2956,47 +3041,95 @@ app.whenReady().then(() => {
         //    （H:\01 这种根级预设目录含 3 万+ 深层子目录，深度限制是启动提速关键）
         if (depth >= 2) return;
         const cache = (loadScanCache().preset = loadScanCache().preset || {});
-        for (let i = 0; i < jsonFiles.length; i += SCAN_JSON_BATCH) {
-          const batch = jsonFiles.slice(i, i + SCAN_JSON_BATCH);
-          await Promise.all(batch.map(async (fullPath) => {
-            try {
-              const st = await fs.promises.stat(fullPath);
-              if (st.size > 5 * 1024 * 1024) return;
-              const mt = Math.round(st.mtimeMs);
-              const cached = cache[fullPath];
-              // 🚀 增量缓存：已知无效且 mtime 未变 → 跳过 readFile+JSON.parse（大目录提速关键）
-              if (cached && cached.mtime === mt && cached.valid === false) return;
-              // 🚀 大文件预检：预设常见字段 prompts/temperature/max_tokens 等；超过 512KB 的
-              //    先读头 64KB 查关键字，不含则跳过（避免 readFile+JSON.parse 大文件）
-              const PRESET_HINTS = ['prompts', 'prompt_order', 'temperature', 'max_tokens', 'max_context', 'rep_pen', 'top_p', 'openai_model'];
-              if (st.size > 512 * 1024) {
-                let fh;
-                try {
-                  fh = await fs.promises.open(fullPath, 'r');
-                  const head = Buffer.alloc(64 * 1024);
-                  await fh.read(head, 0, head.length, 0);
-                  const headStr = head.toString('utf-8');
-                  if (!PRESET_HINTS.some(k => headStr.includes('"' + k + '"'))) { cache[fullPath] = { mtime: mt, valid: false }; return; }
-                } finally { if (fh) await fh.close().catch(() => {}); }
-              }
-              const content = await fs.promises.readFile(fullPath, 'utf-8');
-              const pData = JSON.parse(content);
-              const valid = isValidPreset(pData);
-              cache[fullPath] = { mtime: mt, valid };
-              if (valid) {
-                results.push({ path: fullPath, name: path.basename(fullPath), data: pData });
-              }
-            } catch (parseErr) {
-              // 静默跳过损坏或非标准 JSON 文件
-              console.warn('[preset:scan] 跳过非预设文件:', path.basename(fullPath), parseErr.message);
-            }
-          }));
+
+        // 📊 DF-18 分级（与世界书侧同款）：先 stat，再分常规 / 大文件两档
+        const statOf = new Map();
+        await Promise.all(jsonFiles.map(async (fullPath) => {
+          try { statOf.set(fullPath, await fs.promises.stat(fullPath)); } catch (e) { /* 按不可读处理 */ }
+        }));
+        const normalFiles = [];
+        const heavyFiles = [];
+        for (const fullPath of jsonFiles) {
+          const st = statOf.get(fullPath);
+          if (!st) { skipped.push({ path: fullPath, size: 0, reason: '文件无法读取（stat 失败）' }); continue; }
+          if (st.size > SCAN_INLINE_MAX_BYTES) heavyFiles.push(fullPath);
+          else normalFiles.push(fullPath);
         }
+
+        const PRESET_HINTS = ['prompts', 'prompt_order', 'temperature', 'max_tokens', 'max_context', 'rep_pen', 'top_p', 'openai_model'];
+        const handleOne = async (fullPath) => {
+          try {
+            const st = statOf.get(fullPath);
+            const mt = Math.round(st.mtimeMs);
+            const cached = cache[fullPath];
+            // 🚀 增量缓存：已知无效且 mtime 未变 → 跳过 readFile+JSON.parse（大目录提速关键）
+            //    ⚠️ DF-18：只认 valid === false（明确否定），valid === null 表示未判定 → 不跳过
+            if (cached && cached.mtime === mt && cached.valid === false) {
+              skipped.push({ path: fullPath, size: st.size, reason: '此前已判定为非预设（缓存，mtime 未变）' });
+              return;
+            }
+            // 超大文件（>50MB）：不 parse，只回元数据
+            if (st.size > SCAN_PARSE_MAX_BYTES) {
+              results.push({
+                path: fullPath, name: path.basename(fullPath),
+                size: st.size, mtime: st.mtimeMs, heavy: true, dataLoaded: false, data: null
+              });
+              cache[fullPath] = { mtime: mt, valid: null };
+              return;
+            }
+            // 🚀 大文件预检：预设常见字段 prompts/temperature/max_tokens 等；超过 512KB 的
+            //    先读头 64KB 查关键字，不含则跳过（避免 readFile+JSON.parse 大文件）
+            //    ⚠️ DF-18：预检未命中不再写 valid:false（防误杀固化），改 valid:null
+            if (st.size > 512 * 1024) {
+              let fh;
+              try {
+                fh = await fs.promises.open(fullPath, 'r');
+                const head = Buffer.alloc(64 * 1024);
+                const readRes = await fh.read(head, 0, head.length, 0);
+                const bytes = (readRes && typeof readRes.bytesRead === 'number') ? readRes.bytesRead : head.length;
+                const headStr = head.subarray(0, bytes).toString('utf-8');
+                if (!PRESET_HINTS.some(k => headStr.includes('"' + k + '"'))) {
+                  cache[fullPath] = { mtime: mt, valid: null };
+                  skipped.push({ path: fullPath, size: st.size, reason: '大文件头部 64KB 未发现预设特征字段（下次仍会重试）' });
+                  return;
+                }
+              } finally { if (fh) await fh.close().catch(() => {}); }
+            }
+            const content = await fs.promises.readFile(fullPath, 'utf-8');
+            const pData = JSON.parse(content);
+            const valid = isValidPreset(pData);
+            cache[fullPath] = { mtime: mt, valid };
+            if (valid) {
+              results.push({
+                path: fullPath, name: path.basename(fullPath),
+                size: st.size, mtime: st.mtimeMs,
+                heavy: st.size > SCAN_INLINE_MAX_BYTES,
+                dataLoaded: true, data: pData
+              });
+            } else {
+              skipped.push({ path: fullPath, size: st.size, reason: '结构校验未通过（不是标准预设）' });
+            }
+          } catch (parseErr) {
+            // 损坏或非标准 JSON：记入 skipped（不再完全静默）
+            console.warn('[preset:scan] 跳过非预设文件:', path.basename(fullPath), parseErr.message);
+            skipped.push({ path: fullPath, size: (statOf.get(fullPath) || {}).size || 0, reason: '解析失败：' + parseErr.message });
+          }
+        };
+
+        for (let i = 0; i < normalFiles.length; i += SCAN_JSON_BATCH) {
+          const batch = normalFiles.slice(i, i + SCAN_JSON_BATCH);
+          await Promise.all(batch.map(f => handleOne(f)));
+        }
+        for (let i = 0; i < heavyFiles.length; i += SCAN_HEAVY_CONCURRENCY) {
+          const batch = heavyFiles.slice(i, i + SCAN_HEAVY_CONCURRENCY);
+          await Promise.all(batch.map(f => handleOne(f)));
+        }
+
         for (const d of dirs) await walk(d, depth + 1);
       };
       await walk(dirPath);
       saveScanCache();
-      return { success: true, data: results };
+      return { success: true, data: results, skipped };
     } catch (err) {
       return { success: false, error: err.message };
     }

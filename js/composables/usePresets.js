@@ -46,9 +46,25 @@ export function usePresets({
                 activePreset.value = res.data.find(p => p.path === prevPath) || null;
             }
             addLog(`扫描完成，共加载 ${res.data.length} 个预设`, 'success');
+            // 📢 DF-18：预设侧同款「跳过可见化」（世界书侧由 useWorldbooks 报告）
+            reportSkipped('预设', res.skipped);
         } else {
             addLog(`扫描失败: ${res.error}`, 'error');
             nativeAlert(`预设扫描失败: ${res.error}`, 'error');
+        }
+    };
+
+    // 📢 DF-18：把「被跳过的文件」以可感知方式反馈给用户（与 useWorldbooks 同款口径）
+    const reportSkipped = (kind, skipped) => {
+        const list = Array.isArray(skipped) ? skipped : [];
+        if (list.length === 0) return;
+        const notable = list.filter(s => s && s.reason && !/缓存/.test(s.reason));
+        if (notable.length > 0) {
+            const names = notable.slice(0, 5).map(s => (s.path || '').split(/[\\/]/).pop()).filter(Boolean);
+            const more = notable.length > 5 ? ` 等 ${notable.length} 个` : '';
+            addLog(`⚠️ ${kind}扫描：${notable.length} 个文件被跳过（${names.join('、')}${more}）`, 'warning');
+        } else {
+            addLog(`${kind}扫描：${list.length} 个文件按缓存跳过（正常提速，非错误）`);
         }
     };
 
@@ -332,6 +348,8 @@ export function usePresets({
         // 扫描
         loadPresets,
         scanPresetDir,
+        // 📢 DF-18：跳过可见化
+        reportSkipped,
         // 筛选
         filteredPresets,
         // 保存

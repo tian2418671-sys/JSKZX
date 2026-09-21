@@ -228,7 +228,7 @@ npm run build
 │       ├── cardLoader.js   # 卡片读取、数据规范化（V1/V2/V3 兼容）、extractBookEntries 安全提取
 │       ├── pngParser.js    # PNG/WebP tEXt/iTXt 块解析、深度扫描提取 JSON
 │       └── tokenEstimate.js# Token 估算工具（App 与 TextModal 共享）
-├── test/                   # node:test 单元测试（403 用例 / 35 个文件）
+├── test/                   # node:test 单元测试（445 用例 / 38 个文件）
 ├── build/                  # 打包资源（icon.ico、generate-icon.ps1）
 ├── web/                    # Vite 构建产物（gitignore）
 └── dist/                   # electron-builder 打包产物（gitignore）

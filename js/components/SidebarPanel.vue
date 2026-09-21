@@ -473,14 +473,15 @@
             <!-- 世界书列表（筛选后） -->
             <div class="flex-1 overflow-y-auto custom-scrollbar p-2 space-y-1.5">
                 <div v-for="(wb, index) in wbPageSlice" :key="index"
-                     @click="activeWorldbook = wb"
+                     @click="selectWorldbook(wb)"
                      @contextmenu.prevent="openWbContextMenu($event, wb)"
                      :class="activeWorldbook && activeWorldbook.path === wb.path ? 'bg-amber-600/20 border-amber-500/50' : 'bg-zinc-800/50 border-zinc-700/50 hover:bg-zinc-700'"
                      class="p-3 rounded-lg border cursor-pointer transition flex flex-col gap-1.5">
                     <div class="flex justify-between items-center gap-1">
                         <span class="text-xs font-bold text-zinc-200 truncate">{{ (wb.data && wb.data.name) || wb.name }}</span>
                         <div class="flex items-center gap-1 shrink-0">
-                            <span class="text-[10px] px-1.5 py-0.5 rounded font-mono bg-zinc-800 text-zinc-400 border border-zinc-700 whitespace-nowrap">{{ (wb.data && wb.data.entries) ? wb.data.entries.length : 0 }} 词条</span>
+                            <span class="text-[10px] px-1.5 py-0.5 rounded font-mono bg-zinc-800 text-zinc-400 border border-zinc-700 whitespace-nowrap">{{ wbEntryCount(wb) }} 词条</span>
+                            <span v-if="wb.heavy && wb.dataLoaded === false" class="text-[10px] px-1.5 py-0.5 rounded font-mono bg-amber-900/40 text-amber-300 border border-amber-600/40 whitespace-nowrap" title="超大世界书（正文按需加载）">按需</span>
 
                             <!-- ⚙️ 操作按钮折叠/展开 -->
                             <button @click.stop="wb._showActions = !wb._showActions"

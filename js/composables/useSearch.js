@@ -341,14 +341,46 @@ export function useSearch({
         // 索引查询词 = mustInclude（普通关键词）+ tagOnly（标签关键词）
         const indexQuery = [...rules.mustInclude, ...rules.tagOnly].join(' ');
         let candidates = library.value;
-        
-        if (indexQuery && searchIndex.cardCount > 0) {
-            // 使用索引查询，传入排除词和标签
-            candidates = searchIndex.search(indexQuery, {
+        let usedIndex = false;
+
+        // 🔧 PK-18 修复（2026-09-21）：就绪判定 + 查空回落
+        //   旧写法 `searchIndex.cardCount > 0` 把「索引里有东西」当成**完整索引** →
+        //   ① 构建中/半建/刷新未收尾的窗口里候选集只有部分卡 → 漏卡（"明明有却搜不到"）；
+        //   ② 索引查询返回空时直接 `|| []` → 候选集空 → 不回落内存匹配 → 用户看到「0 结果」。
+        //   现在：必须「索引就绪 **且** 覆盖当前库」才走索引；索引查空也回落内存匹配。
+        const indexReady = searchIndex.cardCount > 0
+            && !searchIndex.building
+            && searchIndex.cardCount >= library.value.length;
+
+        if (indexQuery && indexReady) {
+            const indexed = searchIndex.search(indexQuery, {
                 tags: rules.tagOnly,
                 excludeKeywords: rules.mustExclude
-            }) || [];
+            });
+            // 索引命中为空 → 回落内存匹配（而非硬空），杜绝「索引一就绪反而搜不到」
+            if (indexed && indexed.length > 0) {
+                candidates = indexed;
+                usedIndex = true;
+            }
         }
+
+        // 🔧 PK-18 核心修复：**候选集短语复核**
+        //   索引把中文按单字建 token，所以「系统」在索引路径下退化为「含『系』且含『统』」的单字 AND，
+        //   会把正文「体**系** 传**统**」的卡误命中（实测 false_positive = true）；
+        //   而旧代码的短语校验条件是 `... && searchIndex.cardCount === 0` —— **索引一就绪整条被跳过**，
+        //   导致同一查询在索引建好前后结果不一致。
+        //   修法：**对候选集**（不是全表）复算文本做短语 includes 复核 —— 代价有界，
+        //   与 searchIndex 的 excludeKeywords 分支同款思路（只对已筛过的候选集复算）。
+        const needPhraseCheck = usedIndex && rules.mustInclude.length > 0;
+        // 同一张卡在一次查询里只复算一次文本（多关键词共用）
+        const textCacheForPhrase = needPhraseCheck ? new Map() : null;
+        const phraseTextOf = (card) => {
+            if (textCacheForPhrase.has(card)) return textCacheForPhrase.get(card);
+            let t = '';
+            try { t = extractCardSearchableText(card); } catch (e) { t = ''; }
+            textCacheForPhrase.set(card, t);
+            return t;
+        };
 
         const filtered = candidates.filter(card => {
             try {
@@ -357,15 +389,22 @@ export function useSearch({
 
                 const data = card.data?.data || card.data || {};
 
+                // 1.5 🔧 PK-18：候选集短语复核（索引路径下「系统」不得命中「体系 传统」）
+                if (needPhraseCheck) {
+                    const t = phraseTextOf(card);
+                    if (!rules.mustInclude.every(kw => t.includes(kw))) return false;
+                }
+
                 // 2. 排除词校验（- 语法）—— 索引已处理，但需二次校验确保准确
-                if (rules.mustExclude.length > 0 && searchIndex.cardCount === 0) {
+                //    走索引时由 searchIndex 的 excludeKeywords 负责；未走索引时在内存复核
+                if (rules.mustExclude.length > 0 && !usedIndex) {
                     const fullText = extractCardSearchableText(card);
                     if (rules.mustExclude.some(ex => fullText.includes(ex))) return false;
                 }
 
                 // 3. 标签特定筛选（tag:/t: 语法）—— 索引已处理
                 // 🧹 兼容「导入时忽略卡片自带标签」开关：开启时原生 data.tags 不参与标签搜索
-                if (rules.tagOnly.length > 0 && searchIndex.cardCount === 0) {
+                if (rules.tagOnly.length > 0 && !usedIndex) {
                     const cardTags = extractCardTags(card, { ignoreNative: sanitizeImportedTags?.value });
                     if (!rules.tagOnly.every(target => cardTags.some(t => t.includes(target)))) return false;
                 }
@@ -393,8 +432,12 @@ export function useSearch({
                     if (!rules.wbOnly.every(w => wbText.includes(w))) return false;
                 }
 
-                // 7. 全文本多词必含校验（AND 逻辑）—— 索引已处理
-                if (rules.mustInclude.length > 0 && searchIndex.cardCount === 0) {
+                // 7. 全文本多词必含校验（AND 逻辑）
+                //    🔧 PK-18：不再限定 `cardCount === 0` —— 索引路径下也必须复核，
+                //    否则「系统」会命中正文含「体系 传统」的卡（单字 AND 误命中）。
+                //    走索引时上面 1.5 步已对候选集复核过（needPhraseCheck），此处只在未走索引时兜底，
+                //    避免同一张卡重复复算两次文本。
+                if (rules.mustInclude.length > 0 && !needPhraseCheck && !usedIndex) {
                     const fullText = extractCardSearchableText(card);
                     if (!rules.mustInclude.every(kw => fullText.includes(kw))) return false;
                 }

@@ -4,6 +4,7 @@
  * 依赖通过参数注入；estimateCardTokens 为共享工具保留在 App.vue，此处作为依赖传入。行为保持不变。
  */
 import { ref } from 'vue';
+import { alignEntryLists, summarizeAlignment, normalizeEntries } from '../utils/entryAlign.js';
 
 export function useDedupe({
     library, worldbooks, activeWorldbook, cardData,
@@ -530,7 +531,14 @@ export function useDedupe({
         diffFieldResults.value = [];
 
         // 智能识别：当前是在查重世界书 / 角色卡 / 预设？
-        const isWorldbook = !!(masterItem.data && Array.isArray(masterItem.data.entries));
+        // 🛡️ DF-19：entries 兼容对象字典形态（V2 老格式 {"0":{...}}）——与 main.js 的 isValidWorldbook 同口径，
+        //    否则字典形态的书会被判成「角色卡」→ 走角色卡字段比对（全空）→ 显示「✅ 设定完全一致」的反向结论。
+        const masterEntriesRaw = masterItem.data && masterItem.data.entries;
+        const compareEntriesRaw = compareItem.data && compareItem.data.entries;
+        // 判定「是不是世界书」：任一侧存在 entries（数组或字典形态）即认为是世界书
+        const hasEntriesShape = (v) => !!v && typeof v === 'object';
+        const isWorldbook = !!(masterItem.data && hasEntriesShape(masterEntriesRaw))
+            || !!(compareItem.data && hasEntriesShape(compareEntriesRaw));
         const isPreset = !isWorldbook && !!(
             masterItem.data &&
             ('temperature' in masterItem.data || 'prompts' in masterItem.data || 'prompt_order' in masterItem.data)
@@ -541,15 +549,36 @@ export function useDedupe({
 
         if (isWorldbook) {
             // ---------- 🌍 世界书对比逻辑 ----------
-            const entries1 = masterItem.data.entries || [];
-            const entries2 = compareItem.data.entries || [];
+            const entries1 = normalizeEntries(masterEntriesRaw);
+            const entries2 = normalizeEntries(compareEntriesRaw);
+
+            const countSame = entries1.length === entries2.length;
+
+            // 🧩 词条级对齐（DF-17）：把「不对称增删」表达成 only-a / only-b / both，
+            //    回答用户真正关心的问题「删了哪个 / 加了哪个」——取代「拼接大字符串」的旧做法。
+            const pairs = alignEntryLists(entries1, entries2);
+            const stat = summarizeAlignment(pairs);
+            const alignSame = stat.onlyA === 0 && stat.onlyB === 0 && stat.changed === 0;
 
             diffFieldResults.value.push({
                 label: '📚 世界书词条总数 (Entries Count)',
-                isSame: entries1.length === entries2.length,
+                isSame: countSame,
                 len1: `${entries1.length} 条`,
                 len2: `${entries2.length} 条`,
-                diffText: null
+                diffText: null,
+                // 占位文案：本行无逐行对比内容，引导用户去看词条级对齐（否则会留白，观感像坏了）
+                hint: countSame
+                    ? '词条数一致。'
+                    : `词条数不同（${entries1.length} vs ${entries2.length}）——逐条增删见下方「🧩 词条级对齐」。`
+            });
+
+            diffFieldResults.value.push({
+                label: '🧩 词条级对齐 (Entry Alignment)',
+                isEntryPairs: true,
+                isSame: alignSame,
+                len1: `新增 ${stat.onlyB} / 缺失 ${stat.onlyA} / 改动 ${stat.changed}`,
+                len2: `共 ${pairs.length} 条`,
+                pairs
             });
 
             // 提取所有触发词 Key
@@ -576,7 +605,8 @@ export function useDedupe({
                 isSame: isTextSame,
                 len1: `${text1.length} 字`,
                 len2: `${text2.length} 字`,
-                diffText: isTextSame ? null : computeTextDiffLines(text1, text2)
+                diffText: isTextSame ? null : computeTextDiffLines(text1, text2),
+                hint: '正文总集无逐行差异可展开，逐条对比见「🧩 词条级对齐」。'
             });
 
         } else if (isPreset) {

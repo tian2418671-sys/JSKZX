@@ -20,6 +20,66 @@ export function useWorldbooks({
     const importUrl = ref('');          // 网址导入输入框绑定
     const isImportingWb = ref(false);   // 导入中 loading 状态
 
+    // 📢 DF-18：把「被跳过的文件」以可感知方式反馈给用户（计数 + 可展开文件名 + 原因）
+    //    静默丢弃 = 用户以为软件坏了；这里至少落一条日志，超限/解析失败都点名。
+    const reportSkipped = (kind, skipped) => {
+        const list = Array.isArray(skipped) ? skipped : [];
+        if (list.length === 0) return;
+        // 只把「真正值得用户关心」的（解析失败 / 超限 / 预检未命中）计数报告；
+        // 缓存命中的否定判定属正常提速，不刷屏（但仍写入日志便于排查）。
+        const notable = list.filter(s => s && s.reason && !/缓存/.test(s.reason));
+        if (notable.length > 0) {
+            const names = notable.slice(0, 5).map(s => (s.path || '').split(/[\\/]/).pop()).filter(Boolean);
+            const more = notable.length > 5 ? ` 等 ${notable.length} 个` : '';
+            addLog(`⚠️ ${kind}扫描：${notable.length} 个文件被跳过（${names.join('、')}${more}）`, 'warning');
+        } else {
+            addLog(`${kind}扫描：${list.length} 个文件按缓存跳过（正常提速，非错误）`);
+        }
+    };
+
+    // 📊 词条数显示：已解析用真实 entries.length；超大未解析（heavy）用扫描时统计的 entryCount
+    const wbEntryCount = (wb) => {
+        if (!wb) return 0;
+        if (wb.data && Array.isArray(wb.data.entries)) return wb.data.entries.length;
+        if (typeof wb.entryCount === 'number') return wb.entryCount;
+        return 0;
+    };
+
+    /**
+     * 🦥 DF-18 懒加载：确保世界书正文已读入内存（>50MB 的超大书扫描时只回元数据）
+     * 前提：`wb:scan` 通过指纹验证后会把目录加入白名单（本会话内 readText 可读）；
+     *       重启后白名单为空 → 重新扫一次目录即可恢复授权（见最终方案 §七 #6）。
+     */
+    const ensureWorldbookLoaded = async (wb) => {
+        if (!wb || wb.dataLoaded !== false || !wb.path) return wb;
+        try {
+            addLog(`⏳ 正在读取超大世界书正文：${wb.name || wb.path}`, 'warning');
+            const text = await window.electronAPI.readText(wb.path);
+            const parsed = JSON.parse(text);
+            if (parsed && typeof parsed === 'object') {
+                if (parsed.entries && typeof parsed.entries === 'object' && !Array.isArray(parsed.entries)) {
+                    parsed.entries = Object.values(parsed.entries);
+                }
+                wb.data = parsed;
+                wb.dataLoaded = true;
+                if (!wb.entryCount && Array.isArray(parsed.entries)) wb.entryCount = parsed.entries.length;
+                triggerRef(worldbooks);
+                addLog(`✅ 已读入：${wb.name || wb.path}（${wb.entryCount || 0} 词条）`, 'success');
+            }
+        } catch (e) {
+            addLog(`❌ 读取世界书正文失败：${e.message}`, 'error');
+            nativeAlert(`读取世界书正文失败：\n${e.message}\n\n请确认文件仍可访问，或重新选择世界书目录后再试。`, 'error');
+        }
+        return wb;
+    };
+
+    // 🖱️ 选中世界书（侧栏点击入口）：超大书先按需读入正文，再设为当前编辑对象
+    const selectWorldbook = async (wb) => {
+        if (!wb) return;
+        if (wb.dataLoaded === false) await ensureWorldbookLoaded(wb);
+        activeWorldbook.value = wb;
+    };
+
     // 扫描世界书文件夹（弹目录选择；复用 selectGenericFolder 返回纯路径字符串，selectFolder 返回扫描结果对象不适用）
     const loadWorldbooks = async () => {
         const dirPath = await window.electronAPI.selectGenericFolder();
@@ -40,6 +100,7 @@ export function useWorldbooks({
         const res = await window.electronAPI.scanWorldbooks(dirPath);
         if (res.success) {
             // 统一清洗：确保每本世界书的 entries 均为纯数组（兼容旧版/第三方工具的对象字典格式）
+            // 🛡️ DF-18：heavy（>50MB 未解析）的书 data 为 null，跳过清洗（按需懒加载）
             res.data.forEach(wb => {
                 if (wb.data && wb.data.entries && typeof wb.data.entries === 'object' && !Array.isArray(wb.data.entries)) {
                     wb.data.entries = Object.values(wb.data.entries);
@@ -52,6 +113,8 @@ export function useWorldbooks({
                 activeWorldbook.value = res.data.find(w => w.path === prevPath) || null;
             }
             addLog(`扫描完成，共加载 ${res.data.length} 本世界书`, 'success');
+            // 📢 DF-18：被跳过的文件必须可见（不再静默丢弃 —— 静默会让人以为软件坏了，对照 AR-38）
+            reportSkipped('世界书', res.skipped);
         } else {
             addLog(`扫描失败: ${res.error}`, 'error');
             nativeAlert(`世界书扫描失败: ${res.error}`, 'error');
@@ -495,6 +558,8 @@ export function useWorldbooks({
         loadWorldbooks, scanWorldbookDir, importWorldbookFromUrl, renameWorldbook,
         handleWorldbookFolderSelect, deleteWorldbook, duplicateWorldbook,
         openWbContextMenu, closeWbContextMenu, openWbInFolder,
-        wbCategories, changeWbCategory, filteredWorldbooks
+        wbCategories, changeWbCategory, filteredWorldbooks,
+        // 📢 DF-18：跳过可见化 + 超大书懒加载
+        reportSkipped, wbEntryCount, ensureWorldbookLoaded, selectWorldbook
     };
 }

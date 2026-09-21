@@ -5,6 +5,48 @@
 
 ---
 
+## 🩹 未发布 · 查重 / 扫描 / 检索全链路修复（Phase 1 + Phase 2，2026-09-21）
+
+> 规格：[`docs/规格与计划/查重扫描与检索-最终方案.md`](docs/规格与计划/查重扫描与检索-最终方案.md)
+> ｜ 流水：[`实施工作日志.md`](docs/规格与计划/查重扫描与检索-实施工作日志.md)
+> ｜ 待办：[`剩余任务.md`](docs/规格与计划/查重扫描与检索-剩余任务.md)
+
+### ✨ 用户可感知的变化
+- **世界书「查看词条差异」不再崩**：词条数不同的两本书以前一开就渲染报错（词条数相同才不崩）；现在正常打开
+- **能看出「哪个词条被新增 / 被删除」**：新增「🧩 词条级对齐」区，绿色 `[新增]` / 红色 `[缺失]` 逐条标注，
+  不再只有「一大坨文本里某几句变色」
+- **大世界书 / 大预设不再凭空消失**：以前超过 5MB 的文件被**静默丢弃**（无提示、不进统计）；
+  现在能识别，且**被跳过的文件会在日志里点名**（数量 + 文件名 + 原因）；超大书按需加载并标「按需」
+- **搜索更准**：修掉「搜『系统』却命中只含『体系 传统』的卡」；且**索引建好前后结果不再不一致**
+- **搜索不再漏卡**：索引构建中 / 刷新未收尾时不再出现「明明有却搜不到」
+
+### 🧩 实现要点（内部）
+- **Phase 1（P0）**：新增 `js/utils/entryAlign.js`（`keyOf` 三级回退 + 带侧标识 + 一对一配对的外连接对齐）；
+  `DiffModal.vue` 行级比对加 `v-if="f.diffText"` 守卫 + 无差异时占位文案 + `fileNameOf()` 防 `path` 裸 `split` +
+  新增 `isEntryPairs` 分支（`payloadFor` 用 WeakMap 缓存）；`useDedupe.js` 世界书判定改 `hasEntriesShape`（字典形态归一化）
+- **Phase 2（P1）**：
+  - `useSearch.js`：就绪判定 `cardCount > 0 && !building && cardCount >= library.length`；查空回落内存匹配；
+    **候选集短语复核**（去掉 `&& searchIndex.cardCount === 0`，改对候选集复算，同卡文本 Map 缓存）
+  - `main.js`：新增 `SCAN_INLINE_MAX_BYTES=5MB` / `SCAN_PARSE_MAX_BYTES=50MB` / `SCAN_HEAVY_CONCURRENCY=3` / `SCAN_CACHE_VERSION=2`；
+    分级处理（≤5MB 32 并发 / 5~50MB 3 并发 / >50MB 只回元数据）；结果补 `size/mtime/entryCount/heavy/dataLoaded`；
+    返回体新增 `skipped`；**预检未命中改写 `valid:null`**（不再固化否定）；`scanCache` 加版本号；**世界书 + 预设两侧同改**
+  - `useWorldbooks.js` / `usePresets.js`：`reportSkipped`（跳过可见化）；`wbEntryCount` / `selectWorldbook` / `ensureWorldbookLoaded`（懒加载）
+  - `SidebarPanel.vue`：词条数改用 `wbEntryCount`；点击走 `selectWorldbook`；「按需」徽标
+- **缺陷编号**：AR-39 / DF-17 / DF-18 / DF-19 / PK-18（PK-19 待 Phase 3）
+
+### 🔬 验证
+- `npm test` → **445 pass / 0 fail**（38 个文件；原 403 + 新增 42）
+- `npm run build:web` 无错；`get_errors` 全清
+- **真实启动冒烟**（dev 模式 + 隔离 profile + CDP）：
+  - `scripts/_probe-diff-align.mjs` → **15/15**（差异弹窗 UI 级；含旧代码条件对照 `oldCrashed === true`）
+  - `scripts/_probe-scan-gate.mjs` → **12/12**（真实目录 6MB 书 `bigRecognized=true`、`skipped` 可见、二次扫描走缓存仍在）
+  - `scripts/_probe-search-phrase.mjs` → **8/8**（真实搜索框输入「系统」，两路径均不命中「体系 传统」诱饵卡）
+- **测试有效性反向验证**：临时回退 `needPhraseCheck` → 用例失败（`['卡A']` → `['卡A','卡C']`），证明用例有效
+- 新单测：`test/dedupeEntryAlign.test.mjs`（20）+ `test/searchPhrase.test.mjs`（9）+ `test/scanGate.test.mjs`（13）
+- **未发布**：本轮改动已提交源码与文档，**未打包、未推送 Release**
+
+---
+
 > **v2.2.12 专项（2026-09-19）**：角色卡「插件」页签（卡内酒馆助手脚本可视化编辑）
 > + CT-19 卡内面板全局库缺失修复 + Python 一键检查工具。规格：`docs/规格与计划/角色卡插件页签-实现规格.md`。
 

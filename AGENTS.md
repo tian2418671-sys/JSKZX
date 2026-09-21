@@ -10,7 +10,7 @@
 
 | 找什么 | 去哪 |
 |---|---|
-| 历史缺陷与坑（111 条，按领域 + 设计原因） | [`docs/bugs/README.md`](docs/bugs/README.md) |
+| 历史缺陷与坑（117 条，按领域 + 设计原因） | [`docs/bugs/README.md`](docs/bugs/README.md) |
 | 代码片段 / 实测技术数据 / 外部 API / 脚本清单 | [`docs/技术支持/README.md`](docs/技术支持/README.md) |
 | 发版一条龙（含内部 vs 对外文档分工） | [`docs/发布/一条龙-发布流程.md`](docs/发布/一条龙-发布流程.md) |
 | 实现规格与后续计划 | [`docs/规格与计划/`](docs/规格与计划/README.md) |
