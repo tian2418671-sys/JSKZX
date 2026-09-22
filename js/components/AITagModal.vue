@@ -7,17 +7,58 @@
 <template>
     <transition name="fade">
         <div v-if="show" class="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
-            <div class="bg-white rounded-xl shadow-2xl w-full max-w-2xl overflow-hidden flex flex-col max-h-[90vh]">
+            <!-- 🧭 布局重构（2026-09-22）：max-w-2xl 单列长滚动 → max-w-5xl + 左导航分区
+                 对齐项目既有范式：TagCategoryModal（左导航 w-80 + 右内容）/ AutoGroupModal（max-w-5xl）
+                 病灶（用户反馈「窗口有点混乱、布局不合理」）：
+                   ① 单列 672px 太窄，8 个区块堆叠要滚很久才够到「开始打标」
+                   ② 编号体系断裂（无编号 → 1. → 1.5 → 2. → 3. → 无编号）
+                   ③ 本次任务（层开关/候选池）与配置（向量/API/提示词/破限）混在一列
+                   ④ 「📝 管理规则表」重复出现两处
+                   ⑤ 进度条在最底部 —— 打标时必须滚到底才能看进度
+                 ⚠️ 本次只重排布局：props / emits / 业务逻辑一行未动。 -->
+            <div class="bg-white rounded-xl shadow-2xl w-full max-w-5xl overflow-hidden flex flex-col max-h-[92vh]">
 
                 <div class="px-5 py-4 bg-gray-900 text-white border-b border-gray-800 flex justify-between items-center shrink-0">
                     <h3 class="font-bold text-sm flex items-center gap-2">🤖 AI 智能批量打标 (已选 {{ selectedCount }} 张)</h3>
                     <button @click="$emit('close')" :disabled="isAITagging" class="text-gray-400 hover:text-white disabled:opacity-50">✕ 关闭</button>
                 </div>
 
-                <div class="p-5 overflow-y-auto space-y-5 flex-1 custom-scrollbar text-xs">
+                <!-- 🚀 进度条常驻区：打标时在顶部（此前在最底部，用户必须滚到底才能看到进度） -->
+                <div v-if="isAITagging || aiTaggingProgress.total > 0" class="px-5 py-2.5 bg-blue-50 border-b border-blue-200 shrink-0">
+                    <div class="flex justify-between items-center mb-1.5 text-xs">
+                        <span class="font-bold text-blue-800">{{ aiTaggingProgress.status || '准备中…' }}</span>
+                        <span class="text-blue-600 font-mono">{{ aiTaggingProgress.current }} / {{ aiTaggingProgress.total }}</span>
+                    </div>
+                    <div class="w-full bg-blue-200 rounded-full h-2 overflow-hidden">
+                        <div class="bg-blue-600 h-2 rounded-full transition-all duration-300"
+                             :style="{ width: (aiTaggingProgress.current / (aiTaggingProgress.total || 1) * 100) + '%' }"></div>
+                    </div>
+                </div>
+
+                <!-- 主体：左导航 + 右内容 -->
+                <div class="flex flex-1 overflow-hidden min-h-0">
+
+                    <!-- 🧭 左导航（分区切换；纯 UI 状态，不涉及业务） -->
+                    <div class="w-52 shrink-0 border-r border-gray-200 bg-gray-50 p-2 flex flex-col gap-0.5 overflow-y-auto custom-scrollbar">
+                        <template v-for="grp in navGroups()" :key="grp.title">
+                            <div class="text-[10px] font-bold text-gray-400 px-2 pt-2.5 pb-0.5 first:pt-1">{{ grp.title }}</div>
+                            <button v-for="it in grp.items" :key="it.key"
+                                    @click="activeSection = it.key"
+                                    class="w-full text-left px-2.5 py-2 rounded-lg text-xs flex items-center gap-1.5 transition"
+                                    :class="activeSection === it.key ? 'bg-indigo-600 text-white font-bold' : 'text-gray-600 hover:bg-gray-200'">
+                                <span>{{ it.icon }}</span>
+                                <span class="truncate">{{ it.label }}</span>
+                                <span v-if="it.badge" class="ml-auto shrink-0 text-[9px] px-1 rounded"
+                                      :class="activeSection === it.key ? 'bg-white/25' : 'bg-gray-200 text-gray-500'">{{ it.badge }}</span>
+                            </button>
+                        </template>
+                    </div>
+
+                    <!-- 右内容区（只显示当前分区，消除长滚动） -->
+                    <div class="flex-1 p-5 overflow-y-auto custom-scrollbar space-y-4 text-xs min-w-0">
 
                     <!-- 🏷️ P1：执行管线（这里的开关 = 本次任务；全局默认在「设置 → 🏷️ 打标与分类」，两处共用同一状态） -->
-                    <div class="bg-indigo-50 p-3 rounded-lg border border-indigo-200">
+                    <div v-show="activeSection === 'pipeline'" class="bg-indigo-50 p-3 rounded-lg border border-indigo-200">
                         <div class="flex items-center justify-between mb-2 gap-2">
                             <label class="block font-bold text-indigo-900">
                                 ⚙️ 执行管线
@@ -61,7 +102,7 @@
                     </div>
 
                     <!-- 🧩🏷️ 1. 候选标签池 -->
-                    <div class="bg-gray-50 p-3 rounded-lg border border-gray-200">
+                    <div v-show="activeSection === 'candidates'" class="bg-gray-50 p-3 rounded-lg border border-gray-200">
                         <label class="block font-bold text-gray-700 mb-2">🏷️ 1. 候选标签池 <span class="text-[10px] font-normal text-gray-500">(AI 将优先从中挑选)</span>:</label>
 
                         <div class="flex flex-wrap gap-2 mb-2 p-2 border border-gray-200 bg-white rounded min-h-[40px]">
@@ -108,7 +149,7 @@
                     </div>
 
                     <!-- 🧠 1.5 本地向量引擎（三层漏斗第二层：免费离线语义匹配） -->
-                    <div class="bg-gray-50 p-3 rounded-lg border border-gray-200">
+                    <div v-show="activeSection === 'vector'" class="bg-gray-50 p-3 rounded-lg border border-gray-200">
                         <label class="flex items-center gap-2 font-bold text-gray-700 mb-2 cursor-pointer">
                             <input type="checkbox" :checked="useLocalVector"
                                    @change="$emit('update:useLocalVector', $event.target.checked)" :disabled="isAITagging"
@@ -160,24 +201,21 @@
                                 </label>
                             </div>
                             <p class="text-[10px] text-gray-500">阈值越高越精确（漏标多），越低越宽泛（误标多）。建议 0.30-0.45。规则 + 向量配合使用：规则精确命中，向量从候选池补充语义标签，两者都未命中才调用 LLM。</p>
-                            <!-- 📝 规则层入口（第一层规则 + 第二层向量配合，未命中才进第三层 LLM） -->
-                            <div class="flex items-center justify-between pt-2 border-t border-gray-200">
-                                <span class="text-[10px] text-gray-500">① 第一层：规则匹配（系统预设已内置，可自定义）</span>
-                                <button @click="$emit('open-auto-tag-rules')" class="px-2 py-1 bg-purple-600/10 hover:bg-purple-600 hover:text-white border border-purple-300 text-purple-700 rounded text-[11px] transition" title="编辑自动打标规则表（导入自动分类 / AI 打标第一层共用）">📝 管理规则表</button>
-                            </div>
+                            <!-- ⚠️ 此处原有的「📝 管理规则表」已移除（与「执行管线」区重复）——
+                                 规则表入口统一保留在「⚙️ 执行管线」区，避免同一功能两处入口。 -->
                         </div>
                     </div>
 
-                    <!-- 🤖 2. AI 打标规则设置 -->
-                    <div class="p-3 bg-gray-50 border border-gray-200 rounded-lg space-y-3">
-                        <h4 class="text-sm font-bold text-gray-700">🤖 AI 打标规则设置</h4>
+                    <!-- 🤖 AI 提取设置（本次任务相关：是否允许 AI 自创标签 + 附加要求） -->
+                    <div v-show="activeSection === 'extract'" class="p-3 bg-gray-50 border border-gray-200 rounded-lg space-y-3">
+                        <h4 class="text-sm font-bold text-gray-700">🤖 AI 提取设置</h4>
 
                         <label class="flex items-center gap-2 cursor-pointer">
                             <input type="checkbox" :checked="enableAIExtraction" @change="$emit('update:enableAIExtraction', $event.target.checked)" :disabled="isAITagging"
                                    class="w-4 h-4 text-blue-600 bg-white border-gray-300 rounded focus:ring-blue-600 focus:ring-2">
                             <span class="text-sm text-gray-700">允许 AI 自由提取标签</span>
                         </label>
-                        <p class="text-[10px] text-gray-500 ml-6 -mt-1">关闭后，AI 将<strong class="text-rose-500">严格只能</strong>从上方的候选池中为你选择标签，不会自行创造新标签。</p>
+                        <p class="text-[10px] text-gray-500 ml-6 -mt-1">关闭后，AI 将<strong class="text-rose-500">严格只能</strong>从候选池中为你选择标签，不会自行创造新标签。</p>
 
                         <div class="flex flex-col gap-1">
                             <label class="text-xs text-gray-600">附加自定义提示词 (可选)</label>
@@ -185,41 +223,41 @@
                                       placeholder="例如：请重点分析角色的性格特征，忽略外观描述..."
                                       class="w-full bg-white border border-gray-300 rounded p-2 text-xs text-gray-700 focus:outline-none focus:border-blue-500 placeholder-gray-400 resize-y shadow-sm"></textarea>
                         </div>
-
-                        <!-- 🚨 破限 (Jailbreak) 强制越狱：对抗模型拒答及道德审查，破限词自动保存 -->
-                        <div class="mt-3 border border-rose-300 bg-rose-50 rounded-lg p-3">
-                            <div class="flex items-center justify-between mb-2">
-                                <label class="flex items-center gap-2 cursor-pointer">
-                                    <input type="checkbox" :checked="useJailbreak" @change="$emit('update:useJailbreak', $event.target.checked)" :disabled="isAITagging"
-                                           class="w-4 h-4 text-rose-600 bg-white border-gray-300 rounded focus:ring-rose-600 focus:ring-2">
-                                    <span class="text-sm font-bold text-rose-600 flex items-center gap-1">⚠️ 启用强制破限 (Jailbreak)</span>
-                                </label>
-                                <span class="text-[10px] text-gray-500">用于对抗模型拒答及道德审查</span>
-                            </div>
-                            <transition name="fade">
-                                <div v-show="useJailbreak" class="mt-2 space-y-2">
-                                    <!-- 📚 预设快速套用：选中即覆盖当前破限词 -->
-                                    <div class="flex items-center gap-2" v-if="jailbreakPresets.length > 0">
-                                        <label class="text-[10px] text-rose-500 shrink-0">📚 预设套用:</label>
-                                        <select :value="''" @change="$emit('update:jailbreakPrompt', $event.target.value)" :disabled="isAITagging"
-                                                class="flex-1 h-7 bg-white border border-rose-300 rounded px-1.5 text-xs text-rose-700 focus:outline-none focus:border-rose-500">
-                                            <option value="" disabled>— 选择预设覆盖当前破限词 —</option>
-                                            <option v-for="p in jailbreakPresets" :key="p.id" :value="p.content">{{ p.name }}</option>
-                                        </select>
-                                    </div>
-                                    <textarea :value="jailbreakPrompt" @input="$emit('update:jailbreakPrompt', $event.target.value)" :disabled="isAITagging" rows="3"
-                                              class="w-full bg-white/80 border border-rose-300 rounded p-2 text-xs text-rose-800 focus:border-rose-500 focus:outline-none resize-y shadow-sm placeholder-rose-400 custom-scrollbar"
-                                              placeholder="输入你的强力破限咒语 (Jailbreak Prompt)..."></textarea>
-                                    <p class="text-[10px] text-rose-500/80 mt-1">💡 破限词自动拼接在系统提示词最末尾（注意力权重最高），输入一次永久保存，重启不丢。</p>
-                                </div>
-                            </transition>
-                        </div>
                     </div>
 
-                    <!-- 📝 3. 系统级微调全局提示词预设库 -->
-                    <div>
-                        <label class="block font-bold text-gray-700 mb-2 flex justify-between items-center">
-                            <span>📝 3. 系统级微调全局提示词 (System Prompts):</span>
+                    <!-- 🚨 强制破限（独立分区：与「AI 提取设置」拆开，不再嵌在它内部） -->
+                    <div v-show="activeSection === 'jailbreak'" class="border border-rose-300 bg-rose-50 rounded-lg p-3">
+                        <div class="flex items-center justify-between mb-2">
+                            <label class="flex items-center gap-2 cursor-pointer">
+                                <input type="checkbox" :checked="useJailbreak" @change="$emit('update:useJailbreak', $event.target.checked)" :disabled="isAITagging"
+                                       class="w-4 h-4 text-rose-600 bg-white border-gray-300 rounded focus:ring-rose-600 focus:ring-2">
+                                <span class="text-sm font-bold text-rose-600 flex items-center gap-1">⚠️ 启用强制破限 (Jailbreak)</span>
+                            </label>
+                            <span class="text-[10px] text-gray-500">用于对抗模型拒答及道德审查</span>
+                        </div>
+                        <transition name="fade">
+                            <div v-show="useJailbreak" class="mt-2 space-y-2">
+                                <!-- 📚 预设快速套用：选中即覆盖当前破限词 -->
+                                <div class="flex items-center gap-2" v-if="jailbreakPresets.length > 0">
+                                    <label class="text-[10px] text-rose-500 shrink-0">📚 预设套用:</label>
+                                    <select :value="''" @change="$emit('update:jailbreakPrompt', $event.target.value)" :disabled="isAITagging"
+                                            class="flex-1 h-7 bg-white border border-rose-300 rounded px-1.5 text-xs text-rose-700 focus:outline-none focus:border-rose-500">
+                                        <option value="" disabled>— 选择预设覆盖当前破限词 —</option>
+                                        <option v-for="p in jailbreakPresets" :key="p.id" :value="p.content">{{ p.name }}</option>
+                                    </select>
+                                </div>
+                                <textarea :value="jailbreakPrompt" @input="$emit('update:jailbreakPrompt', $event.target.value)" :disabled="isAITagging" rows="6"
+                                          class="w-full bg-white/80 border border-rose-300 rounded p-2 text-xs text-rose-800 focus:border-rose-500 focus:outline-none resize-y shadow-sm placeholder-rose-400 custom-scrollbar"
+                                          placeholder="输入你的强力破限咒语 (Jailbreak Prompt)..."></textarea>
+                                <p class="text-[10px] text-rose-500/80 mt-1">💡 破限词自动拼接在系统提示词最末尾（注意力权重最高），输入一次永久保存，重启不丢。</p>
+                            </div>
+                        </transition>
+                    </div>
+
+                    <!-- 📝 系统提示词预设库 -->
+                    <div v-show="activeSection === 'prompts'">
+                        <label class="font-bold text-gray-700 mb-2 flex justify-between items-center">
+                            <span>📝 系统级微调全局提示词 (System Prompts):</span>
                             <span class="text-[10px] text-amber-600 font-normal bg-amber-50 px-2 py-0.5 rounded border border-amber-200">勾选即生效 · 建议保留 JSON 输出指令</span>
                         </label>
                         <div class="bg-gray-50 border border-gray-200 rounded-lg p-3.5 shadow-inner">
@@ -253,7 +291,8 @@
                         </div>
                     </div>
 
-                    <div class="bg-gray-50 border border-gray-200 rounded-lg p-3.5 shadow-inner">
+                    <!-- ⚡ API 引擎设置 -->
+                    <div v-show="activeSection === 'api'" class="bg-gray-50 border border-gray-200 rounded-lg p-3.5 shadow-inner">
                         <div class="flex items-center justify-between mb-2.5">
                             <span class="text-xs font-bold text-gray-700 flex items-center gap-1.5">
                                 ⚡ API 引擎设置 <span class="text-[10px] font-normal text-gray-500">(打标与测卡对话实时同步)</span>
@@ -274,7 +313,7 @@
                             </div>
                         </div>
                         <div>
-                            <label class="block text-[11px] text-gray-600 mb-1 flex justify-between items-center">
+                            <label class="text-[11px] text-gray-600 mb-1 flex justify-between items-center">
                                 <span>当前选中模型 (Model)</span>
                                 <span v-if="fetchModelStatus" class="text-[10px]" :class="fetchModelStatus.includes('❌') ? 'text-red-500' : 'text-emerald-600'">{{ fetchModelStatus }}</span>
                             </label>
@@ -289,15 +328,8 @@
                             </p>
                         </div>
                     </div>
-
-                    <div v-if="isAITagging || aiTaggingProgress.total > 0" class="p-4 bg-gray-50 border border-gray-200 rounded-lg shadow-inner">
-                        <div class="flex justify-between items-center mb-2 font-bold text-gray-700 text-sm">
-                            <span>{{ aiTaggingProgress.status }}</span>
-                            <span class="text-blue-600">{{ aiTaggingProgress.current }} / {{ aiTaggingProgress.total }}</span>
-                        </div>
-                        <div class="w-full bg-gray-200 rounded-full h-3 overflow-hidden shadow-sm">
-                            <div class="bg-blue-600 h-3 rounded-full transition-all duration-300" :style="{ width: (aiTaggingProgress.current / (aiTaggingProgress.total || 1) * 100) + '%' }"></div>
-                        </div>
+                    <!-- ⚠️ 旧版「底部进度条」已删除：进度条已移到顶部常驻区（见文件开头），
+                         重复渲染会让用户看到两个进度条，且占据右内容区一层高度。 -->
                     </div>
                 </div>
 
@@ -387,11 +419,42 @@ export default {
     },
     // 🏷️ [大分类折叠] 记录被折叠的分类 key（点击分组标题折叠/展开）
     data() {
-        return { collapsedTagGroups: {} };
+        return {
+            collapsedTagGroups: {},
+            // 🧭 左导航当前分区（纯 UI 状态；不涉及任何业务逻辑）
+            activeSection: 'pipeline'
+        };
     },
     methods: {
         toggleTagGroup(key) {
             this.collapsedTagGroups[key] = !this.collapsedTagGroups[key];
+        },
+        // 🧭 左导航分区定义（分组标题 + 条目），模板据此渲染
+        navGroups() {
+            return [
+                {
+                    title: '本次打标',
+                    items: [
+                        { key: 'pipeline', icon: '⚙️', label: '执行管线' },
+                        { key: 'candidates', icon: '🏷️', label: '候选标签池', badge: this.aiCandidateTags.length || '' },
+                        { key: 'extract', icon: '📝', label: 'AI 提取设置' }
+                    ]
+                },
+                {
+                    title: '引擎设置',
+                    items: [
+                        { key: 'vector', icon: '🧠', label: '本地向量', badge: this.useLocalVector ? '开' : '' },
+                        { key: 'api', icon: '⚡', label: 'API 引擎' }
+                    ]
+                },
+                {
+                    title: '提示词',
+                    items: [
+                        { key: 'prompts', icon: '📝', label: '系统提示词库', badge: this.systemPromptPresets.length || '' },
+                        { key: 'jailbreak', icon: '⚠️', label: '强制破限', badge: this.useJailbreak ? '开' : '' }
+                    ]
+                }
+            ];
         }
     }
 };

@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>AI 打标窗口 · 重构原型</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body { font-family: system-ui, "Microsoft YaHei", sans-serif; }
+  .proto-label { position: fixed; top: 8px; left: 8px; z-index: 60; }
+</style>
+</head>
+<body class="bg-zinc-200 min-h-screen">
+
+<div class="proto-label bg-black/80 text-white text-xs px-3 py-1.5 rounded-lg">
+  原型预览 · 切换方案：
+  <button onclick="show('A')" id="btnA" class="px-2 py-0.5 rounded bg-indigo-600">A 分页签</button>
+  <button onclick="show('B')" id="btnB" class="px-2 py-0.5 rounded bg-zinc-600">B 左右两栏</button>
+  <button onclick="show('C')" id="btnC" class="px-2 py-0.5 rounded bg-zinc-600">C 单列+折叠</button>
+</div>
+
+<!-- ═══════════════════ 方案 A：分页签 ═══════════════════ -->
+<div id="protoA" class="pt-14 pb-10">
+  <div class="max-w-5xl mx-auto bg-white rounded-xl shadow-2xl overflow-hidden flex flex-col" style="max-height:88vh">
+
+    <!-- 头部：标题 + 进度常驻 -->
+    <div class="px-5 py-3 bg-gray-900 text-white flex justify-between items-center shrink-0">
+      <h3 class="font-bold text-sm">🤖 AI 智能批量打标 <span class="text-gray-400 font-normal">（已选 42 张）</span></h3>
+      <button class="text-gray-400 hover:text-white text-sm">✕ 关闭</button>
+    </div>
+
+    <!-- 🎯 进度常驻区：打标时在顶部，切任何页签都可见 -->
+    <div class="px-5 py-2.5 bg-blue-50 border-b border-blue-200 shrink-0">
+      <div class="flex justify-between items-center mb-1.5 text-xs">
+        <span class="font-bold text-blue-800">🚀 正在处理：LLM 兜底（第 3 层）</span>
+        <span class="text-blue-600 font-mono">18 / 42</span>
+      </div>
+      <div class="w-full bg-blue-200 rounded-full h-2 overflow-hidden">
+        <div class="bg-blue-600 h-2 rounded-full" style="width:43%"></div>
+      </div>
+      <div class="mt-1 text-[10px] text-blue-700/80">规则 ✓ 命中 12 · 向量 ✓ 命中 5 · LLM 处理中 1</div>
+    </div>
+
+    <!-- 页签栏 -->
+    <div class="px-5 border-b border-gray-200 bg-gray-50 flex gap-1 shrink-0">
+      <button class="px-4 py-2.5 text-xs font-bold border-b-2 border-indigo-600 text-indigo-700">① 本次打标</button>
+      <button class="px-4 py-2.5 text-xs font-bold border-b-2 border-transparent text-gray-500 hover:text-gray-800">② 引擎设置</button>
+      <button class="px-4 py-2.5 text-xs font-bold border-b-2 border-transparent text-gray-500 hover:text-gray-800">③ 提示词与破限</button>
+      <span class="ml-auto self-center text-[10px] text-gray-400">设置项会记住，下次打开直接开始</span>
+    </div>
+
+    <!-- 页签内容 -->
+    <div class="p-5 overflow-y-auto flex-1 space-y-4 text-xs">
+
+      <!-- 页签①：本次打标 -->
+      <div class="bg-indigo-50 p-3 rounded-lg border border-indigo-200">
+        <div class="flex items-center justify-between mb-2 gap-2">
+          <label class="font-bold text-indigo-900">⚙️ 执行管线
+            <span class="text-[10px] font-normal text-indigo-700/70">（① 规则 → ② 向量 → ③ LLM）</span>
+          </label>
+          <button class="px-2 py-0.5 bg-white border border-purple-300 text-purple-700 rounded text-[11px]">📝 管理规则表</button>
+        </div>
+        <div class="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-[11px]">
+          <label class="flex items-center gap-1.5"><input type="checkbox" checked class="w-3.5 h-3.5 accent-indigo-600"><span>① 规则匹配</span><span class="text-gray-400">零成本</span></label>
+          <label class="flex items-center gap-1.5"><input type="checkbox" class="w-3.5 h-3.5 accent-purple-600"><span>② 本地向量</span><span class="text-gray-400">免费离线</span></label>
+          <label class="flex items-center gap-1.5"><input type="checkbox" checked class="w-3.5 h-3.5 accent-blue-600"><span>③ LLM 兜底</span><span class="text-gray-400">消耗 Token</span></label>
+          <span class="ml-auto text-[10px] text-indigo-700/70">规则表：生效 36 / 关闭 2</span>
+        </div>
+        <div class="mt-2 text-[10px] text-indigo-800">本次将执行：<span class="font-mono">①规则 → ③LLM</span>
+          <span class="text-amber-600 ml-2">· ②跳过原因：模型未就绪</span>
+        </div>
+      </div>
+
+      <div class="bg-gray-50 p-3 rounded-lg border border-gray-200">
+        <label class="block font-bold text-gray-700 mb-2">🏷️ 候选标签池 <span class="text-[10px] font-normal text-gray-500">（AI 优先从中挑选）</span></label>
+        <div class="flex flex-wrap gap-2 mb-2 p-2 border border-gray-200 bg-white rounded min-h-[40px]">
+          <span class="px-2 py-1 bg-blue-600/30 text-blue-700 rounded-full">奇幻 ✕</span>
+          <span class="px-2 py-1 bg-blue-600/30 text-blue-700 rounded-full">冒险 ✕</span>
+          <span class="px-2 py-1 bg-blue-600/30 text-blue-700 rounded-full">女性向 ✕</span>
+        </div>
+        <div class="flex gap-2 mb-2">
+          <input type="text" placeholder="手动输入候选标签后回车..." class="flex-1 bg-white border border-gray-300 rounded px-2.5 py-1">
+          <button class="px-3 py-1 bg-blue-600 text-white rounded shrink-0">＋ 添加</button>
+        </div>
+        <div class="text-[11px] text-gray-500 mb-1">💡 快速点击添加系统/常用标签：</div>
+        <div class="max-h-40 overflow-y-auto p-1 border border-gray-200 rounded bg-white">
+          <div class="text-[11px] font-bold text-gray-700 mb-1">▾ 🎭 角色类型 <span class="text-[9px] text-gray-400">(12)</span></div>
+          <div class="flex flex-wrap gap-1.5 mb-2">
+            <span class="px-2 py-0.5 text-[11px] border border-gray-300 rounded-l bg-white text-gray-600">+ 女仆</span>
+            <span class="px-2 py-0.5 text-[11px] border border-gray-300 rounded-l bg-white text-gray-600">+ 骑士</span>
+            <span class="px-2 py-0.5 text-[11px] border border-gray-300 rounded-l bg-white text-gray-600">+ 法师</span>
+            <span class="px-2 py-0.5 text-[11px] border border-gray-300 rounded-l bg-white text-gray-600">+ 精灵</span>
+          </div>
+          <div class="text-[11px] font-bold text-gray-700 mb-1">▾ 🌍 世界观 <span class="text-[9px] text-gray-400">(8)</span></div>
+          <div class="flex flex-wrap gap-1.5">
+            <span class="px-2 py-0.5 text-[11px] border border-gray-300 rounded-l bg-white text-gray-600">+ 中世纪</span>
+            <span class="px-2 py-0.5 text-[11px] border border-gray-300 rounded-l bg-white text-gray-600">+ 赛博朋克</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 底部操作 -->
+    <div class="px-5 py-3 bg-gray-50 border-t border-gray-200 flex justify-end gap-3 shrink-0">
+      <button class="px-5 py-2 bg-white border border-gray-300 rounded-lg text-gray-700">取消</button>
+      <button class="px-5 py-2 bg-blue-600 text-white rounded-lg font-bold shadow-md">🚀 开始智能打标</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════ 方案 B：左右两栏 ═══════════════════ -->
+<div id="protoB" class="pt-14 pb-10 hidden">
+  <div class="max-w-6xl mx-auto bg-white rounded-xl shadow-2xl overflow-hidden flex flex-col" style="max-height:88vh">
+    <div class="px-5 py-3 bg-gray-900 text-white flex justify-between items-center shrink-0">
+      <h3 class="font-bold text-sm">🤖 AI 智能批量打标 <span class="text-gray-400 font-normal">（已选 42 张）</span></h3>
+      <button class="text-gray-400 hover:text-white text-sm">✕ 关闭</button>
+    </div>
+    <div class="px-5 py-2.5 bg-blue-50 border-b border-blue-200 shrink-0">
+      <div class="flex justify-between items-center mb-1.5 text-xs">
+        <span class="font-bold text-blue-800">🚀 正在处理：LLM 兜底（第 3 层）</span><span class="text-blue-600 font-mono">18 / 42</span>
+      </div>
+      <div class="w-full bg-blue-200 rounded-full h-2 overflow-hidden"><div class="bg-blue-600 h-2 rounded-full" style="width:43%"></div></div>
+    </div>
+
+    <div class="grid grid-cols-2 gap-0 flex-1 overflow-hidden">
+      <!-- 左：本次任务 -->
+      <div class="p-4 overflow-y-auto space-y-4 text-xs border-r border-gray-200">
+        <div class="text-xs font-bold text-gray-800 pb-1.5 border-b-2 border-indigo-500">① 本次打标</div>
+        <div class="bg-indigo-50 p-3 rounded-lg border border-indigo-200">
+          <label class="font-bold text-indigo-900 block mb-2">⚙️ 执行管线</label>
+          <div class="space-y-1.5 text-[11px]">
+            <label class="flex items-center gap-1.5"><input type="checkbox" checked class="accent-indigo-600"><span>① 规则匹配</span></label>
+            <label class="flex items-center gap-1.5"><input type="checkbox" class="accent-purple-600"><span>② 本地向量</span></label>
+            <label class="flex items-center gap-1.5"><input type="checkbox" checked class="accent-blue-600"><span>③ LLM 兜底</span></label>
+          </div>
+          <button class="mt-2 w-full px-2 py-1 bg-white border border-purple-300 text-purple-700 rounded text-[11px]">📝 管理规则表</button>
+        </div>
+        <div class="bg-gray-50 p-3 rounded-lg border border-gray-200">
+          <label class="block font-bold text-gray-700 mb-2">🏷️ 候选标签池</label>
+          <div class="flex flex-wrap gap-1.5 mb-2 p-2 border bg-white rounded min-h-[36px]">
+            <span class="px-2 py-1 bg-blue-600/30 text-blue-700 rounded-full text-[11px]">奇幻 ✕</span>
+            <span class="px-2 py-1 bg-blue-600/30 text-blue-700 rounded-full text-[11px]">冒险 ✕</span>
+          </div>
+          <input type="text" placeholder="输入标签后回车..." class="w-full bg-white border rounded px-2 py-1 mb-2">
+          <div class="max-h-40 overflow-y-auto border rounded bg-white p-1">
+            <div class="text-[11px] font-bold text-gray-700">▾ 🎭 角色类型 (12)</div>
+            <div class="flex flex-wrap gap-1 mt-1"><span class="px-2 py-0.5 text-[11px] border rounded bg-white">+ 女仆</span><span class="px-2 py-0.5 text-[11px] border rounded bg-white">+ 骑士</span></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 右：设置（分组） -->
+      <div class="p-4 overflow-y-auto space-y-4 text-xs">
+        <div class="text-xs font-bold text-gray-800 pb-1.5 border-b-2 border-gray-400">② 引擎设置（配一次，长期有效）</div>
+        <div class="bg-gray-50 p-3 rounded-lg border">
+          <label class="flex items-center gap-2 font-bold text-gray-700"><input type="checkbox" class="w-4 h-4 accent-purple-600">🧠 启用本地向量匹配</label>
+          <div class="mt-2 ml-6 space-y-1.5 text-[11px]">
+            <div class="text-gray-500">未下载（约 120MB）<button class="ml-2 px-2 py-0.5 bg-purple-600 text-white rounded text-[11px]">📥 下载模型</button></div>
+            <div class="flex gap-3 text-gray-600">
+              <span>阈值 <input type="range" class="w-20 align-middle accent-purple-600"> 0.35</span>
+              <span>Top-K <input type="number" value="3" class="w-12 border rounded px-1"></span>
+            </div>
+          </div>
+        </div>
+        <div class="bg-gray-50 p-3 rounded-lg border">
+          <div class="font-bold text-gray-700 mb-2">⚡ API 引擎</div>
+          <input type="text" placeholder="API Endpoint" class="w-full border rounded px-2 py-1 mb-1.5">
+          <input type="password" placeholder="API Key" class="w-full border rounded px-2 py-1 mb-1.5">
+          <button class="px-2 py-0.5 bg-indigo-600 text-white rounded text-[11px]">🔄 拉取模型列表</button>
+        </div>
+        <div class="bg-gray-50 p-3 rounded-lg border">
+          <div class="font-bold text-gray-700 mb-2">📝 系统提示词</div>
+          <select class="w-full border rounded px-2 py-1 text-[11px]"><option>默认分析助手（JSON 输出）</option></select>
+        </div>
+        <div class="bg-rose-50 p-3 rounded-lg border border-rose-300">
+          <label class="flex items-center gap-2 font-bold text-rose-600"><input type="checkbox" class="w-4 h-4 accent-rose-600">⚠️ 强制破限</label>
+        </div>
+      </div>
+    </div>
+
+    <div class="px-5 py-3 bg-gray-50 border-t flex justify-end gap-3 shrink-0">
+      <button class="px-5 py-2 bg-white border rounded-lg text-gray-700">取消</button>
+      <button class="px-5 py-2 bg-blue-600 text-white rounded-lg font-bold shadow-md">🚀 开始智能打标</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════ 方案 C：单列 + 折叠设置 ═══════════════════ -->
+<div id="protoC" class="pt-14 pb-10 hidden">
+  <div class="max-w-3xl mx-auto bg-white rounded-xl shadow-2xl overflow-hidden flex flex-col" style="max-height:88vh">
+    <div class="px-5 py-3 bg-gray-900 text-white flex justify-between items-center shrink-0">
+      <h3 class="font-bold text-sm">🤖 AI 智能批量打标 <span class="text-gray-400 font-normal">（已选 42 张）</span></h3>
+      <button class="text-gray-400 hover:text-white text-sm">✕ 关闭</button>
+    </div>
+    <div class="px-5 py-2.5 bg-blue-50 border-b border-blue-200 shrink-0">
+      <div class="flex justify-between items-center mb-1.5 text-xs"><span class="font-bold text-blue-800">🚀 正在处理：LLM 兜底</span><span class="text-blue-600 font-mono">18 / 42</span></div>
+      <div class="w-full bg-blue-200 rounded-full h-2 overflow-hidden"><div class="bg-blue-600 h-2 rounded-full" style="width:43%"></div></div>
+    </div>
+
+    <div class="p-5 overflow-y-auto flex-1 space-y-3 text-xs">
+      <!-- 展开区：本次打标 -->
+      <div class="text-xs font-bold text-gray-800 pb-1 border-b-2 border-indigo-500">本次打标（每次都用）</div>
+      <div class="bg-indigo-50 p-3 rounded-lg border border-indigo-200">
+        <label class="font-bold text-indigo-900 block mb-2">⚙️ 执行管线</label>
+        <div class="flex gap-4 text-[11px]">
+          <label class="flex items-center gap-1.5"><input type="checkbox" checked class="accent-indigo-600">① 规则匹配</label>
+          <label class="flex items-center gap-1.5"><input type="checkbox" class="accent-purple-600">② 本地向量</label>
+          <label class="flex items-center gap-1.5"><input type="checkbox" checked class="accent-blue-600">③ LLM 兜底</label>
+        </div>
+      </div>
+      <div class="bg-gray-50 p-3 rounded-lg border">
+        <label class="block font-bold text-gray-700 mb-2">🏷️ 候选标签池</label>
+        <div class="flex flex-wrap gap-1.5 mb-2 p-2 border bg-white rounded min-h-[36px]">
+          <span class="px-2 py-1 bg-blue-600/30 text-blue-700 rounded-full text-[11px]">奇幻 ✕</span>
+        </div>
+        <input type="text" placeholder="输入标签后回车..." class="w-full border rounded px-2 py-1">
+      </div>
+
+      <!-- 折叠区：设置 -->
+      <div class="text-xs font-bold text-gray-800 pb-1 border-b-2 border-gray-400 mt-2">设置（配一次就够 · 默认折叠）</div>
+      <details class="bg-gray-50 border rounded-lg">
+        <summary class="px-3 py-2.5 cursor-pointer font-bold text-gray-700 hover:bg-gray-100">🧠 本地向量引擎 <span class="text-[10px] font-normal text-gray-500">（未启用）</span></summary>
+        <div class="px-3 pb-3 pt-1 text-[11px] space-y-2">
+          <div class="text-gray-500">未下载（约 120MB）<button class="ml-2 px-2 py-0.5 bg-purple-600 text-white rounded text-[11px]">📥 下载模型</button></div>
+          <div class="flex gap-3">阈值 <input type="range" class="w-24 align-middle accent-purple-600"> 0.35</div>
+        </div>
+      </details>
+      <details class="bg-gray-50 border rounded-lg">
+        <summary class="px-3 py-2.5 cursor-pointer font-bold text-gray-700 hover:bg-gray-100">⚡ API 引擎 <span class="text-[10px] font-normal text-gray-500">（gpt-4o）</span></summary>
+        <div class="px-3 pb-3 pt-1 space-y-1.5">
+          <input type="text" placeholder="API Endpoint" class="w-full border rounded px-2 py-1">
+          <input type="password" placeholder="API Key" class="w-full border rounded px-2 py-1">
+        </div>
+      </details>
+      <details class="bg-gray-50 border rounded-lg">
+        <summary class="px-3 py-2.5 cursor-pointer font-bold text-gray-700 hover:bg-gray-100">📝 系统提示词库 <span class="text-[10px] font-normal text-gray-500">（3 条）</span></summary>
+        <div class="px-3 pb-3 pt-1 text-[11px] text-gray-600">（预设列表 + 编辑区）</div>
+      </details>
+      <details class="bg-rose-50 border border-rose-300 rounded-lg">
+        <summary class="px-3 py-2.5 cursor-pointer font-bold text-rose-600 hover:bg-rose-100">⚠️ 强制破限 (Jailbreak) <span class="text-[10px] font-normal text-rose-500">（已启用）</span></summary>
+        <div class="px-3 pb-3 pt-1"><textarea rows="3" class="w-full border rounded p-2" placeholder="破限咒语..."></textarea></div>
+      </details>
+    </div>
+
+    <div class="px-5 py-3 bg-gray-50 border-t flex justify-end gap-3 shrink-0">
+      <button class="px-5 py-2 bg-white border rounded-lg text-gray-700">取消</button>
+      <button class="px-5 py-2 bg-blue-600 text-white rounded-lg font-bold shadow-md">🚀 开始智能打标</button>
+    </div>
+  </div>
+</div>
+
+<script>
+function show(k) {
+  for (const x of ['A', 'B', 'C']) {
+    document.getElementById('proto' + x).classList.toggle('hidden', x !== k);
+    document.getElementById('btn' + x).className = 'px-2 py-0.5 rounded ' + (x === k ? 'bg-indigo-600' : 'bg-zinc-600');
+  }
+}
+</script>
+</body>
+</html>

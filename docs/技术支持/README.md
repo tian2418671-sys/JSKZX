@@ -46,9 +46,14 @@
 
 ### 压测与容量
 
+> 🚫 **测试数据口径铁律**（见 [`AI交接指导.md`](../../AI交接指导.md) 铁律 9）：
+> **读操作**（扫描 / 搜索 / 索引 / 渲染 / 统计）必须跑**真实库**；**写操作**（改标签 / 删卡 / 保存 / 移动）用**隔离库**。
+> **禁止**用假卡 / 空库 / 小样本替代真实库「证明功能正常」—— 失败只在真库才暴露（DF-18 / PK-19 / DF-17 都是教训）。
+> 真实库：`E:\AI\酒馆工具\角色卡`（89 张）/ `I:\03\角色色卡`（11,849 张）/ `H:\01\全局世界书`（41 本）。
+
 | 脚本 | 用途 |
 |---|---|
-| `capacity-check.ps1` | **一键压测**：自动挑最大库 → robocopy 造副本 → 写隔离 profile → 启 Vite+Electron → 轮询采样 → 汇总。`-Copies N` 造副本、`-ReplicaDir` 复用已有副本（⚠️ 不能写成 `-Replica`）、`-Keep -Hold` 保留现场 |
+| `capacity-check.ps1` | **一键压测**：自动挑最大库 → robocopy 造副本 → 写隔离 profile → 启 Vite+Electron → 轮询采样 → 汇总。`-Copies N` 造副本、`-ReplicaDir` 复用已有副本（⚠️ 不能写成 `-Replica`）、`-Keep -Hold` 保留现场。**副本是真实库的逐字节拷贝**（保留真实规模，非缩水样本） |
 | `library-dup-search-refresh.mjs` | 搜索→刷新→未等防抖→清空→连点 6 次，逐段查「库层 + 列表层」重复并记录堆占用 |
 | `library-dup-refresh10.mjs` | 大库「刷新 ×10」重复卡复现（打用户截图里的 `(478)` 中间态那条路径） |
 | `library-dup-timeline.mjs` | 加载**过程中**高频轮询，抓库长度时间线与每步 path 重复情况 |
@@ -68,6 +73,9 @@
 | `_probe-regex-ui.mjs` | 正则/状态栏增删 UI 端到端（含原生确认框应答） |
 | `_probe-wb-scan-progress.mjs` | **T2 真进度条**端到端：真实目录 + 真实 IPC，断言单次 `wb:scan` 期间收到多条 `wb:scan-progress`（旧实现 0 条）、`total` 准确、`done` 单调不减、终态 `done===total`、带 `current`、窗口不白屏。用法：`$env:CDP_PORT=9360; $env:SCAN_DIR="<目录>"; node scripts/_probe-wb-scan-progress.mjs` |
 | `_probe-wb-sidebar-crash.mjs` | **AR-40**端到端：点「🌍 世界书库」/ 反复切模式 → 断言侧栏 `<aside>` **未被卸载**、无 `_ctx.* is not a function` 渲染期错误。用法：`$env:CDP_PORT=9365; node scripts/_probe-wb-sidebar-crash.mjs`（需 dev 模式实例） |
+| `_probe-aitag-nav.mjs` | **AI 打标窗口布局重构（静态结构）**：12 条断言 —— 左导航三组七分区齐全、逐分区切换后特征控件可见（判据用 `offsetParent` 而非 `innerText`，后者会误判隐藏分区）、「管理规则表」入口去重、三层开关 / API 字段 / 破限区未丢、无渲染错误。用法：`$env:CDP_PORT=9375; node scripts/_probe-aitag-nav.mjs` |
+| `_probe-aitag-hot.mjs` | **AI 打标窗口动态行为热测**：30 条断言 —— 徽标联动、跨分区状态保持、分区互斥、进度条位置、管线全关保护、取消 / ✕ / 开合循环 ×5、窄窗 900×620、规则弹窗、**副作用校验（不得误开无关弹窗）**。⚠️ 实例须加 `--disable-renderer-backgrounding --disable-backgrounding-occluded-windows --disable-background-timer-throttling` 启动，否则窗口被遮挡时 rAF 被节流 → Vue 过渡卡住 → 假失败（详见文件头注） |
+| `_probe-aitag-run.mjs` | **AI 打标真实 API 端到端**：真实入口 + 真实 UI 按钮启动，校验打标中「取消 / ✕ 关闭」被禁用、进度推进、逐卡日志有结论、无渲染错误。🚫 **会真实写卡** → 只能跑在隔离库副本上（探针内含真实库路径检测，命中即退出码 2）。用法：`$env:CDP_PORT=9375; $env:TAG_COUNT=2; node scripts/_probe-aitag-run.mjs` |
 
 ### 离线探针（不需起应用）
 

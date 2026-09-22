@@ -49,6 +49,29 @@ node scripts/release-check.mjs                   # 语法 + 单测 + 构建 + �
 6. 文档分工不得越界：`RELEASE_NOTES.md` 是**对外**的（只写用户能感知的变化），`CHANGELOG.md` 与 `docs/**` 是**内部**的。详见 `docs/发布/内部信息.md` 与 `docs/发布/用户可看信息.md`。
 7. 涉及**物理路径会变的操作**（移动分组 / 重命名 / 换卡图）必须同步迁移**所有**按 path 派生的键（会话、变量树、覆盖层配置），否则用户看到的是「数据凭空消失」。
 8. 动工前先扫一眼 `docs/bugs/` 对应领域的历史缺陷 —— 很多坑会**重复踩**（尤其 Vue 响应式、世界书字段口径、打包发布）。
+9. 🚫 **测试一律上真实库，禁止「隔离 / 模拟」糊弄** —— 分读写两档：
+   - **读操作**（扫描 / 搜索 / 索引 / 渲染 / 统计 / 解析）→ **必须**跑真实库；
+   - **写操作**（改标签 / 删卡 / 保存 / 移动 / 重命名）→ 仍用隔离库，防误删真数据。
+   - **禁止**用造的假卡 / 空库 / 小样本替代真实库来「证明功能正常」——
+     历史多次教训（DF-18 大库闸门、PK-19 索引规模、DF-17 词条字段口径）都是**只在真库才暴露**；
+     假数据会让「测试全绿但用户一用就坏」变成常态。
+   - **配置仍隔离**（`--user-data-dir=%TEMP%\xxx`）—— 只隔离配置/缓存，**不隔离卡库**，
+     避免污染用户的收藏夹 / 分组 / 标签。绝不碰 `%APPDATA%\sillytavern-card-manager`。
+10. 🧩 **扩展缺了自己装，不许降级糊弄** —— 需要某扩展能力（代码检查 / 文档导出 / 测试 / 预览 / 语言服务 / API 测试）
+    而**本机没装、装不全、或换了台机器**时，**AI 自行下载安装后再用它把任务做完**：
+    查已装 `code --list-extensions --show-versions` → 安装 `code --install-extension <publisher.id>`
+    （更新须带 `@<版本>`）→ 装完新开终端，需界面命令 / 语言服务生效时提示重载窗口。
+    **不得**因「本机没装」就跳过检查 / 手工糊弄 / 声称做不到；装不上时走纯 CLI 等价通道（如 `npx --yes <包名>`）兜底并说明原因。
+    细则见用户级指令 `%APPDATA%\Code\User\prompts\instructions\ai-extension-workflow.instructions.md`。
+
+> 📌 **真实库清单**（本机）：
+>
+> | 库 | 路径 | 规模 |
+> |---|---|---|
+> | 角色卡（日常） | `E:\AI\酒馆工具\角色卡` | 89 张 |
+> | 角色卡（压测大库） | `I:\03\角色色卡` | 11,849 张 |
+> | 世界书 | `H:\01\全局世界书` | 41 本（含 6 本 ≥6MB） |
+> | 预设 | `H:\01` | 含 3 万+ 深层子目录 |
 
 ---
 
@@ -171,7 +194,8 @@ npm run build:web                              # 构建 web/
 node --check <file>                            # 语法检查
 ```
 
-- 大库端到端调试：`npx vite --port 5173` + `$env:VITE_DEV_SERVER_URL='http://localhost:5173'` + `electron . --remote-debugging-port=9338 --user-data-dir=<临时目录>`（**必须用隔离 profile**，绝不碰真实配置）。
+- 大库端到端调试：`npx vite --port 5173` + `$env:VITE_DEV_SERVER_URL='http://localhost:5173'` + `electron . --remote-debugging-port=9338 --user-data-dir=<临时目录>`（**配置用隔离 profile**，绝不碰 `%APPDATA%\sillytavern-card-manager`；
+  但**卡库用真实库** —— 见铁律 9：读操作必须上真库，写操作用隔离库）。
 - 生产模式 CDP：`electron . --remote-debugging-port=9333`（走 `app://index.html` + `web/` 产物，无 Vite）。
 - 探针脚本见 `docs/技术支持/README.md`（`_cdp-eval.mjs` / `_cdp-mem.mjs` / `_heap-audit.mjs` / `measure-startup.mjs` / `capacity-check.ps1`）。
 

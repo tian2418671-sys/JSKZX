@@ -5,6 +5,54 @@
 
 ---
 
+## 🩹 未发布 · AI 打标窗口布局重构（2026-09-22）
+
+> 规格：[`docs/规格与计划/AI打标窗口-UI重构-实现规格.md`](docs/规格与计划/AI打标窗口-UI重构-实现规格.md)
+> ｜ 后续方案（待拍板）：[`AI打标-提示词分角色与结构化输出方案.md`](docs/规格与计划/AI打标-提示词分角色与结构化输出方案.md)
+
+### ✨ 用户可感知的变化
+
+- **AI 打标窗口不再「挤成一根长条」**：窗口加宽，左侧多出**分区导航**（本次打标 / 引擎设置 / 提示词 三组共 7 项），
+  点一下直达目标设置，不用再滚半天
+- **打标进度条挪到窗口顶部**：以前进度条在最底部，打标时必须滚到底才能看进度；现在开窗即在顶部常驻
+- **「📝 管理规则表」不再出现两遍**：以前同一条入口在两处各有一个，现在只保留一处
+- **强制破限独立成区**：以前混在「AI 打标规则设置」里，现在单独一页，且导航上直接标「开 / 关」
+- **候选标签池 / 系统提示词 / 本地向量 / 强制破限 的导航条目带实时徽标**（数量或开关状态）
+
+### 🧩 实现要点（内部）
+
+- `js/components/AITagModal.vue`：外框 `max-w-2xl` → `max-w-5xl`；主体改 `flex`（左导航 `w-52` + 右内容区 `overflow-y-auto`）；
+  新增 `data.activeSection`（默认 `pipeline`）与 `methods.navGroups()`（返回 `[{title, items:[{key,icon,label,badge}]}]`）；
+  7 个功能块逐个加 `v-show="activeSection === '<key>'"`（保留 DOM，切换不丢状态）
+- 顶部进度条区由原底部位置搬移，`v-if` 条件保持与旧版一致（`isAITagging || aiTaggingProgress.total > 0`）——
+  **未改动任何 props / emits / 业务逻辑**
+- 布局对照项目既有范式：`TagCategoryModal`（左导航）+ `AutoGroupModal`（`max-w-5xl`）
+- 交互式原型（三布局可切换）：`docs/reference/aitag-modal-prototype.html`
+
+### 📐 流程铁律修订（内部）
+
+- 新增铁律「**测试一律上真实库**」（读操作跑真实库 / 写操作用隔离库，配置仍隔离）——
+  同步到 `START-HERE.md`、`AI交接指导.md`、`AGENTS.md`、`.github/copilot-instructions.md` 与
+  `docs/发布/一条龙-发布流程.md`、`docs/技术支持/README.md`
+- 新增铁律「**扩展缺了自己装**」（需要某扩展能力而本机未装 / 装不全 / 换机器时，自行下载安装后再用，
+  不得因缺扩展跳过检查或降级糊弄）—— 同上四处入口 + 用户级指令 `ai-extension-workflow.instructions.md`
+
+### 🔬 验证
+
+- `npm test` **471 / 471 通过**（41 个测试文件）；`npm run build:web` 干净；生产启动冒烟无 `[Vue 错误]`、无 `crash.log`
+- 新增 3 个 CDP 探针（均已登记 `docs/技术支持/README.md`）：
+  - `scripts/_probe-aitag-nav.mjs` —— 静态结构 12 条（分区齐全 / 控件未丢 / 入口去重）
+  - `scripts/_probe-aitag-hot.mjs` —— 动态行为 30 条（徽标联动 / 状态保持 / 分区互斥 / 进度条位置 /
+    管线全关保护 / 开合循环 ×5 / 窄窗 900×620 / 规则弹窗 / 副作用校验），在真实库 76 张上 **30/30**
+  - `scripts/_probe-aitag-run.mjs` —— 真实 API 打标端到端（隔离库 5 张真实卡副本）：
+    规则命中 1 张 + LLM 4 张，标签**已落盘**（`data.tags`）；探针内含真实库路径防呆（命中即退出码 2）
+- 控件清单前后比对（HEAD vs 工作区）：`v-model` / `@click` / `@change` / `@input` / `placeholder` **零丢失**
+- 测试踩坑记录（防再犯）：窗口被遮挡时 Chromium 节流 rAF → Vue 过渡卡在
+  `fade-leave-from + fade-leave-active`（缺 `fade-leave-to`），表现为「弹窗关不掉」的**假失败**；
+  测试实例需加 `--disable-renderer-backgrounding --disable-backgrounding-occluded-windows --disable-background-timer-throttling`
+
+---
+
 ## 🩹 未发布 · 查重 / 扫描 / 检索全链路修复（Phase 1 + Phase 2 + Phase 3，2026-09-21）
 
 > 规格：[`docs/规格与计划/查重扫描与检索-最终方案.md`](docs/规格与计划/查重扫描与检索-最终方案.md)
