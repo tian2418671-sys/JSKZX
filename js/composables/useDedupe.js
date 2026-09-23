@@ -6,6 +6,7 @@
 import { ref, triggerRef } from 'vue';
 import { alignEntryLists, summarizeAlignment, normalizeEntries } from '../utils/entryAlign.js';
 import { diffContentForDisplay } from '../utils/textDiff.js';
+import { classifySimilarity } from '../utils/similarityType.js';
 
 export function useDedupe({
     library, worldbooks, activeWorldbook, cardData,
@@ -1451,7 +1452,20 @@ export function useDedupe({
     // ═══════════════════════════════════════════════════════════════
     const SIMHASH_N = 4;          // char 4-gram（S0.5 定稿）
     const SIMHASH_STEP = 4;       // 特征采样步长（S3' 优化实测）
-    const SIMHASH_THRESHOLD = 19; // 汉明距离阈值（S0.5 实验：正 max 8 / 负 min 31）
+    // 🛑🛑 PK-29（2026-09-23 用户实测报出「两完全不相似的世界书进行对比查重」被判重复）：
+    //    阈值 **19 → 16**。原 19 的依据（S0.5：正 max 8 / 负 min 31）是在**合成样本**上测的，
+    //    而**真实库无关对距离低至 17** → 直接落进 19 内。真实库 32 本实测：18 对候选中
+    //    **10 对纯误判**（最严重者距离 19、真实 4-gram Jaccard 仅 **0.1%**）。
+    //    以真实 Jaccard 为真值的阈值扫描：**T ≤ 16 零误报零漏报**，T=19 误报 10 对。
+    //    ⚠️ 与 AR-48 的 `NAME_ONLY_MAX_DIST = 24` **不是同一口径**，勿混用：
+    //      那是「**同名**卡」样本（同源 p50=0 / 无关 p50=31，间隙极大）；
+    //      此处是「**全库随机对**」（无关对可低至 17，间隙小得多）。
+    const SIMHASH_THRESHOLD = 16;
+    // 🛡️ PK-29 复核闸门：simhash 是**采样**近似（step=4），单靠它会把无关书判近。
+    //    故预筛通过后，再用 **MinHash（完整 4-gram 集合语义）** 复核真实内容相似度。
+    //    ⚠️ 这个复核同时解决「**展示值不可信**」：simhash 距离换算的 `1 - d/64` 有误导性
+    //      （d=19 → 显示 70%，而真实内容重叠仅 0.1%）。展示一律改用 MinHash 估计值。
+    const CONTENT_SIMILARITY_THRESHOLD = 0.85;
 
     /**
      * 计算 64 位 simhash（**number 双 32 位**，返回 `[lo, hi]`）。
@@ -1491,6 +1505,19 @@ export function useDedupe({
     };
 
     // 4) 确定性 MinHash 哈希函数族（固定种子，同一文本签名稳定）
+    // 🛑🛑 PK-30（2026-09-23 排查 PK-29 时发现）：原实现 `h = (h * 31 + c) >>> 0` **完全退化**。
+    //    对**等长**输入（本项目的 4-gram **恒为 4 字符**），seed 只贡献一个**线性偏移**：
+    //        h = seed*31^n + c0*31^(n-1) + ... + c(n-1)
+    //    ⇒ **不同 seed 不改变 shingle 之间的相对顺序** ⇒ 96 个「独立」哈希函数实际只有 **1 个**。
+    //    实测（300 个等长 shingle × 96 seed）：
+    //        · 「最小值落在哪个 shingle」仅 **2 种**取值（独立哈希期望 ≈ 96）
+    //        · 被选中最多者 **95 次**（即 95/96 个 seed 选出同一个 shingle）
+    //        · 哈希函数两两**排序一致率 100.0%**（独立哈希期望 ≈ 50%）
+    //    ⇒ 相似度估计严重失真：真实 4-gram Jaccard **0.2%** 的两本书，估计值 **68.8%**
+    //      （误差 68.5%，而 96 维理论标准误仅 ≈ 10.2%）。
+    //    ✅ 修法：**FNV-1a 异或 + 雪崩混合**（`Math.imul(h ^ c, ...)` + 三次位移异或与奇数乘法）
+    //      → 修正后实测 argmin 79/300、排序一致率 50.1%（符合独立哈希）。
+    //    ⚠️ 签名口径已变更 ⇒ 任何落盘的 MinHash 缓存必须同步升版本号（当前无落盘，仅内存）。
     const MINHASH_HASHES = 96;
     const LSH_BANDS = 8;
     const LSH_ROWS = MINHASH_HASHES / LSH_BANDS; // 12
@@ -1503,10 +1530,20 @@ export function useDedupe({
         }
         return seeds;
     })();
+    /**
+     * 🧬 确定性哈希（**必须对不同 seed 产生独立的排列** —— PK-30）。
+     * ⚠️ 不要退回 `h * 31 + c`：那在「定长输入 + 多 seed」下会结构性退化。
+     */
     const hashString = (str, seed) => {
         let h = seed >>> 0;
-        for (let i = 0; i < str.length; i++) h = (h * 31 + str.charCodeAt(i)) >>> 0;
-        return h;
+        for (let i = 0; i < str.length; i++) {
+            h = Math.imul(h ^ str.charCodeAt(i), 0x01000193) >>> 0;   // FNV-1a（异或 → 乘）
+        }
+        // 雪崩混合（murmur3 finalizer 变体）：让相邻输入与不同 seed 充分扩散
+        h ^= h >>> 16; h = Math.imul(h, 0x7feb352d) >>> 0;
+        h ^= h >>> 15; h = Math.imul(h, 0x846ca68b) >>> 0;
+        h ^= h >>> 16;
+        return h >>> 0;
     };
 
     // 5) MinHash 签名（每 shingle 求 96 个哈希的最小值）
@@ -1540,6 +1577,37 @@ export function useDedupe({
         const parent = Array.from({ length: n }, (_, i) => i);
         const find = (x) => { while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; };
         const union = (a, b) => { const ra = find(a), rb = find(b); if (ra !== rb) parent[rb] = ra; };
+        return { find, union };
+    };
+
+    // 8b) 🛡️ **带闸门 + 簇心校验**的并查集（PK-29，专供世界书内容查重）
+    //    为什么必须要有它（用户实测报出「两完全不相似的世界书被判重复」）：
+    //      · **闸门**：`union` 只在 `gate(a,b)` 为真时合并 —— 把「预筛」与「复核」分离，
+    //        使 simhash 只当**候选预筛**（快），真正定夺交给 MinHash（准）。
+    //      · **簇心校验**：朴素并查集只要「**每对**合法」就合并 ⇒
+    //        当 A~B ≤ T、B~C ≤ T 但 **A~C ≫ T** 时，仍会把 A、C 串进同一组
+    //        （实测：`鬼物` 与主项距离 **29**，却因共享中间节点被聚成 6 本一组，
+    //        而弹窗按钮是「清理其余」⇒ **一键误删**）。
+    //        合并前要求双方**都与对方簇心**通过闸门，从机制上杜绝链式误聚。
+    //    ⚠️ 结果依赖遍历顺序（簇心动态选举）—— 这是刻意的：
+    //      簇心始终是「当前组内最完整的一本」，符合「以完整版为基准」的产品语义。
+    //    @param {(i:number,j:number)=>boolean} gate 判定 i、j 是否**真同源**
+    //    @param {number[]} [weight] 簇心选举权重（用正文长度：更长者更可能是完整版）
+    const unionFindGated = (n, gate, weight) => {
+        const parent = Array.from({ length: n }, (_, i) => i);
+        const rep = Array.from({ length: n }, (_, i) => i);   // 各簇的簇心
+        const find = (x) => { while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; };
+        const union = (a, b) => {
+            const ra = find(a), rb = find(b);
+            if (ra === rb) return false;
+            // ★ 簇心校验：a、b 必须**都与对方簇心**通过闸门（而不只是彼此通过）
+            if (!gate(rep[ra], b) || !gate(rep[rb], a)) return false;
+            const wA = weight ? (weight[rep[ra]] || 0) : 0;
+            const wB = weight ? (weight[rep[rb]] || 0) : 0;
+            parent[rb] = ra;
+            rep[ra] = wA >= wB ? rep[ra] : rep[rb];
+            return true;
+        };
         return { find, union };
     };
 
@@ -1626,11 +1694,20 @@ export function useDedupe({
                             if (useL1b && Array.isArray(item.simhash) && item.simhash.length === 2) {
                                 // ⚠️ `textLen` 用于「内容最长者排最前」的展示排序；
                                 //    无正文时用「词条数」近似（不读正文的代价，仅影响展示顺序）
+                                // 🛑 PK-29：此路径**拿不到 MinHash**（无正文）→ 复核闸门降级为「仅 simhash」。
+                                //    故条目上标 `_mhMissing`，让后续 log 能如实告知「本本轮复核覆盖率」。
                                 return { sig: item.simhash, textLen: wbCountOf(item) || 0, fromL1b: true };
                             }
                             const text = normalizeText(await extractContentText(item));
                             // ★ 关键：**当场算签名**，不让文本进入结果（否则全部常驻）
-                            return text.length < 20 ? null : { sig: computeSimhash(text), textLen: text.length };
+                            // 🛡️ PK-29：**同时算 MinHash**（完整 4-gram 集合语义）——
+                            //    它只占 96 个 int/本，但能**复核** simhash 的采样近似误差。
+                            //    ⚠️ 必须在丢弃文本**之前**算（文本一丢就再也算不出来）。
+                            return text.length < 20 ? null : {
+                                sig: computeSimhash(text),
+                                textLen: text.length,
+                                mhSig: computeMinHash(getShingles(text))
+                            };
                         }, {
                             concurrency: 1,
                             onProgress: (doneN, totalN) => {
@@ -1645,7 +1722,7 @@ export function useDedupe({
                             }
                         }).then(({ results }) => {
                             results.forEach((r, idx) => {
-                                if (r) valid.push({ item: items[idx], idx, sig: r.sig, textLen: r.textLen });
+                                if (r) valid.push({ item: items[idx], idx, sig: r.sig, textLen: r.textLen, _mhSig: r.mhSig || null });
                             });
                         });
                     } else {
@@ -1672,7 +1749,11 @@ export function useDedupe({
                                 total: items.length,
                                 percent: 50 + ((idx + 1) / items.length) * 50
                             });
-                            if (text.length >= 20) valid.push({ item, idx, sig: computeSimhash(text), textLen: text.length });
+                            // 🛡️ PK-29：同样**同时算 MinHash**（丢弃文本前）
+                            if (text.length >= 20) valid.push({
+                                item, idx, sig: computeSimhash(text), textLen: text.length,
+                                _mhSig: computeMinHash(getShingles(text))
+                            });
                         }
                         if (items.length) triggerRef(worldbooks);
                     }
@@ -1765,10 +1846,29 @@ export function useDedupe({
             //    这是 simhash 的标准用法（位差异 = 内容相似度）；阈值 T 由 S0.5 实验定（正 max 8 / 负 min 31）。
             //    ⚠️ **不能再用 `estimateSimilarity`** —— 那是 MinHash 的「相同分量比例」，
             //       对 `[lo,hi]` 位向量无意义（实测会把同源对的相似度算成 0 → 全部漏报）。
-            const THRESHOLD = 0.85;
-            const uf = unionFind(n);
-            const pairStats = { total: 0, candidates: 0 };
+            const pairStats = { total: 0, candidates: 0, rejected: 0 };
+            let uf;
             if (useSimhash) {
+                // 🛡️ PK-29：simhash 仅作**候选预筛**；真同源判定由 **MinHash 复核**把关。
+                //    ⚠️ 世界书分支此前**只算 simhash、不算 MinHash**（为省内存与时间）——
+                //       但 simhash 是采样近似（step=4），实测会把无关书判近（真实 Jaccard 0.1% 而 d=19）。
+                //       MinHash 只多 96 个 int/本（对比正文数百 MB 可忽略），
+                //       且 `getShingles` 只需**归一化文本**（本分支已持有，无额外读盘）。
+                //    ⇒ 复核闸门：预筛命中 **且** MinHash 估计相似度 ≥ 0.85 才算真同源。
+                //       同时把 MinHash 结果挂回条目，供展示真实相似度（不再用误导性的 `1 - d/64`）。
+                // ⚠️⚠️ **绝不能给缺 MinHash 的条目「补算空签名」**（实测隐患）：
+                //    无正文时 `getShingles('')` 得到**空集合** → `computeMinHash` 返回全 `0x7fffffff`
+                //    → 任意两个「空签名」的 `estimateSimilarity` = **1.0（恒等）** ⇒ **闸门恒真、完全失效**。
+                //    故：**缺 MinHash 的条目（L1b 快路径）保持 `null`**，闸门对其**跳过复核、只信 simhash**
+                //    （并在日志如实标注覆盖率，不假装复核过）。
+                const mhSigs = valid.map(v => (Array.isArray(v._mhSig) ? v._mhSig : null));
+                const gate = (i, j) => {
+                    if (hammingDistance(sigs[i], sigs[j]) > SIMHASH_THRESHOLD) return false;
+                    const a = mhSigs[i], b = mhSigs[j];
+                    if (!a || !b) return true;   // 复核数据缺失 → 降级为「仅 simhash 预筛」
+                    return estimateSimilarity(a, b) >= CONTENT_SIMILARITY_THRESHOLD;
+                };
+                uf = unionFindGated(n, gate, valid.map(v => v.textLen || 0));
                 // 🛑🛑 进度条时序修正（2026-09-23 用户反馈「进度条走完还要等」）：
                 //    **病根**：这里是**纯同步双重循环**（s1000 有 C(1001,2) ≈ 50 万对）——
                 //      期间浏览器**没有机会重绘** → 进度条卡在最后的值不动，用户以为「卡死」，
@@ -1776,17 +1876,20 @@ export function useDedupe({
                 //    ✅ 修法：**每处理一批让出主线程** + **按 a 的进度映射到 90%~99%**
                 //      （90% 留给「读取正文」阶段，99% 留给「构造分组」，100% 由收尾统一给）。
                 const totalPairs = (n * (n - 1)) / 2;
-                let processed = 0;
                 for (let a = 0; a < n; a++) {
                     for (let b = a + 1; b < n; b++) {
                         pairStats.total++;
-                        if (hammingDistance(sigs[a], sigs[b]) <= SIMHASH_THRESHOLD) {
-                            pairStats.candidates++;
-                            uf.union(a, b);
+                        if (hammingDistance(sigs[a], sigs[b]) > SIMHASH_THRESHOLD) continue;
+                        pairStats.candidates++;
+                        // 🛡️ 复核闸门（与 `gate` 同口径，此处内联以便统计被拦下的误判数）
+                        const ma = mhSigs[a], mb = mhSigs[b];
+                        if (ma && mb && estimateSimilarity(ma, mb) < CONTENT_SIMILARITY_THRESHOLD) {
+                            pairStats.rejected++;   // 🛡️ 被复核拦下的误判（真实内容并不相似）
+                            continue;
                         }
+                        uf.union(a, b);
                     }
                     // 进度：按外层 a 的比例映射到 90%~99%（**只在最后一个 a 才到 99**）
-                    processed += (n - 1 - a);
                     applyDedupeProgress({
                         done: a + 1,
                         total: n,
@@ -1795,9 +1898,18 @@ export function useDedupe({
                     // ⚠️ 让出主线程（每 20 本一次）—— 否则进度条**画面不会更新**
                     if (a % 20 === 19) await new Promise(r => setTimeout(r, 0));
                 }
-                addLog(`🧬 simhash 预筛：${pairStats.total} 对（${totalPairs} 理论值）→ 同组 ${pairStats.candidates} 对`
-                    + `（阈值 T=${SIMHASH_THRESHOLD}；已解 PK-25 的 O(bucket²)）`, 'info');
+                // 🛡️ PK-29：如实报告复核覆盖率 —— **不假装全部复核过**
+                //    （L1b 快路径的书无正文 → 无 MinHash → 只靠 simhash，属已知降级）
+                const mhCovered = mhSigs.filter(Boolean).length;
+                addLog(`🧬 simhash 预筛：${pairStats.total} 对（${totalPairs} 理论值）→ 候选 ${pairStats.candidates} 对`
+                    + ` → 复核拦下 ${pairStats.rejected} 对误判 → 同组 ${pairStats.candidates - pairStats.rejected} 对`
+                    + `（预筛 T=${SIMHASH_THRESHOLD} ｜ 复核 ≥${CONTENT_SIMILARITY_THRESHOLD}，覆盖 ${mhCovered}/${n} 本）`, 'info');
+                if (mhCovered < n) {
+                    addLog(`⚠️ ${n - mhCovered} 本无内容指纹可复核（走了落盘索引快路径）——`
+                        + `这部分仅按 simhash 预筛判定，**可靠性低于复核过的条目**`, 'warning');
+                }
             } else {
+                uf = unionFind(n);
                 // 角色卡 / 预设：保留原 MinHash + LSH 路径（集合语义更合适，且量级小）
                 const buckets = new Map();
                 valid.forEach((_, i) => {
@@ -1827,7 +1939,7 @@ export function useDedupe({
                                 const pairKey = a < b ? `${a}:${b}` : `${b}:${a}`;
                                 if (seenPairs.has(pairKey)) continue;
                                 seenPairs.add(pairKey);
-                                if (estimateSimilarity(sigs[a], sigs[b]) >= THRESHOLD) uf.union(a, b);
+                                if (estimateSimilarity(sigs[a], sigs[b]) >= CONTENT_SIMILARITY_THRESHOLD) uf.union(a, b);
                             }
                         }
                     }
@@ -1885,21 +1997,71 @@ export function useDedupe({
                 list.sort((a, b) => (b.textLen || 0) - (a.textLen || 0));
                 const master = list[0];
                 list.forEach(v => {
-                    // 🧬 S3'：**simhash 路径**用「汉明距离 → 相似度」换算（位向量语义）；
-                    //    角色卡/预设仍用 MinHash 的「相同分量比例」。
-                    //    ⚠️ 两者**语义不同**，混用会把同源对算成 0（实测踩到）。
-                    if (useSimhash) {
-                        const d = hammingDistance(v.sig, master.sig);
-                        v._simPct = v === master ? 100 : Math.max(0, Math.round((1 - d / 64) * 100));
-                        v._hamming = d;
-                    } else {
-                        v._simPct = v === master ? 100 : Math.round(estimateSimilarity(v.sig, master.sig) * 100);
-                    }
+                    // 🛡️🛡️ PK-29 展示口径修正（2026-09-23）：
+                    //    旧实现用 `1 - hamming/64` 换算相似度 —— 那是 **simhash 位差异**，
+                    //    不是内容相似度，实测**严重误导**：`超棒全能情感cot` 与 `鬼物` 距离 19
+                    //    → 显示「70% 相似」，而真实 4-gram Jaccard 仅 **0.1%**（完全无关）。
+                    //    用户据此会以为「确实很像」→ 误删。
+                    //    ✅ 现在：展示 **MinHash 估计的真实 Jaccard**（复核闸门用的就是它，同源可信）。
+                    //    兜底：无 MinHash 签名时（理论不应发生）回落到 simhash 换算，并标注口径。
+                    const simOf = (a, b) => {
+                        const ma = a._mhSig, mb = b._mhSig;
+                        if (ma && mb) return Math.round(estimateSimilarity(ma, mb) * 100);
+                        const d = hammingDistance(a.sig, b.sig);
+                        return Math.max(0, Math.round((1 - d / 64) * 100));
+                    };
+                    v._simPct = v === master ? 100 : simOf(v, master);
+                    v._hamming = hammingDistance(v.sig, master.sig);
+                    v._mhPct = (v._mhSig && master._mhSig) ? Math.round(estimateSimilarity(v._mhSig, master._mhSig) * 100) : null;
                     // ⚠️ 正文可能已被释放（懒加载态）→ 不能再从 `item.data` 取书名，
                     //    回退到 `item.name` / 文件名（世界书的书名本来就常回退为文件名）。
                     //    ⚡ PK-27 / S1'：优先用轻量 `wbName`（秒开后 `data` 为 null）。
                     const d = (v.item.data && (v.item.data.data || v.item.data)) || {};
                     v._name = d.name || v.item.wbName || v.item.name || (v.item.path || '').split(/[\\/]/).pop() || '未命名';
+                });
+
+                // 🏷️ 相似类型判定（2026-09-23 采纳「多维度 + 类型分类」建议，见
+                //    `docs/规格与计划/世界书查重-多维度方案评估.md`）：
+                //    **只产出标签供用户决策，绝不参与「是否同组」的判定** ——
+                //    分组仍由 PK-29 的「simhash 预筛 + MinHash 复核 + 簇心校验」负责，
+                //    避免新逻辑引入新的误删风险。
+                //    📌 数据零额外成本：keys 走已在手的 L1a `keyHashes`（`compareKeyHashes`，
+                //       纯整数双指针、不读盘）；内容走上面刚算的 MinHash 估计；完全相同走 `exactContentHash`。
+                list.forEach(v => {
+                    if (v === master) {
+                        // 基准版自身不标类型；但字段**显式初始化**（不留 undefined），
+                        // 避免模板里出现 `undefined` 判断分支（实测踩到：显示「触发词重合=undefined%」）
+                        v._simType = null;
+                        v._simLabel = null;
+                        v._simTone = null;
+                        v._simAdvice = null;
+                        v._keysSimPct = null;
+                        v._lenPenalty = null;
+                        v._score = null;
+                        return;
+                    }
+                    // ⚠️ `valid` 条目是 `{item, idx, sig, textLen, _mhSig}` **包装对象** ——
+                    //    `compareKeyHashes` / `isExactSame` 要的是**世界书本身**（带 `keyHashes` /
+                    //    `exactContentHash`），故必须传 `.item`（踩过一次：传包装对象 → 恒 null）。
+                    const masterWb = snapOf(master.item) || master.item;
+                    const vWb = snapOf(v.item) || v.item;
+                    const ks = (typeof compareKeyHashes === 'function')
+                        ? (() => { const r = compareKeyHashes(masterWb, vWb); return r ? r.jaccard : null; })()
+                        : null;
+                    const cs = (v._mhSig && master._mhSig)
+                        ? estimateSimilarity(v._mhSig, master._mhSig) : null;
+                    const exact = (typeof isExactSame === 'function') ? isExactSame(masterWb, vWb) : false;
+                    const cls = classifySimilarity({
+                        keysSim: ks, contentSim: cs, exactSame: exact,
+                        lenA: master.textLen, lenB: v.textLen
+                    });
+                    v._keysSimPct = (ks === null) ? null : Math.round(ks * 100);
+                    v._simType = cls.type;
+                    v._simLabel = cls.label;
+                    v._simTone = cls.tone;
+                    v._simAdvice = cls.advice;
+                    v._lenPenalty = cls.penalty;
+                    v._score = cls.score;
                 });
                 return { name: master._name, kind: 'content', list };
             });

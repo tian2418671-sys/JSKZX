@@ -15,7 +15,10 @@ import assert from 'node:assert/strict';
 // ══════════════════════════════════════════════════════════════
 const SIMHASH_N = 4;
 const SIMHASH_STEP = 4;
-const SIMHASH_THRESHOLD = 19;
+// 🛑 PK-29（2026-09-23）：阈值 19 → 16。
+//    原 19 的依据（S0.5「正 max 8 / 负 min 31」）来自**合成样本**；真实库无关对距离**低至 17**，
+//    实测 18 对候选中 10 对纯误判。以真实 Jaccard 为真值的扫描：T≤16 零误报零漏报。
+const SIMHASH_THRESHOLD = 16;
 
 const normalizeText = (t) => String(t || '')
     .replace(/\s+/g, ' ')
@@ -271,6 +274,40 @@ test('★ P1-1 口径一致：simhash 常量（N / STEP）两侧相同', () => {
     };
     assert.equal(pick(mainSrc, 'SIMHASH_N'), pick(dedupeSrc, 'SIMHASH_N'), 'SIMHASH_N 必须一致');
     assert.equal(pick(mainSrc, 'SIMHASH_STEP'), pick(dedupeSrc, 'SIMHASH_STEP'), 'SIMHASH_STEP 必须一致');
+});
+
+test('★ PK-29 口径一致：本单测的阈值必须与生产源码相同（防测试与实现脱钩）', () => {
+    // ⚠️ 为什么必须有这条：本单测复刻了阈值常量。若只改生产代码、忘改测试，
+    //    测试会「用旧阈值验证新实现」→ 通过但无意义（假绿）。
+    const dedupeSrc = fs.readFileSync(path.join(repoRoot, 'js', 'composables', 'useDedupe.js'), 'utf-8');
+    const m = /const SIMHASH_THRESHOLD\s*=\s*(\d+)/.exec(dedupeSrc);
+    assert.ok(m, 'useDedupe.js 里应能找到 SIMHASH_THRESHOLD');
+    assert.equal(Number(m[1]), SIMHASH_THRESHOLD,
+        `本单测的 SIMHASH_THRESHOLD(${SIMHASH_THRESHOLD}) 必须与生产源码(${m && m[1]})一致`);
+    // 复核闸门阈值也必须在位（PK-29 的第二道闸门）
+    assert.ok(/const CONTENT_SIMILARITY_THRESHOLD\s*=\s*0\.85/.test(dedupeSrc),
+        'useDedupe.js 必须有 CONTENT_SIMILARITY_THRESHOLD = 0.85（MinHash 复核闸门）');
+    assert.ok(/unionFindGated/.test(dedupeSrc),
+        'useDedupe.js 必须有 unionFindGated（簇心校验，防链式误聚）');
+});
+
+test('★ PK-30 口径一致：hashString 不得退回退化的 `h * 31 + c` 实现', () => {
+    // ⚠️ 这是**结构性退化**的防回归：`h*31+c` 对等长 shingle 时 seed 只贡献线性偏移，
+    //    96 个「独立」哈希函数实际只有 1 个（实测排序一致率 100%，真实 0.2% 估成 68.8%）。
+    const dedupeSrc = fs.readFileSync(path.join(repoRoot, 'js', 'composables', 'useDedupe.js'), 'utf-8');
+    const i = dedupeSrc.indexOf('const hashString = (str, seed) => {');
+    assert.ok(i > 0, 'useDedupe.js 里应能找到 hashString');
+    const start = dedupeSrc.indexOf('{', i);
+    let depth = 0, end = -1;
+    for (let k = start; k < dedupeSrc.length; k++) {
+        if (dedupeSrc[k] === '{') depth++;
+        else if (dedupeSrc[k] === '}') { depth--; if (depth === 0) { end = k + 1; break; } }
+    }
+    const body = dedupeSrc.slice(start, end);
+    assert.ok(/Math\.imul\(h \^ /.test(body),
+        'hashString 必须用 FNV-1a 异或（Math.imul(h ^ c, ...)）—— 否则哈希族退化');
+    assert.ok(!/h \* 31 \+/.test(body),
+        '⚠️ hashString 绝不能退回 `h * 31 + c`（对等长 shingle 会结构性退化，见 PK-30）');
 });
 
 test('★ P1-1 口径一致：main.js 的 simhashInputOf 与 useDedupe 的 extractContentText+normalizeText 同口径', () => {

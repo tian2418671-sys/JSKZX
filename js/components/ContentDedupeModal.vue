@@ -42,8 +42,29 @@
 
                             <div>
                                 <div class="text-xs font-bold truncate mb-1" :title="v._name">📄 {{ v._name }}</div>
+                                <!-- 🏷️ 相似类型（2026-09-23 采纳「多维度 + 类型分类」建议）：
+                                     不同类型处理方式完全不同 —— 「触发重复」别删、「设定冲突」需人工裁决。
+                                     旧版只有一个「相似度 %」，用户无法据此判断该怎么做。 -->
+                                <div v-if="v._simLabel"
+                                     class="text-[11px] font-bold mb-1 px-2 py-0.5 rounded border inline-block"
+                                     :class="toneClass(v._simTone)"
+                                     :title="v._simAdvice">
+                                    {{ v._simLabel }}
+                                </div>
                                 <div class="text-[11px] font-mono text-purple-300 mb-1">
-                                    🧬 相似度: {{ v._simPct }}%
+                                    🧬 内容重合: {{ v._simPct }}%
+                                    <span v-if="v._keysSimPct !== null && v._keysSimPct !== undefined" class="text-amber-300/90">
+                                        ｜ 🔑 触发词重合: {{ v._keysSimPct }}%
+                                    </span>
+                                </div>
+                                <!-- 🛡️ PK-29：给出**可验证依据** —— 旧版只显示 simhash 距离换算的
+                                     「相似度」，实测会严重误导（距离 19 → 显示 70%，真实内容重叠仅 0.1%）。
+                                     现在主指标是真实内容重合度，并把指纹距离作为辅助依据一并展示。 -->
+                                <div class="text-[10px] text-zinc-500 font-mono mb-1">
+                                    {{ vIdx === 0 ? '（基准版）' : `🧾 指纹距离 ${v._hamming}${v._lenPenalty !== undefined && v._lenPenalty < 0.99 ? ` ｜ 长度惩罚 ×${v._lenPenalty.toFixed(2)}` : ''}` }}
+                                </div>
+                                <div v-if="v._simAdvice && vIdx !== 0" class="text-[10px] text-zinc-400 mb-1 leading-snug">
+                                    💡 {{ v._simAdvice }}
                                 </div>
                                 <div class="text-[10px] text-zinc-500 font-mono mb-1">
                                     {{ v._sizeKb }} KB
@@ -66,10 +87,17 @@
                                         class="w-full px-2.5 py-1.5 mb-2 bg-zinc-800 hover:bg-zinc-700 text-purple-300 border border-purple-500/30 text-[11px] font-bold rounded shadow transition shrink-0">
                                     🔍 查看内容差异
                                 </button>
+                                <!-- 🛡️ 「设定冲突 / 仅名称相同」时**降级清理按钮**（红边警示 + 文案改「勿清理」）：
+                                     这两类的共同点是「**内容并不可安全删除**」——
+                                     · 设定冲突：两版矛盾，删掉任一侧都可能丢设定 ⇒ 必须人工裁决
+                                     · 仅名称相同：本来就无关，误删等于丢真书
+                                     与 AR-48（同名查重聚错组）的防护同口径。 -->
                                 <button @click="$emit('resolve-group', gIdx, v.item.path)"
-                                        :class="vIdx === 0 ? 'bg-purple-600 hover:bg-purple-500' : 'bg-zinc-700 hover:bg-zinc-600'"
+                                        :class="vIdx === 0 ? 'bg-purple-600 hover:bg-purple-500'
+                                            : (isRisky(v) ? 'bg-rose-900/70 hover:bg-rose-800 border border-rose-500/50' : 'bg-zinc-700 hover:bg-zinc-600')"
                                         class="w-full py-1.5 text-white text-xs font-bold rounded shadow transition">
                                     <span v-if="vIdx === 0">✅ 保留此版，清理其余</span>
+                                    <span v-else-if="isRisky(v)">🚨 请先人工核对（勿直接清理）</span>
                                     <span v-else>⚠️ 保留此版本</span>
                                 </button>
                             </div>
@@ -92,6 +120,25 @@ import DedupeScanProgress from './DedupeScanProgress.vue';
 export default {
     name: 'ContentDedupeModal',
     components: { DedupeScanProgress },
+    methods: {
+        /** 类型标签配色（与 `similarityType.js` 的 tone 对应） */
+        toneClass(tone) {
+            return {
+                emerald: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40',
+                amber: 'bg-amber-500/15 text-amber-300 border-amber-500/40',
+                blue: 'bg-blue-500/15 text-blue-300 border-blue-500/40',
+                rose: 'bg-rose-500/15 text-rose-300 border-rose-500/40',
+                purple: 'bg-purple-500/15 text-purple-300 border-purple-500/40'
+            }[tone] || 'bg-zinc-500/15 text-zinc-300 border-zinc-500/40';
+        },
+        /**
+         * 🛡️ 「高风险」类型：清理按钮需降级警示。
+         * 判据来自 `similarityType.js` 的 `SIM_TYPE`（此处只读 type，避免重复维护标签）。
+         */
+        isRisky(v) {
+            return v && (v._simType === 'conflict' || v._simType === 'different');
+        }
+    },
     props: {
         show: { type: Boolean, default: false },
         groups: { type: Array, default: () => [] },

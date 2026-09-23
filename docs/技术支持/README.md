@@ -42,7 +42,7 @@
 | 位置 | 内容 | 数量 |
 |---|---|---|
 | `scripts/`（根） | **门禁 / 校验**：`check-batch-read-guard.mjs`、`check-doc-links.mjs`、`check.py`、`checkkit.py`、`extract-release-notes.mjs`、`release-check.mjs` —— 被 `npm scripts` 或发版流程直接调用，路径不能变 | 6 |
-| `scripts/probes/` | **探针**（`_probe-*`）：取证、压测、端到端验证 | 71 |
+| `scripts/probes/` | **探针**（`_probe-*`）：取证、压测、端到端验证 | 92 |
 | `scripts/tools/` | **工具**：调试（`_cdp-*` / `_dbg-*` / `_heap-*` / `_heat-*`）、测试（`*-test` / `*-smoke`）、扫描分析（`scan-*` / `audit-*` / `extract-*`）、一次性清洗 | 47 |
 
 > 🛑 **探针纪律**（2026-09-23 立规，见 [`../../AI交接指导.md`](../../AI交接指导.md)）：
@@ -135,6 +135,9 @@
 | `_probe-diff-perf.mjs` | **PK-22 差异弹窗卡顿修复验证**（**10/10**）：DOM 节点数、首屏耗时、分块渲染上限、重开后状态复位。⚠️ **不要用 `requestAnimationFrame` 等「渲染完成」**（后台窗口不触发，实测假耗时 191333ms）；DOM 节点数才是确定性指标 |
 | `_probe-wb-diff-real.mjs` | **世界书「差异着色」真实数据端到端**：断言三种行底色齐备、行内精确高亮、两侧行号列数量相等、无渲染期错误 |
 | `_probe-content-dedupe-lazy.mjs` | 诊断：内容级查重在**懒加载库**上是否失效（PK-20 修复的**副作用排查**） |
+| `_probe-content-dedupe-dissimilar.mjs` | **内容查重「不相似的书被聚成一组」排查**（PK-29 用户实测报出）：输出每组每本与主项的汉明距离 + **组内两两距离矩阵** + 落盘 sig 与复算是否一致。⚠️ 用它复现了「`鬼物` 与主项距离 **29**（阈值 16）却被聚成 6 本一组」。用法：`$env:CDP_PORT=9370; node scripts/probes/_probe-content-dedupe-dissimilar.mjs "<世界书目录>"` |
+| `_probe-dedupe-simtype.mjs` | **相似类型判定端到端**（2026-09-23 采纳「多维度 + 类型分类」建议）：断言每个非基准条目都产出类型标签（完全重复 / 触发重复 / 内容可合并 / 设定冲突 / 高度相似 / 仅名称相同）+ 触发词重合度 + 长度惩罚 + 综合分，并检查覆盖率与渲染期错误。用法：`$env:CDP_PORT=9370; node scripts/probes/_probe-dedupe-simtype.mjs "<世界书目录>"` |
+| `_probe-wb-content-newlines.mjs` | **词条正文换行结构统计**（决定「句级对齐」是否值得做）：单行 / 多行占比、行数分布、单行长度分位。**实测：单行 77%，但长度 >500 字符的仅 1 条 ⇒ 行内 token 级 diff 已覆盖 99.98%，句级对齐收益 ≈ 0**（据此**否决**了 Smith-Waterman 方案） |
 | `_probe-wb-stress-500.mjs` | 热测试 · 世界书导入压力测试（500 本 / ≥4MB） |
 | `_probe-wb-verify3.mjs` | 核实 501 本压测中 3 个「失败项」**是否为真缺陷**（而非探针假设过期）—— 「用户报故障先验证、别盲改」的落地工具 |
 | `_probe-linktest.mjs` | 一次性诊断：`fs.linkSync` 在 D: 同卷内失败的原因（与项目功能无关，保留备查） |
@@ -153,6 +156,32 @@
 | `_probe-wb-lib-audit.mjs` | **磁盘实测**：用与 `main.js` **完全相同**的 `isValidWorldbook` 判据统计压力库真实构成（有效 / 诱饵 / 超大），**以磁盘事实为准** —— 解决「探针预期 501」与「应用实测 537」的口径分歧 |
 | `_probe-wb-scan-diff.mjs` | **对照探针**：应用扫描结果 **vs** 磁盘事实（定位「诱饵被误判为有效」） |
 | `_probe-make-wb-5k.mjs` | **5000 本压力库生成器**（**硬链接，零拷贝**）：造 `s5000`（5401 个 json / 34.8GB，有效 5001 + 诱饵 400）。用法：`node scripts/probes/_probe-make-wb-5k.mjs`（`--clean` 删除） |
+
+### PK-29 / PK-30 取证探针（内容查重误判，2026-09-23）
+
+| 脚本 | 用途 |
+|---|---|
+| `_probe-content-dedupe-offline.mjs` | **离线真值复算**（纯 Node，不依赖应用）：逐字复刻 `extractContentText` + `normalizeText` + `computeSimhash`，输出**分组结果 + 组内两两汉明距离矩阵**。用它拿到 PK-29 的关键证据：`鬼物` 与主项距离 **29**（阈值 16）却被并查集串成一组 |
+| `_probe-simhash-calib.mjs` | **阈值标定复核**：统计真实库「正样本（文件名同源）vs 负样本（不同源）」的汉明距离分布 + 直方图。**实测负样本 min = 17**（S0.5 声称的「负 min 31」在真实库**不成立**）⇒ 直接证伪 T=19 |
+| `_probe-simhash-vs-jaccard.mjs` | **simhash 失真取证**：对每个候选对同时算「汉明距离」与「真实 4-gram Jaccard」。**实测 18 对候选中 10 对真实重叠 < 50%**，最严重者距离 19 但 Jaccard 仅 **0.1%** |
+| `_probe-simhash-sweep.mjs` | **阈值扫描**：(T, 最小长度) 网格 × 误报/漏报。**实测 T ≤ 16 零误报零漏报，T=19 误报 10 对** ⇒ 定 T=16 的依据 |
+| `_probe-content-dedupe-sim.mjs` | **修法算法仿真**（改生产代码**之前**先验证）：对比「① 现状 T=19+朴素并查集 / ② T=16 / ③ +MinHash复核 / ④ +簇心校验」四方案。**实测 ④ 零误报零漏报** |
+| `_probe-simhash-verify-choice.mjs` | **复核手段选型**：对比「真实 Jaccard / MinHash / simhash step=1」三种复核的准确度。**实测 MinHash 复核 TP=8 FP=0 FN=0** ⇒ 选定 MinHash（内存安全：96 int/本） |
+| `_probe-simhash-calib2.mjs` | **距离 ↔ 真实相似度标定**：用「改造真实文本」造出**已知相似度**样本（按比例把 A 的块替换为 B 的），测其距离 + 真实 Jaccard。**实测安全区间为空**（相似度 ≥85% 的样本距离可达 **33**，而无关对最小 **0**）⇒ 验证了「单靠 simhash 无法区分，必须加复核」 |
+| `_probe-wb-content-newlines.mjs` | **词条换行结构统计**（评估「句级对齐」必要性的依据）：真实库 **7424 条词条中 77% 是单行**，但**长度 > 500 字符的仅 1 条** ⇒ 行内 token 级 diff 已覆盖 **99.98%**，句级切分只能改善 1 条（**否决依据**） |
+| `_probe-chain-recall.mjs` | **簇心校验的召回风险验证**（防「修 A 坑引入 B 坑」）：造「A←B←C 同源链（A~C 仅 59%）」与「无关 D」的合成场景，确认簇心校验**不损失召回** |
+| `_probe-content-dedupe-simtype.mjs` | **相似类型判定端到端**（见上文 CDP 段） |
+
+### 角色卡 / 预设查重勘查探针（两份外部方案评估，2026-09-23）
+
+> 依据：`../规格与计划/角色卡与预设查重-方案评估.md`。这 4 个探针产出「采纳 / 修正 / 否决」的全部实测依据。
+
+| 脚本 | 用途 |
+|---|---|
+| `_probe-preset-structure.mjs` | **预设库结构勘查**：类型分布（OpenAI / TextCompletion / Context…）、`prompt_order` 的 **`character_id` 实际取值**、块数分布、`identifier` 频次（识别「默认骨架」块）、采样参数的 null 占比。**实测：真实库仅 5 个 OpenAI 预设；`character_id` 100000 与 100001 **并存**（方案只写 100000、parsecard 常量是 100001，**两者都不完整**）；块数 118~261（方案称「60+」**低估一个数量级**）**。用法：`node scripts/probes/_probe-preset-structure.mjs "H:\01"` |
+| `_probe-preset-struct-power.mjs` | **结构指纹判别力量化**（方案核心假设的验证）：对每对预设算「identifier Jaccard（结构）」 vs 「逐块 content Jaccard（内容）」，并做「剔除 12 个默认骨架块」的**对照实验**。**实测：结构 Jaccard 跨度 96.6 个百分点（3.1%~99.3%）⇒ 判别力充足；`A.U.T.O.预设`↔`万象枢机 2.5`（**文件名完全不同**）结构 **99.3%** / 内容 57% ⇒ 坐实「改名同源」是真实漏洞** |
+| `_probe-card-versions.mjs` | **角色卡版本与字段分布**：V1/V2/V3 分布、载体分布、各字段填充率、V3 新字段出现率、**「当前查重使用的字段 vs 被忽略的字段」字符量对比**。**实测：V1 2.2% / V2 46.7% / V3 48.9%；`character_book` 36/45（80%）**却完全未参与查重**；当前查重**忽略 71.7% 文本**（30,958 用 vs 130,167 忽略）；V3 的 `assets`/`nickname`/`creator_notes_multilingual` 出现率**均为 0** |
+| `_probe-card-chunk-spec.mjs` | **PNG chunk × `spec` 对应关系**（证伪方案的技术前提）：逐 chunk 解析 PNG，输出「chunk 组合 → spec」分布。**实测：V3 数据 21 个在 `chara` chunk、仅 1 个在 `ccv3`** ⇒ 方案「读取时 `ccv3` 优先」与真实库**相反**，若按此实现会**漏掉 21/22 的 V3 卡**；正确判据是解析 `spec`，与 chunk 名无关 |
 
 ### 离线探针（不需起应用）
 
