@@ -204,8 +204,8 @@ npm run build
 ## 📁 目录结构
 
 ```
-├── main.js                 # 主进程：窗口、app:// 协议、全部 IPC（58 通道）、PNG 写入、OTA、崩溃兜底
-├── preload.js              # 预加载：contextBridge 安全暴露 electronAPI（~60 方法）
+├── main.js                 # 主进程：窗口、app:// 协议、全部 IPC（99 通道）、PNG 写入、OTA、崩溃兜底
+├── preload.js              # 预加载：contextBridge 安全暴露 electronAPI（98 方法）
 ├── index.html              # 渲染进程挂载壳（<div id="app"> + 入口脚本）
 ├── package.json            # 项目配置 + electron-builder 打包配置 + publish（GitHub OTA）
 ├── vite.config.mjs         # Vite 构建配置（Vue 完整版别名、Tailwind、Vue DevTools）
@@ -215,20 +215,22 @@ npm run build
 │   └── style.css           # 自定义样式（主题变量、过渡动画等）
 ├── js/
 │   ├── entry.js            # ★ 渲染进程入口：createApp(App) + 全局错误兜底
-│   ├── components/         # ★ 全部 Vue SFC 组件（30 个）
+│   ├── components/         # ★ 全部 Vue SFC 组件（47 个）
 │   │   ├── App.vue         #   根组件：状态/逻辑中枢 + provide/inject 上下文
 │   │   ├── HeaderBar.vue   #   顶部菜单栏 + 紧凑工具栏
 │   │   ├── SidebarPanel.vue#   左侧资源管理器（角色卡/世界书库）+ 拖拽把手
 │   │   ├── EditorPanel.vue #   右侧编辑器（角色卡编辑 + 世界书 IDE + 日志控制台）
 │   │   ├── AITagModal.vue  #   AI 智能批量打标弹窗
 │   │   ├── GraphModal.vue  #   角色宇宙关系图谱（ECharts）
-│   │   ├── … （其余 24 个弹窗/菜单组件：批量标签/查重/Diff/磁盘扫描/快照/更新/世界书系列等）
-│   ├── composables/        # ★ 逻辑组合式函数（14 个：useAITools/useSearch/useGraph/useSnapshots…）
+│   │   ├── … （其余 41 个弹窗/菜单组件：批量标签/查重/Diff/磁盘扫描/快照/更新/世界书系列等）
+│   ├── composables/        # ★ 逻辑组合式函数（41 个：顶层 24 + chat/ 17）
+│   │   ├── useAITools.js / useSearch.js / useGraph.js / useSnapshots.js …
+│   │   └── chat/           #   测卡引擎（17 个：useChatEngine / chatStorage / useChatPresets …）
 │   └── utils/
 │       ├── cardLoader.js   # 卡片读取、数据规范化（V1/V2/V3 兼容）、extractBookEntries 安全提取
 │       ├── pngParser.js    # PNG/WebP tEXt/iTXt 块解析、深度扫描提取 JSON
 │       └── tokenEstimate.js# Token 估算工具（App 与 TextModal 共享）
-├── test/                   # node:test 单元测试（471 用例 / 41 个文件）
+├── test/                   # node:test 单元测试（504 用例 / 44 个文件）
 ├── build/                  # 打包资源（icon.ico、generate-icon.ps1）
 ├── web/                    # Vite 构建产物（gitignore）
 └── dist/                   # electron-builder 打包产物（gitignore）
@@ -245,7 +247,7 @@ npm run build
 │  主进程 main.js                                  │
 │  ├─ app:// 协议（从项目根目录提供页面文件）       │
 │  ├─ local-file:// 协议（展示本地立绘，查询参数传路径）│
-│  ├─ 全部 IPC handler（58 通道：文件/对话框/API/OTA）│
+│  ├─ 全部 IPC handler（99 通道：文件/对话框/API/OTA）│
 │  └─ electron-updater（OTA 检测/下载/静默安装）    │
 └───────────────┬─────────────────────────────────┘
                 │ contextBridge（仅暴露受控方法）
@@ -255,9 +257,9 @@ npm run build
                 │
 ┌───────────────▼─────────────────────────────────┐
 │  渲染进程 js/entry.js（Vue 3 SFC 组件化）          │
-│  App.vue 根组件 + 29 个 SFC 子组件               │
+│  App.vue 根组件 + 46 个 SFC 子组件               │
 │   ├─ HeaderBar / SidebarPanel / EditorPanel      │
-│   ├─ 14 个 composables 承载业务逻辑              │
+│   ├─ 41 个 composables 承载业务逻辑              │
 │  App.vue 通过 provide/inject 共享上下文（ctx）    │
 │  仅能通过 window.electronAPI 访问主进程能力，      │
 │  无法直接触碰 Node.js                             │
@@ -536,7 +538,7 @@ nativeAlert('保存成功', 'info');                   // type 仅支持 none/in
 ### 提交前自查清单
 
 - [ ] `node --check` / `get_errors` 无语法错误
-- [ ] `npm test` 单测全绿（403 用例）
+- [ ] `npm test` 单测全绿（504 用例）
 - [ ] 新增成员已加入 `setup()` 的 `return` 与 `ctx`
 - [ ] IPC 传参已 `JSON.parse(JSON.stringify(...))` 剥离 Proxy
 - [ ] 未引入外部 CDN / 未使用 `prompt`/`confirm`/`alert` / 未对 `cardData` 深层响应式

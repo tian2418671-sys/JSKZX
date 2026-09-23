@@ -94,7 +94,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
     // 物理拷贝卡片到任意自定义卡库目录（TT 酒馆等）
     pushToCustomDir: (paths, targetDir) => ipcRenderer.invoke('library:pushToFolder', paths, targetDir),
     // 🌍 世界书专属通道：扫描目录下的 .json 世界书（返回含 entries 字段的合法世界书列表）
-    scanWorldbooks: (dirPath) => ipcRenderer.invoke('wb:scan', dirPath),
+    //    opts.rescan = true 用于「查重/版本对比前重扫」：跳过新目录指纹验证（目录必须已在白名单内）
+    //    opts.fastListOnly = true ⚡ 秒开：**只 readdir+stat，不读文件内容**（1001 本 43ms vs 读内容 36s）
+    scanWorldbooks: (dirPath, opts) => ipcRenderer.invoke('wb:scan', dirPath, opts),
+    // 🌍 世界书元数据后台补全（秒开阶段 2）：只返回 { path, wbName, entryCount }，**不返回正文**
+    fetchWorldbookMeta: (paths) => ipcRenderer.invoke('wb:meta', paths),
+    onWbMetaProgress: (callback) => {
+        ipcRenderer.removeAllListeners('wb:meta-progress');
+        ipcRenderer.on('wb:meta-progress', (event, data) => callback(data));
+    },
     // 🌍 世界书专属通道：接收扫描进度心跳（T2 真进度条）
     //    ⚠️ 与角色卡 `onScanProgress`（'scan-progress'）是**两条独立通道**：
     //       世界书扫描是单次 IPC 调用，必须在调用内推进度，不能复用角色卡的心跳。

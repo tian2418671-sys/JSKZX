@@ -48,7 +48,7 @@
   2. **标签展开**：短标签先展开为描述句再嵌入 —— `LABEL_TEMPLATE = '这是一个关于{label}的故事'`；
      展开文本**同时作为缓存 hash 输入**（模板变化 → hash 变 → 缓存自动重建，不会误用旧向量）。
 - **实测**：展开后 0.35 命中率 **80%**（强相关），误报基线最高 **0.307** → 0.35 安全。
-- **防再犯**：**语义匹配的阈值必须按"真实文本形态"验证**（长文 vs 短词 的绝对相似度远低于 长文 vs 长文）；改阈值/模板后必须重跑 `scripts/vector-model-test.cjs` 确认命中率与误报基线。
+- **防再犯**：**语义匹配的阈值必须按"真实文本形态"验证**（长文 vs 短词 的绝对相似度远低于 长文 vs 长文）；改阈值/模板后必须重跑 `scripts/tools/vector-model-test.cjs` 确认命中率与误报基线。
 - **来源**：v2.1.0 向量阈值专项（2026-09-01）
 
 ### AI-04 ｜ 🟡 向量模型下载链路三坑（首次使用可能"卡住/失败"）
@@ -97,7 +97,7 @@
   1. **物理清洗上移到函数入口**：开关开启时先于所有分支清空原生 `data.tags`（兼容数组与 V1 字符串形态），堵住 4 条提前 return；用户标签仍由覆盖层随后恢复；
   2. **规则循环改为只定分类**：开关开启时规则命中只更新 `assignedCategory`，不再 push 进 `generatedTags/customTags`；开关关闭时逐条件保持原行为；
   3. 删除兜底分支内重复的清空代码。
-- **验证**：`test/sanitizeImport.test.mjs`（7 用例，直接调生产函数：开关开+全新卡 / localCategoryMap / 覆盖层 / importedConfig / 子文件夹 / V1 字符串 tags / 开关关闭对照）+ `scripts/sanitize-live.mjs` 真实库 CDP 热测试（customTags 空、nativeTags 空、全局池无污染、自动分类照常；对照关闭时行为无回退）。
+- **验证**：`test/sanitizeImport.test.mjs`（7 用例，直接调生产函数：开关开+全新卡 / localCategoryMap / 覆盖层 / importedConfig / 子文件夹 / V1 字符串 tags / 开关关闭对照）+ `scripts/tools/sanitize-live.mjs` 真实库 CDP 热测试（customTags 空、nativeTags 空、全局池无污染、自动分类照常；对照关闭时行为无回退）。
 - **防再犯**：**开关只清一个字段是不够的** —— 要先写清「开关契约」，再 grep 所有会写入标签的路径（规则 / 覆盖层 / 配置导入 / localStorage 分类缓存）。
 - **来源**：v2.2.1 导入清洗专项（2026-09-07）
 
@@ -105,7 +105,7 @@
 - **现象**：`sanitizeImportedTags` 开关「体感无效」—— 历史卡上的外来标签清不掉。
 - **根因**：开关只对新导入生效；**历史卡的外来标签早已被收编进 `customTags` 并经 `persistCardUpdate` 永久写回 PNG**；而 `globalAvailableTags` 无条件聚合 `customTags` → 表现为「开关无效」。
 - **修复**：新增 `useTags.cleanForeignTagsFromLibrary` —— **白名单反向清洗**（系统/常用标签库 + 自动打标规则 + 手动归类 + 自定义关键词库；大小写不敏感、兼容 V1 字符串 tags），`customTags` 与原生 `data.tags` **双清**、确认预览、`runWithProgress` 逐张物理落盘；HeaderBar 设置菜单加入口，并把开关文案澄清为「**仅对新导入生效**」。
-- **验证**：`test/cleanForeignTags.test.mjs` + Electron CDP A/B 端到端（`scripts/sanitize-live.mjs`）。
+- **验证**：`test/cleanForeignTags.test.mjs` + Electron CDP A/B 端到端（`scripts/tools/sanitize-live.mjs`）。
 - **来源**：v2.2.1 历史污染清洗（2026-09-04）
 
 ---
@@ -126,6 +126,6 @@
 
 1. 改**打标流程**后：确认 `isAITagging` 期间不会触发全量索引重建（[AI-01](BUG-AI打标与标签.md#ai-01--ai-打标时渲染进程崩溃每打一张卡就全库重建索引)），并跑 `npm test` + 端到端。
 2. 改**漏斗顺序/短路**：先看 [AI-02] 的协同契约，别把「命中即跳过」写回去。
-3. 改**向量阈值 / 模板 / TopK**：三处（组件 / composable / 主进程 manager）**必须对齐**，并重跑 `scripts/vector-model-test.cjs`。
+3. 改**向量阈值 / 模板 / TopK**：三处（组件 / composable / 主进程 manager）**必须对齐**，并重跑 `scripts/tools/vector-model-test.cjs`。
 4. 改**任何标签开关**：按 [AI-05] 的方法 grep 开关名，逐个验证消费点（显示 / 搜索 / 索引 / 统计 / 导出）。
 5. 改**分类/标签写入路径**：记住「用户主动打标的数据必须三保险」—— 内存 + 覆盖层（`app_config.json`）+ PNG 物理写回（配合 [DF-12](BUG-数据与文件.md) 的落盘加固）。

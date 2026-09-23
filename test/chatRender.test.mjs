@@ -7,8 +7,68 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    segmentMessage, buildHtmlSrcdoc, promoteHtmlSegments, splitPending, htmlNeedsIframe
+    segmentMessage, buildHtmlSrcdoc, promoteHtmlSegments, splitPending, htmlNeedsIframe, loaderUrlOf
 } from '../js/composables/chat/useChatRender.js';
+
+// ═══════════════════════════════════════════════════════════════
+// 🌐 CT-04（2026-09-23）：外链界面（loader）段
+// ───────────────────────────────────────────────────────────────
+// 📖 病根：测卡区此前只处理 `html` 段，卡里用 `$('body').load('URL')` 的界面**完全不显示**，
+//    而卡编辑器预览面板（`useStatusbarPreview.classifyTemplate`）**早就有**该能力 → 两边口径不一致。
+// 📌 口径要求：与 `useStatusbarPreview` 的 loader 分支**一致**（宽松匹配 + 仅 http/https）。
+// ═══════════════════════════════════════════════════════════════
+
+test('CT-04：$("body").load(URL) → loader 段（卡编辑器预览早已支持，测卡区补齐）', () => {
+    const segs = segmentMessage("<body><script>$('body').load('https://example.com/gui.html')</script></body>");
+    assert.equal(segs.length, 1);
+    assert.equal(segs[0].type, 'loader');
+    assert.equal(segs[0].url, 'https://example.com/gui.html');
+});
+
+test('CT-04：<iframe src="URL"> 直链 → loader 段', () => {
+    const segs = segmentMessage('<iframe src="https://example.com/ui" width="100%"></iframe>');
+    assert.equal(segs.length, 1);
+    assert.equal(segs[0].type, 'loader');
+    assert.equal(segs[0].url, 'https://example.com/ui');
+});
+
+test('CT-04：```html 围栏里是 loader → loader 段（不是 html 段）', () => {
+    const segs = segmentMessage('```html\n<body><script>$(\'body\').load("https://a.b/c")\n</script></body>\n```');
+    assert.equal(segs.length, 1);
+    assert.equal(segs[0].type, 'loader');
+    assert.equal(segs[0].url, 'https://a.b/c');
+});
+
+test('CT-04：宽松匹配（单引号 / 空格 / 换行 / 无 <body> 包裹）', () => {
+    assert.equal(loaderUrlOf("$('body').load('https://x.y/z')"), 'https://x.y/z');
+    assert.equal(loaderUrlOf('$(  "body"  )  .  load  (  "https://x.y/z" )'), 'https://x.y/z');
+    assert.equal(loaderUrlOf("$('body')\n  .load('https://x.y/z')"), 'https://x.y/z');
+});
+
+test('CT-04：非 http(s) 协议一律拒绝（防卡内容诱导加载内部协议）', () => {
+    assert.equal(loaderUrlOf("$('body').load('app://evil/index.html')"), null);
+    assert.equal(loaderUrlOf("$('body').load('file:///C:/Windows/System32/calc.exe')"), null);
+    assert.equal(loaderUrlOf('<iframe src="javascript:alert(1)"></iframe>'), null);
+    assert.equal(loaderUrlOf('<iframe src="/relative/path"></iframe>'), null);
+});
+
+test('CT-04：普通 HTML 段不受影响（不被误判为 loader）', () => {
+    const segs = segmentMessage('```html\n<div id="app"><style>.a{}</style></div>\n```');
+    assert.equal(segs[0].type, 'html');
+    assert.equal(segs[0].url, undefined);
+});
+
+test('CT-04：promoteHtmlSegments 也能把「无围栏的 loader 文本」升级为 loader 段', () => {
+    const up = promoteHtmlSegments([{ type: 'text', content: "<script>$('body').load('https://q.w/e')</script>" }]);
+    assert.equal(up[0].type, 'loader');
+    assert.equal(up[0].url, 'https://q.w/e');
+});
+
+test('CT-04：普通纯文本不得被升级（保持 text 段）', () => {
+    const up = promoteHtmlSegments([{ type: 'text', content: '这是一段普通的对话文字，没有任何界面。' }]);
+    assert.equal(up[0].type, 'text');
+    assert.equal(up[0].url, undefined);
+});
 
 test('```html 围栏 → html 段；普通文本 → text 段', () => {
     const segs = segmentMessage('开场文字\n\n```html\n<div id="app"></div>\n<script>1</script>\n```\n\n结尾');

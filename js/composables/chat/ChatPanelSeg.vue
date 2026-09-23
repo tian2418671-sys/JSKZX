@@ -7,6 +7,19 @@
     <div class="seg-wrap" ref="rootEl">
         <template v-for="(seg, si) in segments" :key="si">
             <div v-if="seg.type === 'text'" class="seg-text" v-html="renderText(seg.content)"></div>
+            <!-- 🌐 外链界面（loader）：$('body').load('URL') / <iframe src> —— 直接 src 加载远程 URL
+                 （sandbox 只给 allow-scripts，不带 srcdoc；与卡编辑器预览面板同口径） -->
+            <div v-else-if="seg.type === 'loader'" class="seg-html">
+                <iframe
+                    class="seg-iframe"
+                    :style="{ height: panelHeights[si] ? panelHeights[si] + 'px' : '60px' }"
+                    :src="seg.url"
+                    sandbox="allow-scripts allow-popups"
+                    referrerpolicy="no-referrer"
+                    frameborder="0"
+                    scrolling="no"
+                />
+            </div>
             <div v-else class="seg-html">
                 <iframe
                     v-if="segUrls[si] || !ipcAvailable"

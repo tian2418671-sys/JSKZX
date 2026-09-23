@@ -4,6 +4,10 @@
  * 世界书「状态」（worldbooks/activeWorldbook/wbCategoryMap 等）被配置持久化、保存、词条编辑等多处共享，保留在 App.vue 并注入。
  */
 import { ref, computed, triggerRef } from 'vue';
+// 🛡️ 读前预检（§5.3，2026-09-23 补）：**并发**批量读正文前先按「磁盘 size × 2.2」估算，
+//    超限就拒绝并说明原因 —— 而不是等内核杀进程（PK-27 那次连提示的机会都没有）。
+//    顺序路径（concurrency=1）峰值 ≈ 单本，天然安全，无需预检。
+import { preflightRead } from '../utils/memoryGuard.js';
 
 export function useWorldbooks({
     // 共享状态
@@ -20,11 +24,17 @@ export function useWorldbooks({
     const importUrl = ref('');          // 网址导入输入框绑定
     const isImportingWb = ref(false);   // 导入中 loading 状态
 
-    // 📊 T2 真进度条（2026-09-21）：世界书扫描是**单次 IPC 一次性返回**，渲染层在 await
-    //    期间拿不到任何进度（上百本书时用户只能干等、误以为卡死）。现在主进程按文件分批
-    //    推 `wb:scan-progress`，这里订阅并暴露给 UI。
+    // 📊🔍 世界书扫描进度（2026-09-22 重新定位）
+    //    ⚠️ 语义修正（用户 2026-09-22 指出）：进度条**不属于「浏览库」**，
+    //       而属于「**查重 / 版本对比**」流程（规格 TC-07：「上百本世界书查重：有进度指示 + 当前项名」，
+    //       最终方案 §185：「进度应挂到扫描阶段」）。
+    //    ⇒ 现在只有**查重前重扫**（`rescanWorldbooks`）会把它置为 scanning 并显示在**查重弹窗内**；
+    //      浏览库（`scanWorldbookDir`）**不再显示进度条**，改用日志反馈（避免语义混淆）。
     //    ⚠️ 与角色卡 `diskScanProgress`（走 'scan-progress'）是**两条独立通道**，互不干扰。
     const wbScanProgress = ref({ phase: 'idle', done: 0, total: 0, current: '' });
+    // ⚡ 秒开阶段 2 状态：元数据（书名/词条数）后台补齐中
+    const wbMetaFilling = ref(false);
+    const wbMetaProgress = ref({ done: 0, total: 0 });
     const isWbScanning = computed(() => wbScanProgress.value.phase === 'scanning' || wbScanProgress.value.phase === 'parsing');
     /** 0~100（total 未知时返回 0，避免出现 NaN 或假进度） */
     const wbScanPercent = computed(() => {
@@ -66,40 +76,226 @@ export function useWorldbooks({
         }
     };
 
-    // 📊 词条数显示：已解析用真实 entries.length；超大未解析（heavy）用扫描时统计的 entryCount
+    // 📊 词条数显示：优先用扫描/元数据缓存给的 `entryCount`（⚡ 秒开后 `data` 不再常驻，
+    //    只有用户真正打开某本时才读入正文）；回退到已载入的 `data.entries.length`。
     const wbEntryCount = (wb) => {
         if (!wb) return 0;
-        if (wb.data && Array.isArray(wb.data.entries)) return wb.data.entries.length;
         if (typeof wb.entryCount === 'number') return wb.entryCount;
+        if (wb.data && Array.isArray(wb.data.entries)) return wb.data.entries.length;
         return 0;
     };
 
+    // 📖 书名显示：优先真实书名（扫描阶段 2 / 元数据缓存），回退文件名
+    const wbDisplayName = (wb) => {
+        if (!wb) return '';
+        return wb.wbName || (wb.data && wb.data.name) || wb.name || '';
+    };
+
+    // ═══════════════════════════════════════════════════════════════
+    // 🧠 PK-27 / S1'：L1 摘要消费工具（**查重只读索引，永不重读正文**）
+    // ───────────────────────────────────────────────────────────────
+    // 📖 方案：`docs/规格与计划/世界书大库-加载与查重架构方案.md`（三层模型）
+    // 📊 实测：keys 存 hash 4.44KB/本（原字符串 67.1KB/本，**15.1× 差距**）
+    // ⚠️ 截断口径（v3 评审 P0-2 / §5 #8）：
+    //    `keyHashes` 已**排序**，取前 N 个 = **bottom-k sketch**（MinHash 标准变体）
+    //    ⇒ 截断后 Jaccard 仍是**无偏估计**；但跨「截断/未截断」书比较时
+    //       **双方都必须截到 `min(k, 自身大小)`**，否则系统性低估。
+    // ═══════════════════════════════════════════════════════════════
+
+    /** 世界书是否已有 L1a 摘要（keys hash） */
+    const hasKeyIndex = (wb) => !!(wb && Array.isArray(wb.keyHashes) && wb.keyHashes.length > 0);
+
+    /**
+     * 两个世界书的 **触发词 Jaccard 相似度**（0~1），**不读正文**。
+     *
+     * ⚠️ 双方都截到 `min(bottomK, 自身长度)`（v3 评审 §5 #8 的截断口径）。
+     * @param {object} a @param {object} b
+     * @param {number} [bottomK] 截断长度（默认取两者较短者，即不额外截断）
+     * @returns {{jaccard:number, inter:number, union:number}|null} 无摘要时返回 null
+     */
+    const compareKeyHashes = (a, b, bottomK) => {
+        if (!hasKeyIndex(a) || !hasKeyIndex(b)) return null;
+        const k = Number.isFinite(bottomK) && bottomK > 0 ? bottomK : Infinity;
+        // ★ 双方截到 min(k, 自身大小) —— 避免「截断 vs 未截断」的系统性低估
+        const la = Math.min(k, a.keyHashes.length);
+        const lb = Math.min(k, b.keyHashes.length);
+        const A = a.keyHashes, B = b.keyHashes;
+        // 双指针求交（两数组均已升序）
+        let i = 0, j = 0, inter = 0;
+        while (i < la && j < lb) {
+            const x = A[i], y = B[j];
+            if (x === y) { inter++; i++; j++; }
+            else if (x < y) i++; else j++;
+        }
+        const union = la + lb - inter;
+        return { jaccard: union ? inter / union : 0, inter, union };
+    };
+
+    /** 完全相同判定（确定性）：`exactContentHash` 一致 */
+    const isExactSame = (a, b) => !!(a && b && a.exactContentHash && a.exactContentHash === b.exactContentHash);
+
     /**
      * 🦥 DF-18 懒加载：确保世界书正文已读入内存（>50MB 的超大书扫描时只回元数据）
-     * 前提：`wb:scan` 通过指纹验证后会把目录加入白名单（本会话内 readText 可读）；
+     * 前提：`wb:scan` 通过指纹验证后会把目录加入白名单（本会话内 `readText` 可读）；
      *       重启后白名单为空 → 重新扫一次目录即可恢复授权（见最终方案 §七 #6）。
+     *
+     * @param {object} wb 世界书条目
+     * @param {{silent?: boolean, batch?: boolean}} [opts]
+     *   · `silent=true` → 失败时不弹框（仅用于**批量**场景，由调用方汇总提示一次）。
+     *     单本操作必须让它弹框 —— 报错是排查线索，不能掩盖。
+     *   · `batch=true` → **批量场景**（如查重逐本读）：不逐本写日志、**不逐本 `triggerRef`**
+     *     （否则 1000 本会触发 1000 次侧栏重渲染）。
      */
-    const ensureWorldbookLoaded = async (wb) => {
+    const ensureWorldbookLoaded = async (wb, opts) => {
         if (!wb || wb.dataLoaded !== false || !wb.path) return wb;
+        const silent = !!(opts && opts.silent);
+        // ⚡ PK-26 后续：批量读（查重/内容指纹）**绝不能逐本刷日志 + 逐本重渲染** ——
+        //    1001 本会产生 1001 条日志与 1001 次侧栏重渲染（实测拖到分钟级）。
+        const batch = !!(opts && opts.batch);
         try {
-            addLog(`⏳ 正在读取超大世界书正文：${wb.name || wb.path}`, 'warning');
-            const text = await window.electronAPI.readText(wb.path);
-            const parsed = JSON.parse(text);
+            if (!batch) addLog(`⏳ 正在读取世界书正文：${wb.name || wb.path}`, 'warning');
+            // 🛑 真缺陷修复（2026-09-22）：`file:readText` 返回的是 **`{ success, text }` 对象**，
+            //    不是字符串！旧写法 `const text = await readText(...)` 直接 `JSON.parse(text)`
+            //    → 抛 `"[object Object]" is not valid JSON` → **本函数从未成功过**
+            //    （PK-20 之前懒加载只在 >50MB 触发，几乎没人踩到；PK-20 后大量书转懒加载才暴露）。
+            const res = await window.electronAPI.readText(wb.path);
+            if (!res || !res.success || typeof res.text !== 'string') {
+                throw new Error((res && res.error) || '读取返回体异常');
+            }
+            const parsed = JSON.parse(res.text);
             if (parsed && typeof parsed === 'object') {
                 if (parsed.entries && typeof parsed.entries === 'object' && !Array.isArray(parsed.entries)) {
                     parsed.entries = Object.values(parsed.entries);
                 }
                 wb.data = parsed;
                 wb.dataLoaded = true;
+                delete wb._loadError;
                 if (!wb.entryCount && Array.isArray(parsed.entries)) wb.entryCount = parsed.entries.length;
-                triggerRef(worldbooks);
-                addLog(`✅ 已读入：${wb.name || wb.path}（${wb.entryCount || 0} 词条）`, 'success');
+                if (!batch) {
+                    triggerRef(worldbooks);
+                    addLog(`✅ 已读入：${wb.name || wb.path}（${wb.entryCount || 0} 词条）`, 'success');
+                }
             }
         } catch (e) {
+            wb._loadError = e.message;   // 记下失败原因，供调用方汇总
             addLog(`❌ 读取世界书正文失败：${e.message}`, 'error');
-            nativeAlert(`读取世界书正文失败：\n${e.message}\n\n请确认文件仍可访问，或重新选择世界书目录后再试。`, 'error');
+            if (!silent) {
+                nativeAlert(`读取世界书正文失败：\n${e.message}\n\n请确认文件仍可访问，或重新选择世界书目录后再试。`, 'error');
+            }
         }
         return wb;
+    };
+
+    /**
+     * 🗑️ 释放已读入的世界书正文（恢复懒加载态），用于**批量**流程（查重 / 内容指纹）用后回收。
+     *
+     * 为什么必须有：PK-20 的 OOM 根因就是「正文常驻」。批量读 1001 本（6.97GB）若不释放，
+     *   会在几十本之后就重演 OOM；内容级查重已有「用后释放」逻辑（见 `startContentDedupeScan`），
+     *   同名查重也必须同样释放。
+     *
+     * ⚠️ 只释放**扫描阶段就判为 `heavy`** 的书（原本就是懒加载态）—— 不碰用户正在编辑的书，
+     *   也不碰扫描时已内联的书（那本就不占额外内存）。
+     */
+    const releaseWorldbookBody = (wb) => {
+        if (!wb || !wb.heavy) return;
+        wb.data = null;
+        wb.dataLoaded = false;
+    };
+
+    /**
+     * 🧯 **批量正文消费器**（PK-27，2026-09-22）：**唯一**的「批量读世界书正文」入口。
+     *
+     * 为什么必须有它（三次同款事故换来的）：
+     *   ① PK-20：世界书**全量内联** → 501 本 3.56GB 直接退出应用；
+     *   ② 内容级查重：**先提取全部文本再算签名** → 5000 本 3GB → 渲染进程被 OOM killer 杀掉
+     *      （实测 `reason:"killed"`）；
+     *   ③ 同名查重（PK-26 后续，本次）：用 `Promise.all` **整组并发载入** → s5000 每组 200 本
+     *      ≈ 2.6GB 峰值 → **进程直接消失**（无 crash.log，典型 OOM 被杀）。
+     *   ⇒ 三次事故都是**「一次性把太多正文放进内存」**，只是换了个入口。
+     *
+     * 本函数的契约（改它之前请先读上面三条）：
+     *   · **顺序消费**（默认 concurrency=1）—— 内存峰值 ≈ 单本正文，与库大小**无关**；
+     *   · 每本 `consume` 完**立即释放**（`releaseWorldbookBody`），不依赖调用方自觉；
+     *   · **每 N 本让出主线程**，保证进度条可绘、界面不假死；
+     *   · **逐本失败不中断整批**（记入 `failed`），失败原因汇总后由调用方提示。
+     *
+     * @param {Array<object>} items 世界书条目数组
+     * @param {(wb: object, index: number) => Promise<any>|any} consume 消费回调（读 `wb.data`；返回值被收集）
+     * @param {{concurrency?: number, onProgress?: (done: number, total: number) => void, release?: boolean,
+     *          readMemory?: () => ({used:number,total:number,limit:number}|null), maxSingleBytes?: number}} [opts]
+     *   · `concurrency`：并发数（**默认 1**；调大前请确认 `concurrency × 单本体积` 远小于内存上限）
+     *   · `onProgress`：每本完成后回调（用于进度条）
+     *   · `release`：是否用后释放（**默认 true**；仅当调用方要长期持有正文时才设 false）
+     *   · `readMemory` / `maxSingleBytes`：仅 `concurrency > 1` 时用于**读前预检**（不传则用假定上限）
+     * @returns {Promise<{results: any[], failed: Array<{item:object, error:string}>, done:number, total:number}>}
+     */
+    const consumeWorldbookBodies = async (items, consume, opts) => {
+        const list = Array.isArray(items) ? items : [];
+        const total = list.length;
+        const concurrency = Math.max(1, Number(opts && opts.concurrency) || 1);
+        const doRelease = !(opts && opts.release === false);
+        const onProgress = opts && opts.onProgress;
+        const results = new Array(total);
+        const failed = [];
+        let done = 0;
+
+        const runOne = async (item, index) => {
+            try {
+                if (item && item.dataLoaded === false && item.path && typeof ensureWorldbookLoaded === 'function') {
+                    // batch：不逐本刷日志、不逐本 triggerRef（千本会触发千次侧栏重渲染）
+                    await ensureWorldbookLoaded(item, { silent: true, batch: true });
+                }
+                results[index] = await consume(item, index);
+            } catch (e) {
+                results[index] = null;
+                failed.push({ item, error: e.message });
+            } finally {
+                // ★ 无论成败都释放 —— 失败时 `dataLoaded` 仍为 false，`releaseWorldbookBody` 天然幂等
+                if (doRelease && typeof releaseWorldbookBody === 'function') releaseWorldbookBody(item);
+                done++;
+                if (onProgress) { try { onProgress(done, total); } catch (e) { /* 忽略 */ } }
+            }
+        };
+
+        if (concurrency === 1) {
+            // 顺序路径：内存峰值最小，且天然「每本之间」有 await 点（主线程可得让出机会）
+            for (let i = 0; i < total; i++) {
+                await runOne(list[i], i);
+                // 每 10 本显式让出一次主线程（`ensureWorldbookLoaded` 是异步 I/O，但算签名等是同步 CPU）
+                if (i % 10 === 9) await new Promise(r => setTimeout(r, 0));
+            }
+        } else {
+            // 🛡️ 受控并发路径：**滑动窗口前先做读前预检**（§5.3，2026-09-23 补）
+            //    📖 顺序路径（concurrency=1）峰值 ≈ 单本，天然安全，无需预检；
+            //       但**并发路径**峰值 ≈ `concurrency × 单本` —— 遇超大书会成倍放大
+            //       （`wb:meta` 的 8 并发曾是最坏 1.6GB 的盲区）。
+            //    ✅ 预检用「磁盘 size × 2.2」估算，超「可用余量 × 0.7」就**拒绝并说明原因**，
+            //       而不是等内核杀进程（PK-27 那次连提示的机会都没有）。
+            if (typeof preflightRead === 'function') {
+                const pf = preflightRead({ files: list, readMemory: opts && opts.readMemory });
+                if (!pf.ok) {
+                    const msg = pf.reason === 'single-too-large'
+                        ? `有 ${pf.oversized.length} 本世界书单本超过 ${Math.round((opts && opts.maxSingleBytes || 50 * 1048576) / 1048576)}MB，`
+                          + `并发读取会撑爆内存（预估峰值 ${pf.est.mb}MB）。已中止以避免崩溃。`
+                        : `本批共 ${pf.est.count} 本、预估需 ${pf.est.mb}MB，超过可用预算 ${pf.budgetMB}MB（余量 ${pf.availMB}MB）。`
+                          + `已中止以避免崩溃。`;
+                    throw new Error('[内存预检] ' + msg + (pf.degraded ? '（未能读到内存水位，按假定上限估算）' : ''));
+                }
+            }
+            // 受控并发路径：**滑动窗口**（不是整批 Promise.all —— 那正是 PK-27 的成因）
+            let cursor = 0;
+            const worker = async () => {
+                while (cursor < total) {
+                    const i = cursor++;
+                    await runOne(list[i], i);
+                }
+            };
+            await Promise.all(Array.from({ length: Math.min(concurrency, total) }, worker));
+        }
+
+        // 批量读完后统一刷新一次（替代逐本 triggerRef）
+        if (doRelease && total > 0) triggerRef(worldbooks);
+        return { results, failed, done, total };
     };
 
     // 🖱️ 选中世界书（侧栏点击入口）：超大书先按需读入正文，再设为当前编辑对象
@@ -120,41 +316,220 @@ export function useWorldbooks({
     };
 
     // 扫描指定世界书目录（供手动选择与启动自动恢复共用；自动持久化记忆路径）
+    // 🖱️ 语义：这是「**浏览库**」入口 —— 用户点「打开世界书目录」/ 启动自动恢复。
+    //    ⚠️ 按用户 2026-09-22 的定性，浏览库**不再显示进度条**（进度条属于查重流程），
+    //       改用日志反馈（`addLog`）。真正需要进度的是查重，见 `rescanWorldbooks`。
     const scanWorldbookDir = async (dirPath) => {
         if (!dirPath) return;
         lastWorldbookDirPath.value = dirPath;
         try { localStorage.setItem('jsTavern_lastWbDir', dirPath); } catch (e) { /* 忽略 */ }
 
         addLog(`开始扫描世界书目录: ${dirPath}`);
-        // 📊 T2：先绑进度订阅并置「扫描中」—— 进度条要在大目录 await 期间就能显示，
-        //    否则用户面对的是「点了没反应」（对照 AR-38 的教训：可点但零反馈 = 判定坏了）
+        try {
+            // ⚡ 秒开（2026-09-22）：**阶段 1 只 readdir + stat**（实测 1001 本 43ms，读内容要 36s）。
+            //    📖 向外探索：SillyTavern 的 `/list` 也读文件，但只留 `{file_id,name}` 丢弃 entries；
+            //       它够快是世界书少。要做到 1000+ 本秒开，必须**彻底不读内容**。
+            //    书名先回退文件名（`wbName` 为 null），词条数未知；阶段 2 后台补齐。
+            addLog(`⚡ 正在快速列出目录（只读文件名，不读内容）…`);
+            const t0 = performance.now();
+            const fast = await window.electronAPI.scanWorldbooks(dirPath, { fastListOnly: true });
+            if (!fast || !fast.success) {
+                addLog(`扫描失败: ${(fast && fast.error) || '未知错误'}`, 'error');
+                nativeAlert(`世界书扫描失败: ${(fast && fast.error) || '未知错误'}`, 'error');
+                return;
+            }
+            const fastMs = Math.round(performance.now() - t0);
+            adoptScanResult(fast.data);
+            // 📢 PK-24：阶段 1 已能剔除「上次判定为非世界书」的文件（靠缓存），这里报告一下
+            reportSkipped('世界书', fast.skipped);
+            addLog(`⚡ 秒开完成：${fast.data.length} 本（${fastMs}ms）—— 正在后台读取书名与词条数…`, 'success');
+            wbMetaFilling.value = true;
+            wbMetaProgress.value = { done: 0, total: fast.data.length };
+
+            // ⚡ 阶段 2（后台，不阻塞首屏）：补全书名 / 词条数，并**校验有效性**（PK-24）
+            try {
+                const paths = fast.data.filter(w => w.metaPending).map(w => w.path);
+                if (paths.length) {
+                    window.electronAPI.onWbMetaProgress?.((p) => {
+                        if (p && typeof p.done === 'number') {
+                            wbMetaProgress.value = { done: p.done, total: p.total };
+                        }
+                    });
+                    // 📦 P2-1（2026-09-23）：**按需分批**（v3 评审 P2-9）
+                    //    📖 要解决什么：阶段 2 一次性补全 5000 本要 ~234s，
+                    //       期间用户看到的是**一屏文件名**（书名/词条数还是 null）。
+                    //    ✅ 做法：**先补前 N 本**（首批立刻可见真书名），
+                    //       剩下的**后台静默续补**（不阻塞、不刷日志）。
+                    //    ⚠️ 判据不能是「用户滚到哪补到哪」（那需要监听滚动 + 重排列表，
+                    //       会把 `worldbooks` 反复 triggerRef → 侧栏抖动）。
+                    //       实测更稳的做法是「**固定首批 + 后台全量**」——
+                    //       首批大小按「一屏可见数 × 余量」取（侧栏每页最多 115 项）。
+                    const FIRST_BATCH = Math.min(paths.length, 120);
+                    const firstPaths = paths.slice(0, FIRST_BATCH);
+                    const restPaths = paths.slice(FIRST_BATCH);
+                    const applyMeta = (data) => {
+                        const byPath = new Map(data.map(m => [m.path, m]));
+                        // 🛡️ PK-24：阶段 2 会顺带跑 `isValidWorldbook` —— 非世界书（角色卡 / 预设 /
+                        //    大表格 / 损坏 JSON）在这里被剔除，不能让它们留在世界书列表里。
+                        const invalidPaths = new Set(
+                            data.filter(m => m.valid === false).map(m => m.path)
+                        );
+                        let filled = 0;
+                        let l1Count = 0;
+                        let oversizedCount = 0;
+                        worldbooks.value.forEach(w => {
+                            const m = byPath.get(w.path);
+                            if (!m) return;
+                            if (m.valid === false) return;   // 交给下面统一移除
+                            w.wbName = m.wbName;
+                            if (typeof m.entryCount === 'number') w.entryCount = m.entryCount;
+                            // 🧠 PK-27 / S1'：接收 **L1a 摘要**（供查重直接用，**无需二次读盘**）
+                            if (Array.isArray(m.keyHashes)) {
+                                w.keyHashes = m.keyHashes;
+                                w.keyCount = m.keyHashes.length;
+                                w.exactContentHash = m.exactContentHash || null;
+                                l1Count++;
+                            }
+                            // 🧬 S3'（2026-09-23）：接收 **L1b simhash**（默认关闭；有则内容查重免读正文）
+                            if (Array.isArray(m.simhash) && m.simhash.length === 2) {
+                                w.simhash = m.simhash;
+                            }
+                            // 🛡️ S1'：超限书（超过体积守卫）—— 标记以便查重 UI 明示（**不静默漏掉**）
+                            if (m.oversized) { w.oversized = true; w.sizeBytes = m.size; oversizedCount++; }
+                            w.metaPending = false;
+                            filled++;
+                        });
+                        if (invalidPaths.size > 0) {
+                            const before = worldbooks.value.length;
+                            const removedNames = worldbooks.value
+                                .filter(w => invalidPaths.has(w.path))
+                                .slice(0, 5)
+                                .map(w => w.name)
+                                .filter(Boolean);
+                            worldbooks.value = worldbooks.value.filter(w => !invalidPaths.has(w.path));
+                            // 当前编辑对象若被剔除 → 清空，避免编辑已失效的旧对象
+                            if (activeWorldbook.value && invalidPaths.has(activeWorldbook.value.path)) {
+                                activeWorldbook.value = null;
+                            }
+                            const more = invalidPaths.size > 5 ? ` 等 ${invalidPaths.size} 个` : '';
+                            addLog(`🛡️ 已从列表剔除 ${before - worldbooks.value.length} 个非世界书文件`
+                                + `（${removedNames.join('、')}${more}）`, 'warning');
+                        }
+                        triggerRef(worldbooks);
+                        addLog(`✅ 元数据补齐：${filled} 本（书名 + 词条数 + L1 摘要 ${l1Count} 本）`, 'success');
+                        // 📢 PK-26 教训「静默 = 坏了」：超限书**必须可见**
+                        if (oversizedCount > 0) {
+                            addLog(`⚠️ 有 ${oversizedCount} 本世界书体积超过 50MB，已跳过摘要（它们不会参与指纹查重）`, 'warning');
+                        }
+                        return { filled, l1Count, oversizedCount, removed: invalidPaths.size };
+                    };
+
+                    // 📦 P2-1：**首批**（让用户尽快看到真书名/词条数）
+                    // 🛑 回归修复（2026-09-23 实测）：这里**绝不能 `await`** ——
+                    //    冷缓存下首批 120 本的 `fetchWorldbookMeta` 要 **5.30s**（实测 s5000），
+                    //    `await` 会把「点开目录 → 首屏可用」从 **782ms 拖到 5.51s**（7× 回归）。
+                    //    ⇒ 首批与后续**同样**走「不阻塞」路径：**列表先渲染（文件名占位），
+                    //      元数据到了再就地更新**（用户看到的是「书名逐个亮起」而不是「转圈等待」）。
+                    //    ⚠️ 两批**串行**发起（首批 → 续补），避免 5401 本一次性打满主进程并发。
+                    const runBatch = (paths, isFirst) => {
+                        if (!paths.length) return Promise.resolve();
+                        return window.electronAPI.fetchWorldbookMeta(paths)
+                            .then((m) => {
+                                if (m && m.success) {
+                                    const r = applyMeta(m.data);
+                                    if (isFirst && restPaths.length > 0) {
+                                        addLog(`⚡ 已优先补齐前 ${paths.length} 本（书名/词条数可见）；`
+                                            + `其余 ${restPaths.length} 本将在后台继续补齐…`, 'success');
+                                    }
+                                }
+                            })
+                            .catch((e) => {
+                                addLog(`⚠️ 元数据补齐失败：${e.message}（部分书名可能仍显示为文件名）`, 'warning');
+                            });
+                    };
+                    // ⚠️ 不 await：列表已由阶段 1 渲染，这里只负责「就地补上书名」
+                    runBatch(firstPaths, true)
+                        .then(() => runBatch(restPaths, false))
+                        .finally(() => {
+                            wbMetaFilling.value = false;
+                            addLog('✅ 全部元数据补齐完成', 'success');
+                        });
+                }
+            } catch (e) {
+                addLog(`⚠️ 元数据后台补齐失败：${e.message}（书名暂用文件名，不影响使用）`, 'warning');
+                wbMetaFilling.value = false;
+            }
+        } finally {
+            // 进度对象始终保持 idle（浏览库不占用进度条）
+            wbScanProgress.value = { phase: 'idle', done: 0, total: 0, current: '' };
+        }
+    };
+
+    /**
+     * 把 `wb:scan` 的返回结果清洗并装库（浏览扫描 / 查重重扫共用）。
+     * 统一清洗：确保每本世界书的 entries 均为纯数组（兼容旧版/第三方工具的对象字典格式）
+     * 🛡️ DF-18：heavy（>50MB 未解析）的书 data 为 null，跳过清洗（按需懒加载）
+     */
+    const adoptScanResult = (data) => {
+        if (!Array.isArray(data)) return;
+        data.forEach(wb => {
+            if (wb.data && wb.data.entries && typeof wb.data.entries === 'object' && !Array.isArray(wb.data.entries)) {
+                wb.data.entries = Object.values(wb.data.entries);
+            }
+        });
+        worldbooks.value = data;
+        // 【修复】重扫后按路径重绑当前编辑对象，找不到则清空，避免编辑已失效的旧对象
+        if (activeWorldbook.value) {
+            const prevPath = activeWorldbook.value.path;
+            activeWorldbook.value = data.find(w => w.path === prevPath) || null;
+        }
+    };
+
+    /**
+     * 🧠 PK-20：把「累计内联预算」的结果写进日志。
+     *
+     * 为什么必须让用户看见：超预算的书**仍会出现在列表里**（有 `entryCount:null` + 「按需」徽标），
+     * 点开时会按需读入正文。若不给提示，用户会以为「这本书的词条数怎么空了」——
+     * 静默降级正是 DF-18 / AR-38 反复踩过的坑。
+     */
+    const reportInlineBudget = (res) => {
+        if (!res || !res.inlineSkipped) return;
+        addLog(`🧠 为避免内存溢出，前 ${res.inlineMB || 0}MB 世界书已直接载入；`
+            + `其余 ${res.inlineSkipped} 本改为**按需加载**（点开时才读取正文，列表中的词条数显示为「按需」）`,
+            'warning');
+    };
+
+    /**
+     * 🔁 查重 / 版本对比前的**重扫磁盘**（2026-09-22 新增）
+     *
+     * 为什么需要它：`startWorldbookDedupeScan` 原本直接读内存里已加载的 `worldbooks.value`，
+     *   既不保证数据是最新的、也**没有任何可推进的进度**（规格 §185 要求「进度挂到扫描阶段」）。
+     *   现在查重先走这里重扫，天然复用 `wb:scan` 的分批进度 → 进度条有真实数据源。
+     *
+     * @param {string} dirPath 世界书目录（通常传 lastWorldbookDirPath）
+     * @returns {Promise<{ok:boolean, count:number, error?:string, skipped?:number}>}
+     */
+    const rescanWorldbooks = async (dirPath) => {
+        if (!dirPath) return { ok: false, count: 0, error: '未设置世界书目录' };
+        if (!window.electronAPI || typeof window.electronAPI.scanWorldbooks !== 'function') {
+            return { ok: false, count: 0, error: 'preload 缺少 scanWorldbooks 接口' };
+        }
         bindWbScanProgress();
         wbScanProgress.value = { phase: 'scanning', done: 0, total: 0, current: '' };
         try {
-            const res = await window.electronAPI.scanWorldbooks(dirPath);
-            if (res.success) {
-                // 统一清洗：确保每本世界书的 entries 均为纯数组（兼容旧版/第三方工具的对象字典格式）
-                // 🛡️ DF-18：heavy（>50MB 未解析）的书 data 为 null，跳过清洗（按需懒加载）
-                res.data.forEach(wb => {
-                    if (wb.data && wb.data.entries && typeof wb.data.entries === 'object' && !Array.isArray(wb.data.entries)) {
-                        wb.data.entries = Object.values(wb.data.entries);
-                    }
-                });
-                worldbooks.value = res.data;
-                // 【修复】重扫后按路径重绑当前编辑对象，找不到则清空，避免编辑已失效的旧对象
-                if (activeWorldbook.value) {
-                    const prevPath = activeWorldbook.value.path;
-                    activeWorldbook.value = res.data.find(w => w.path === prevPath) || null;
-                }
-                addLog(`扫描完成，共加载 ${res.data.length} 本世界书`, 'success');
-                // 📢 DF-18：被跳过的文件必须可见（不再静默丢弃 —— 静默会让人以为软件坏了，对照 AR-38）
-                reportSkipped('世界书', res.skipped);
-            } else {
-                addLog(`扫描失败: ${res.error}`, 'error');
-                nativeAlert(`世界书扫描失败: ${res.error}`, 'error');
+            // rescan=true：跳过新目录指纹验证（目录必须已在白名单，主进程会二次校验）
+            const res = await window.electronAPI.scanWorldbooks(dirPath, { rescan: true });
+            if (!res || !res.success) {
+                return { ok: false, count: 0, error: (res && res.error) || '未知错误' };
             }
+            adoptScanResult(res.data);
+            reportInlineBudget(res);
+            reportSkipped('世界书', res.skipped);
+            return { ok: true, count: res.data.length, skipped: (res.skipped || []).length };
+        } catch (e) {
+            return { ok: false, count: 0, error: e.message };
         } finally {
-            // 📊 T2：无论成功 / 失败 / 抛异常都要收起进度条 —— 否则会永远停在中间
+            // 无论成败都收起进度条（失败时弹窗会给出错误，不会永久停在中间）
             wbScanProgress.value = { phase: 'idle', done: 0, total: 0, current: '' };
         }
     };
@@ -262,12 +637,15 @@ export function useWorldbooks({
     // 2. 世界书重命名（更新内部名称 + 物理文件同步改名）
     const renameWorldbook = async (wb) => {
         if (!wb) return;
-        const oldName = ((wb.data && wb.data.name) || wb.name || '未命名世界书').replace(/\.json$/i, '');
+        const oldName = wbDisplayName(wb).replace(/\.json$/i, '');
         const newName = await appPrompt('✏️ 请输入新的世界书名称：', oldName);
         if (newName === null || newName.trim() === '' || newName.trim() === oldName) return;
         const finalName = newName.trim();
 
         // 更新世界书内部名称（列表与 IDE 标题即时生效）
+        // ⚡ PK-26：秒开后 `wb.data` 可能为 null（懒加载）→ **必须同时写轻量字段 `wbName`**，
+        //    否则懒加载书的改名在列表/标题里完全不生效（旧写法只在 `wb.data` 存在时写）。
+        wb.wbName = finalName;
         if (wb.data) wb.data.name = finalName;
 
         const safeFileName = `${finalName.replace(/[\\/:*?"<>|]/g, '_')}.json`;
@@ -380,7 +758,8 @@ export function useWorldbooks({
     // 2. 删除世界书（列表移除 + 物理文件移入全局回收站，绝不物理删除）
     const deleteWorldbook = async (wb) => {
         if (!wb) return;
-        const displayName = (wb.data && wb.data.name) || wb.name || '未命名世界书';
+        // ⚡ PK-26：书名走轻量 `wbDisplayName`（秒开后 `wb.data` 为 null，直读会回退成文件名）
+        const displayName = wbDisplayName(wb) || '未命名世界书';
         const ok = await confirmDialog(`⚠️ 确定要删除世界书《${displayName}》吗？\n物理文件将移入全局回收站（可在 文件菜单>打开全局回收站 找回）。`);
         if (!ok) return;
 
@@ -419,15 +798,26 @@ export function useWorldbooks({
     // 3. 复制/克隆世界书（深拷贝 + 副本文件落盘）
     const duplicateWorldbook = async (wb) => {
         if (!wb) return;
-        const sourceName = (wb.data && wb.data.name) || wb.name || '未命名世界书';
+        // 🛑 PK-26：秒开后 `wb.data` 为 null → 旧写法 `JSON.stringify(wb.data || {})` 会
+        //    **静默产出「空世界书」副本**（词条全丢，用户以为复制坏了）。必须先载入正文。
+        await ensureWorldbookLoaded(wb);
+        if (!wb.data || typeof wb.data !== 'object') {
+            addLog(`❌ 复制失败：无法读取《${wbDisplayName(wb)}》的正文（${wb._loadError || '未知原因'}）`, 'error');
+            nativeAlert(`复制失败：无法读取《${wbDisplayName(wb)}》的正文。\n请重新选择世界书目录后再试。`, 'error');
+            return;
+        }
+        const sourceName = wbDisplayName(wb) || '未命名世界书';
         const cloneName = `${sourceName} - 副本`;
-        const cloneData = JSON.parse(JSON.stringify(wb.data || {}));
+        const cloneData = JSON.parse(JSON.stringify(wb.data));
         cloneData.name = cloneName;
 
         // ✅ [补丁] 深度遍历清洗：重新生成所有词条的唯一 UID，防止与母本冲突
+        // 🆔 DF-21（2026-09-23）：统一为本应用标准形态 `<Date.now()>_<base36>` ——
+        //    旧写法 `Date.now() + Math.random().toString(36).substring(2,9)` 是**字符串拼接**，
+        //    产出无下划线的 20 字符串，与其余 8 处生成点格式不一致（DF-21 形态判定会漏掉它）。
         if (cloneData && Array.isArray(cloneData.entries)) {
             cloneData.entries.forEach(entry => {
-                entry.uid = Date.now() + Math.random().toString(36).substring(2, 9);
+                entry.uid = `${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
                 delete entry._collapsed;
             });
         }
@@ -502,7 +892,7 @@ export function useWorldbooks({
         }
         try {
             await window.electronAPI.showItemInFolder(wb.path);
-            addLog(`📁 已在资源管理器中定位: ${(wb.data && wb.data.name) || wb.name}`, 'info');
+            addLog(`📁 已在资源管理器中定位: ${wbDisplayName(wb) || wb.name}`, 'info');
         } catch (e) {
             addLog(`📁 定位失败: ${e.message}`, 'error');
             nativeAlert(`打开文件夹失败: ${e.message}`, 'error');
@@ -546,7 +936,7 @@ export function useWorldbooks({
     // 3. 修改世界书分组（自建弹窗替代 Electron 不支持的 prompt）
     const changeWbCategory = async (wb) => {
         if (!wb) return;
-        const displayName = (wb.data && wb.data.name) || wb.name || '未命名世界书';
+        const displayName = wbDisplayName(wb) || '未命名世界书';
         const currentCat = getWbCategory(wb);
         const newCat = await appPrompt(
             `📁 将《${displayName}》移动到新分组\n\n请输入目标分组名称（当前：${currentCat}）：\n提示：输入全新的名字将自动创建新分组。`,
@@ -572,10 +962,12 @@ export function useWorldbooks({
     // 计算属性：世界书列表筛选（搜索 + 词条数过滤 + 📁 分组过滤）
     const filteredWorldbooks = computed(() => {
         return worldbooks.value.filter(wb => {
-            const name = ((wb.data && wb.data.name) || wb.name || '').toLowerCase();
+            const name = wbDisplayName(wb).toLowerCase();
             const matchesSearch = !wbSearchQuery.value || name.includes(wbSearchQuery.value.toLowerCase());
 
-            const entryCount = (wb.data && Array.isArray(wb.data.entries)) ? wb.data.entries.length : 0;
+            // ⚡ PK-26：秒开后 `wb.data` 为 null（懒加载）→ 词条数**必须走轻量 `wbEntryCount`**，
+            //    否则「1-15条 / 15+条 / 空书」三个筛选器恒判定为空（用户报的「依旧从 0 开始依旧是 0」）。
+            const entryCount = wbEntryCount(wb);
             let matchesFilter = true;
             if (wbFilterType.value === 'empty') matchesFilter = entryCount === 0;
             else if (wbFilterType.value === 'small') matchesFilter = entryCount > 0 && entryCount <= 15;
@@ -597,9 +989,17 @@ export function useWorldbooks({
         handleWorldbookFolderSelect, deleteWorldbook, duplicateWorldbook,
         openWbContextMenu, closeWbContextMenu, openWbInFolder,
         wbCategories, changeWbCategory, filteredWorldbooks,
-        // 📊 T2 真进度条：扫描中状态 / 进度对象 / 百分比
-        wbScanProgress, isWbScanning, wbScanPercent,
+        // 📊🔍 查重/版本对比的扫描进度（不再用于浏览库）
+        wbScanProgress, isWbScanning, wbScanPercent, rescanWorldbooks,
+        // ⚡ 秒开阶段 2：元数据后台补齐状态
+        wbMetaFilling, wbMetaProgress,
         // 📢 DF-18：跳过可见化 + 超大书懒加载
-        reportSkipped, wbEntryCount, ensureWorldbookLoaded, selectWorldbook
+        reportSkipped, wbEntryCount, wbDisplayName, ensureWorldbookLoaded, selectWorldbook,
+        // ⚡ PK-26 后续：批量流程（查重）用后释放正文，防 OOM
+        releaseWorldbookBody,
+        // 🧯 PK-27：**唯一**的「批量读正文」入口（受控并发 + 用后释放 + 进度回调）
+        consumeWorldbookBodies,
+        // 🧠 PK-27 / S1'：L1 摘要消费（**查重只读索引，永不重读正文**）
+        hasKeyIndex, compareKeyHashes, isExactSame
     };
 }

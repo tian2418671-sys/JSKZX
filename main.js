@@ -15,6 +15,7 @@ const fsp = require('fs/promises'); // 🚀 v1.8.5 异步文件 IO（库目录�
 const os = require('os');
 const { pathToFileURL } = require('url');
 const crypto = require('crypto'); // 📸 快照内容去重（SHA-256）
+const { StringDecoder } = require('string_decoder'); // 🌊 P1-2 流式解析：防 UTF-8 多字节被 chunk 边界切断
 const { createMemoryStore } = require('./main/memoryStore.js'); // 🧠 长期记忆存储（测卡二期）
 
 // 📸 换卡图：非 PNG 新图转 PNG（可选依赖；未安装/加载失败时 PNG→PNG 换图仍可用）
@@ -1005,6 +1006,378 @@ const SCAN_PARSE_MAX_BYTES  = 50 * 1024 * 1024;  // 50MB：仍解析的上限（
 //   故由原保守估值 3 下调为 2（内存减半、速度无损）。详见 docs/bugs/BUG-数据与文件.md DF-18 补充。
 const SCAN_HEAVY_CONCURRENCY = 2;                // 5~50MB 档的并发度（远低于常规 32；实测 2 为最优）
 const SCAN_CACHE_VERSION = 2;                    // 🔁 缓存结构版本：升版即整体失效，让旧误杀判定自愈
+// 🧠 PK-20（2026-09-22）：**累计内联预算** —— 单文件阈值不够，必须看总量。
+//   旧行为：≤50MB 的书**一律内联完整 data**。501 本 ≈ 4GB 对象跨 IPC structured clone
+//   → 渲染堆（上限 4192MB）OOM，**应用直接退出**（主进程也同死，crash.log 都写不出来）。
+//   新行为：扫描过程中累计已内联体积，**超过该预算的文件只回元数据**（`dataLoaded:false`），
+//   正文由渲染层按需 `readText` 懒加载（复用既有 DF-18 机制，前端零改动）。
+//
+//   📖 向外探索（SillyTavern，本项目对标的开源实现）的印证：
+//     · 它的**列表态只有 `world_names`（纯文件名数组）**，压根不含 entries；
+//     · 正文靠 `loadWorldInfo(name)` **按需 fetch** + `worldInfoCache` 缓存；
+//     · 编辑器**分页**（perPageDefault=25）；扫描只覆盖「被激活的」书。
+//     ⇒ 「列表态不常驻正文」是成熟实现的共识，本修复与之对齐。
+//
+//   ⚠️ 为什么用「累计」而不是「一刀切全部懒加载」：小库（总量 < 预算）行为**完全不变**，
+//      只有真正的大库才转入懒加载 —— 把行为变化限制在受影响的那批数据上。
+const SCAN_INLINE_TOTAL_MAX_BYTES = 256 * 1024 * 1024;  // 单次扫描的**累计**内联上限（256MB）
+
+// ⚡ 秒开（2026-09-22，用户要求「世界书加载和角色卡一样秒开」）
+// ─────────────────────────────────────────────────────────────
+// 📖 向外探索（对标 SillyTavern `src/endpoints/worldinfo.js` 的 `/list`）：
+//   它遍历目录时**也读文件**，但**只保留 `{ file_id, name, extensions }`、丢弃 entries**。
+//   它够快是因为世界书数量少（几十本）。要 1000+ 本也秒开，必须**彻底不读文件内容**。
+//
+// 📊 本机实测（1001 本 / 6.97GB）：
+//   ① 纯 readdir 递归（拿到全部文件名）        → **7ms**
+//   ② ① + 对每个文件 stat（size/mtime）        → **43ms**
+//   ③ 读全部文件内容 + JSON.parse              → **36.0s**   ← 慢的**唯一**根源
+//
+// ⇒ 两阶段：
+//   阶段 1（**秒开**）：只 readdir + stat → 立即出列表（43ms），文件名即书名，无词条数
+//   阶段 2（后台）：用**持久化元数据缓存**补书名/词条数；缓存命中则 0 次读盘
+// 元数据缓存只存 `{ mtime, size, name, entryCount }`（几 KB/本），**绝不存正文**。
+// 🔁 PK-27 / S1'（2026-09-22）：`wbMeta` **子结构版本**（新增 L1a 摘要字段 `keyHashes`/`exactContentHash`）。
+//    旧缓存没有这些字段 → 若不失效，phase 1 命中后阶段 2 被跳过 → **查重拿不到索引**
+//    （表现为「升级后首次查重全丢」，且**不会自愈**）。
+//    ⚠️ 只让 `wbMeta` 失效（**不动** `worldbook` 的 valid 判定缓存 —— 那会触发一次全量重扫）。
+const WB_META_CACHE_VERSION = 2;
+// 阶段 2 的读盘并发：走 `fs.promises` 真异步（否则并发无效，见 T6 教训）
+const WB_META_CONCURRENCY = 8;
+// 🧠 PK-27 / S1'（2026-09-22）：L1 摘要（「扫描即建索引，查重只读索引」）
+// ─────────────────────────────────────────────────────────────────────────
+// 📖 病根：扫描时 `entriesArr` **已经在内存里**，但只把 `{mtime,size,name,entryCount}` 写进缓存
+//    → **触发词被丢掉** → 下游查重只能**重读 34.8GB 正文** → 三次 OOM 事故（PK-20 / 内容查重 / PK-27）。
+// 📖 方案：`docs/规格与计划/世界书大库-加载与查重架构方案.md`（三层模型 L0/L1/L2）。
+//    **L1 只在主进程算** —— 渲染进程**零正文**（这是与「只把并发改成顺序」的本质区别）。
+//
+// 📊 实测依据（`scripts/probes/_probe-l1-size.mjs`，s1000 采样 92 本）：
+//    · 触发词 avg 1137 / P95 1492 个/本，avg 长度 6.1 字符（**最长 52**）
+//    · **原字符串方案 67.1KB/本 → 全库 353.7MB**（🔴 会压垮渲染进程）
+//    · **Uint32Array hash 方案 4.44KB/本 → 全库 23.4MB**（✅ 15.1× 压缩）
+//    · keys hash 计算仅 **0.04ms/本**（parse 31ms 的 0.13%，可忽略）
+//    ⇒ **keys 必须存 hash 而非原字符串**（必须项，非优化项）
+//
+// ⚠️ **分层落盘**（S0.5 实验的结论，`docs/规格与计划/S0.5-simhash特征方案实验报告.md`）：
+//    · **L1a（本文件实现，S1' 落盘）**：`keyHashes` + `exactContentHash` —— 供**同名查重（S2'）**
+//      成本极低（0.04ms/本），对阶段 2 的 160s **无可见影响**
+//    · **L1b（延后到 S3'）**：`simhash64` —— 供**内容级查重（S3'）**
+//      ⚠️ 实测 **173ms/本**（number 双 32 位优化后）→ 全库 **15.6 分钟**
+//      ⇒ **绝不能放进 S1'**，否则「阶段 2 的 160s 变 16 分钟」= **为查重省时间却把秒开拖慢 6 倍**
+//
+// 🛡️ **体积守卫**（v3 评审 §3.5 盲区，已取证为真）：本通道原**无单本体积守卫**
+//    （不像扫描主路径有 `SCAN_PARSE_MAX_BYTES = 50MB`），8 并发遇 200MB 合并书 → 最坏 1.6GB。
+//    S1' 要在此**多读一遍正文**算摘要 → **必须同时补守卫**，否则会在**扫描阶段**OOM（比 PK-27 崩得更早）。
+const WB_META_MAX_BYTES = 50 * 1024 * 1024;      // 与扫描主路径 `SCAN_PARSE_MAX_BYTES` 同口径
+const MAX_KEYS_PER_BOOK = 2000;                  // 单本触发词上限（实测 P95 = 1492，余量 34%）
+// 🧬 **L1b（simhash）是否落盘**（2026-09-23 新增，**默认关闭**）
+//    ⚠️ 默认关闭的理由见 `computeSimhash64` 上方注释（173ms/本 → 全库 15.6 分钟）。
+//    开启方式：环境变量 `JSK_WB_SIMHASH=1`（避免为一次性实验改代码）。
+//    ⚠️ 切换该开关会让已有 `wbMeta` 缓存的「有无 simhash」与新口径不符 →
+//       **`WB_META_CACHE_VERSION` 必须同步 +1**（否则出现「有的书有、有的书没有」的混合态）。
+const WB_STORE_SIMHASH = process.env.JSK_WB_SIMHASH === '1';
+// ⚠️ 截断的数学性质（v3 评审 P0-2）：`keyHashes` 已**排序**，取前 N 个 = **bottom-k sketch**
+//    ⇒ 截断后书与书的 Jaccard 仍是**无偏估计**。但跨「截断/未截断」书比较时，
+//       **双方都必须截到 `min(k, 自身大小)`**，否则系统性低估（见前端 `compareKeyHashes`）。
+
+/** 🔤 触发词规范化：**全库唯一口径**（v3 评审 §5.2 要求写成单测断言，不得散落各处） */
+const normalizeWbKey = (s) => String(s).trim().toLowerCase().normalize('NFC');
+
+/** 🔢 FNV-1a 32 位 hash（number 运算；实测比 BigInt 快 8×） */
+function fnv1a32(str, seed) {
+  let h = (seed === undefined ? 0x811c9dc5 : seed) >>> 0;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h >>> 0;
+}
+
+/**
+ * 从 entries 提取**去重规范化触发词**的 32 位 hash 数组（**排序** → 兼作 bottom-k sketch）。
+ * @returns {number[]} 升序去重 hash 数组（长度 ≤ `MAX_KEYS_PER_BOOK`）
+ */
+function buildKeyHashes(entries) {
+  const set = new Set();
+  for (const e of entries) {
+    if (!e || typeof e !== 'object') continue;
+    const arr = Array.isArray(e.key) ? e.key : (e.key !== undefined && e.key !== null ? [e.key] : []);
+    for (const k of arr) {
+      const s = normalizeWbKey(k);
+      if (s) set.add(fnv1a32(s));
+    }
+  }
+  const out = Array.from(set).sort((a, b) => a - b);
+  return out.length > MAX_KEYS_PER_BOOK ? out.slice(0, MAX_KEYS_PER_BOOK) : out;
+}
+
+/**
+ * 🌊 **流式**提取超大世界书的触发词 hash + 书名（**不物化整个 JSON**）
+ * —— v3 评审 P0-3「oversized 书查重死胡同」的**选项 B**。
+ *
+ * 📖 死胡同是什么：`wb:meta` 的 50MB 体积守卫（正确，防 8 并发 × 200MB = 1.6GB）⇒
+ *    超限书 `oversized: true`、**不算摘要** ⇒ 同名查重把它标为「⚠️ 缺少索引」跳过
+ *    ⇒ **超大书永远无法参与查重**（用户看得见提示，但问题没解决）。
+ * 📖 为什么可以解：**keys 提取不需要完整 parse** —— 只需流式扫一遍，
+ *    内存 O(单条 key) 而非 O(整个 JSON)。超大书的摘要**依然能在 MB 级内存内产出**。
+ *
+ * ⚠️ 口径必须与 `buildKeyHashes(JSON.parse(...).entries)` **完全等价**
+ *    （否则同一本书「普通路径」与「流式路径」产出不同 keys → 查重结果自相矛盾）。
+ *    已有单测 `test/wbStreamKeys.test.mjs` 用真实文件做**逐字节等价**断言。
+ *
+ * ⚠️ 只用于 **oversized 书**（>50MB）—— 普通书走完整 parse（更简单、还能拿到 entryCount）。
+ *
+ * @param {string} filePath
+ * @param {{maxKeys?:number}} [opts]
+ * @returns {Promise<{keyHashes:number[], name:string|null, truncated:boolean}>}
+ */
+async function buildKeyHashesStreaming(filePath, opts) {
+  const maxKeys = (opts && opts.maxKeys) || MAX_KEYS_PER_BOOK;
+  const decoder = new StringDecoder('utf8');
+  const fh = await fs.promises.open(filePath, 'r');
+  const set = new Set();
+  /** 容器栈：{type:'o'|'a', expectKey, curProp, isEntryObj, collectKeys, isEntries} */
+  const stack = [];
+  let inStr = false, esc = false, strBuf = '';
+  let pendingKey = null;
+  let rootName = null;
+  try {
+    const CHUNK = 1024 * 1024;
+    const buf = Buffer.alloc(CHUNK);
+    let bytesRead;
+    // ⚠️ 必须用 StringDecoder：多字节 UTF-8 字符会被 chunk 边界切断，
+    //    直接 `buf.toString('utf8')` 会在边界产生 U+FFFD（**中文书必然踩到**）。
+    while ((bytesRead = (await fh.read(buf, 0, CHUNK)).bytesRead) > 0) {
+      const text = decoder.write(buf.subarray(0, bytesRead));
+      for (let i = 0; i < text.length; i++) {
+        const c = text[i];
+        // ── 字符串内 ──
+        if (inStr) {
+          if (esc) {
+            esc = false;
+            // ⚠️ 必须**逐条复刻 JSON 的转义规则** —— 否则 `\n` 会被解成字面 `n`，
+            //    与 `JSON.parse` 结果不一致（实测踩到：含转义的 key 两侧 hash 不同）。
+            switch (c) {
+              case 'n': strBuf += '\n'; break;
+              case 't': strBuf += '\t'; break;
+              case 'r': strBuf += '\r'; break;
+              case 'b': strBuf += '\b'; break;
+              case 'f': strBuf += '\f'; break;
+              case '"': strBuf += '"'; break;
+              case '\\': strBuf += '\\'; break;
+              case '/': strBuf += '/'; break;
+              case 'u': {
+                const hex = text.slice(i + 1, i + 5);
+                if (/^[0-9a-fA-F]{4}$/.test(hex)) {
+                  // 代理对由两个 `\uXXXX` 自然拼成，与 `JSON.parse` 行为一致
+                  strBuf += String.fromCharCode(parseInt(hex, 16));
+                  i += 4;
+                } else { strBuf += 'u'; }
+                break;
+              }
+              default: strBuf += c; break;
+            }
+            continue;
+          }
+          if (c === '\\') { esc = true; continue; }
+          if (c === '"') {
+            inStr = false;
+            const top = stack[stack.length - 1];
+            if (top && top.type === 'o' && top.expectKey) {
+              pendingKey = strBuf;            // 这是**属性名**
+              top.expectKey = false;
+            } else if (top) {
+              // 这是**值字符串**
+              // ⚠️ 必须同时校验 `isEntryObj` —— 只查 `curProp === 'key'` 会把
+              //    `other: { key: [...] }` 这类**非 entry 的 key 字段**也误提取（实测踩到）。
+              const isKeyField = (top.type === 'o' && top.isEntryObj && top.curProp === 'key')
+                || (top.type === 'a' && top.collectKeys);
+              if (isKeyField) {
+                const s = normalizeWbKey(strBuf);
+                if (s) set.add(fnv1a32(s));
+              } else if (top.type === 'o' && top.isRoot && top.curProp === 'name') {
+                rootName = strBuf;            // 根级 name（超大书也能拿到书名）
+              }
+              if (top.type === 'o') top.curProp = null;
+            }
+            strBuf = '';
+            continue;
+          }
+          strBuf += c;
+          continue;
+        }
+        // ── 字符串外 ──
+        if (c === '"') { inStr = true; strBuf = ''; continue; }
+        if (c === '{') {
+          const parent = stack[stack.length - 1];
+          // 🛡️ 两种 entry 形态都要识别（否则字典形态的书提取不到任何 key）：
+          //    ① **数组形态**：`entries: [ {…}, {…} ]` → parent 是「isEntries 的数组」
+          //    ② **字典形态**（V2 老格式）：`entries: { "0": {…}, "1": {…} }`
+          //       → parent 是 **entries 字典本身**（由 `isEntriesDict` 标记，见下）
+          //    ⚠️ 关键：只有「entries 字典」的直接子对象才是 entry。
+          //       **不能**用「父对象有 entries 属性」来判定 —— 那会把
+          //       根对象的**所有**子对象（如 `other: {…}`）都误当 entry（实测踩到）。
+          const isEntryObj = !!(parent && (
+            (parent.type === 'a' && parent.isEntries) ||
+            (parent.type === 'o' && parent.isEntriesDict)
+          ));
+          stack.push({
+            type: 'o', expectKey: true, curProp: null,
+            isRoot: stack.length === 0,
+            isEntryObj,
+            // 该对象自己是否是「entries 字典」（字典形态：`"entries": { … }`）
+            // ⚠️ 判定必须严格：**父对象的 curProp 恰为 'entries'** →
+            //    这个新对象就是 entries 字典本身（它的直接子对象才是 entry）。
+            isEntriesDict: !!(parent && parent.type === 'o' && parent.curProp === 'entries')
+          });
+          continue;
+        }
+        if (c === '[') {
+          const parent = stack[stack.length - 1];
+          // ⚠️ 同样必须校验 `isEntryObj`：只有 **entry 对象的** key 数组才收集
+          const isKeyVal = !!(parent && parent.type === 'o' && parent.isEntryObj && parent.curProp === 'key');
+          const isEntries = !!(parent && parent.type === 'o' && parent.curProp === 'entries');
+          stack.push({ type: 'a', expectKey: false, curProp: null, collectKeys: isKeyVal, isEntries });
+          if (parent && parent.type === 'o') parent.curProp = null;
+          continue;
+        }
+        if (c === '}' || c === ']') {
+          stack.pop();
+          const parent = stack[stack.length - 1];
+          if (parent && parent.type === 'o') parent.curProp = null;
+          continue;
+        }
+        if (c === ':') {
+          const top = stack[stack.length - 1];
+          // ⚠️ 只记 `curProp`（供 `{` / `[` 分支判定「这个新容器是不是 entries」）。
+          //    字典形态的 entry 识别依赖 `isEntriesDict`（见 `{` 分支），**不需要**额外标记。
+          if (top && top.type === 'o') top.curProp = pendingKey;
+          pendingKey = null;
+          continue;
+        }
+        if (c === ',') {
+          const top = stack[stack.length - 1];
+          if (top && top.type === 'o') top.expectKey = true;
+          continue;
+        }
+        // 其余字符（空白 / 数字 / true/false/null）不影响状态
+      }
+    }
+    decoder.end();   // 丢弃尾部不完整序列（正常 JSON 不会出现）
+    // ⚠️ 宽容解析**必须自校验**：栈不平衡 / 字符串未闭合 ⇒ **抛错**，
+    //    由调用方 catch 后降级为「只回元数据」。否则损坏文件会**静默产出错误 keys**
+    //    （比抛错危险得多 —— 查重会基于错索引给结论）。
+    if (inStr) throw new Error('JSON 字符串未闭合（文件可能被截断）');
+    if (stack.length !== 0) throw new Error(`JSON 结构未闭合（残留 ${stack.length} 层，文件可能被截断）`);
+  } finally {
+    await fh.close().catch(() => { });
+  }
+  const out = Array.from(set).sort((a, b) => a - b);
+  const truncated = out.length > maxKeys;
+  return { keyHashes: truncated ? out.slice(0, maxKeys) : out, name: rootName, truncated };
+}
+
+/**
+ * 🆔 `exactContentHash`：对 entries 做 **canonical 序列化**后 SHA-256（确定性「完全相同」判定）。
+ *
+ * ⚠️ v3 评审 §5 #7 的三条要求（缺一不可，否则「确定性」是假的）：
+ *   ① **canonical JSON**：递归键排序 —— 否则「键序不同但逻辑相同」的对象 `JSON.stringify` 输出不同；
+ *   ② **覆盖范围**：**只 `entries`**（不含 `name`/`description` 等元数据）；
+ *   ③ **顺序语义**：**条目顺序不同 → hash 不同**（视为不同版本）——
+ *      「顺序不同但内容同」是 simhash 的职责，不混进 exactHash；
+ *   ④ 内容**不做** NFC / 大小写规范化 —— 「完全相同」就该是**字节级**。
+ */
+function canonicalJson(v) {
+  if (v === null || typeof v !== 'object') return JSON.stringify(v);
+  if (Array.isArray(v)) return '[' + v.map(canonicalJson).join(',') + ']';
+  const keys = Object.keys(v).sort();
+  return '{' + keys.map(k => JSON.stringify(k) + ':' + canonicalJson(v[k])).join(',') + '}';
+}
+function exactContentHash(entries) {
+  // 剔除前端内部字段（uid/_collapsed 等），保证「同一内容不同会话」hash 一致
+  const cleaned = entries.map(e => {
+    if (!e || typeof e !== 'object') return e;
+    const o = {};
+    for (const k of Object.keys(e)) {
+      if (k === 'uid' || k === '_collapsed' || k === '_srcIndex' || k === '_srcUid') continue;
+      o[k] = e[k];
+    }
+    return o;
+  });
+  return crypto.createHash('sha256').update(canonicalJson(cleaned)).digest('hex').slice(0, 32);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 🧬 PK-27 / S3'（2026-09-23）：**simhash64 落盘**（L1b）
+// ───────────────────────────────────────────────────────────────────────────
+// 📖 背景：S3' 已把内容级查重改成「simhash + 汉明距离」，但 simhash 一直是
+//    **渲染层运行时算**（`useDedupe.js` 的 `computeSimhash`）——
+//    每次内容查重都要**逐本读正文 + 算 simhash**（实测 43ms/本，s5000 全量约 12.5s 仅比对，
+//    加上读 34.8GB 正文才是大头）。
+// 📖 现在：扫描阶段 2 的正文**已经在内存**（`entriesArr` 刚 parse 完）⇒
+//    在这里**顺带算 simhash** 是**零额外读盘**的（只多花 CPU）。
+//
+// ⚠️ **为什么默认关闭**（S0.5 实验的硬结论，`S0.5-simhash特征方案实验报告.md` §4.3）：
+//    实测 **173ms/本**（number 双 32 位优化后）→ 全库 5401 本 = **15.6 分钟**。
+//    若默认开启，会把**阶段 2 的 234s 变成 ~18 分钟** ——
+//    即「**为查重省时间，却把首次索引拖慢 6 倍**」。
+//    ⇒ 默认 **false**；用户若**常用内容级查重**可开启（收益：内容查重不再需要读正文）。
+//
+// 📊 体积：64 位 = 8 字节/本 → 5401 本 ≈ **43KB**（可忽略，对比 L1a 的 23.4MB）。
+//
+// 🎯 口径必须与渲染层 `useDedupe.js` 的 `computeSimhash` **逐字一致**（否则查重结果会错）：
+//    · 输入：**仅 `entries[].content` 拼接**（不含 key！—— 与 `extractContentText` 的世界书分支不同，
+//      那个是 `key + content`；但 S3' 内容查重的 simhash 输入见下方 `simhashInputOf` 注释）
+//    · char 4-gram + 采样 step=4 + number 双 32 位（`Math.imul`）
+const SIMHASH_N = 4;
+const SIMHASH_STEP = 4;
+
+/** 🧬 64 位 simhash（number 双 32 位）—— **必须与 `useDedupe.js` 的 `computeSimhash` 一致** */
+function computeSimhash64(text) {
+  const v = new Int32Array(64);
+  const len = text.length;
+  const n = SIMHASH_N, step = SIMHASH_STEP;
+  for (let i = 0; i + n <= len; i += step) {
+    let lo = 0x811c9dc5 >>> 0, hi = 0x01000193 >>> 0;
+    for (let k = 0; k < n; k++) {
+      const c = text.charCodeAt(i + k);
+      lo = Math.imul(lo ^ c, 0x01000193) >>> 0;
+      hi = Math.imul(hi ^ c, 0x01000193) >>> 0;
+    }
+    for (let b = 0; b < 32; b++) {
+      v[b] += ((lo >>> b) & 1) ? 1 : -1;
+      v[b + 32] += ((hi >>> b) & 1) ? 1 : -1;
+    }
+  }
+  let outLo = 0, outHi = 0;
+  for (let b = 0; b < 32; b++) {
+    if (v[b] > 0) outLo |= (1 << b);
+    if (v[b + 32] > 0) outHi |= (1 << b);
+  }
+  return [outLo >>> 0, outHi >>> 0];
+}
+
+/**
+ * 🧬 从 entries 构造 simhash 的**输入文本**（与渲染层同口径）。
+ *
+ * ⚠️ 口径对齐（改这里必须同步改 `useDedupe.js`）：
+ *   渲染层 `extractContentText`（世界书分支）产出 `"${keys} ${content}"` 逐条拼接，
+ *   再过 `normalizeText`（`\s+`→空格、非字母数字→空格、转小写、trim）。
+ *   ⇒ 这里必须**完全复刻**，否则「落盘 simhash」与「运行时算的 simhash」不一致，
+ *     会导致「同一本书两次查重结果不同」这种极难定位的问题。
+ */
+function simhashInputOf(entries) {
+  return entries.map(e => {
+    if (!e || typeof e !== 'object') return '';
+    const keys = Array.isArray(e.key) ? e.key.join(',') : (e.key || '');
+    return `${keys} ${e.content || ''}`;
+  }).join('\n')
+    .replace(/\s+/g, ' ')
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .toLowerCase()
+    .trim();
+}
+
 const MAX_PLUGIN_SCRIPT_BYTES   = 2 * 1024 * 1024;  // 🧩 单个插件脚本读取上限（超大文件跳过）
 const SCAN_FILE_BATCH        = 64;               // 扫描文件批并发
 const SCAN_PROGRESS_STEP     = 100;              // 每 N 个文件上报一次进度
@@ -2510,6 +2883,17 @@ app.whenReady().then(() => {
     scanCache.__v = SCAN_CACHE_VERSION;
     if (!scanCache.worldbook || typeof scanCache.worldbook !== 'object') scanCache.worldbook = {};
     if (!scanCache.preset || typeof scanCache.preset !== 'object') scanCache.preset = {};
+    // 🔁 PK-27 / S1'：`wbMeta` **子结构版本**检查（新增 L1a 摘要字段）。
+    //    旧 `wbMeta` 没有 `keyHashes` → 若沿用，phase 1 命中会跳过阶段 2 → **查重拿不到索引**。
+    //    ⚠️ 只丢弃 `wbMeta`（不动 `worldbook` 的 valid 判定缓存）——
+    //       后者若一起丢会触发一次全量重扫（几百本要几十秒），而前者丢弃只让阶段 2 重算一次（本来就要读盘）。
+    if (scanCache.wbMeta && typeof scanCache.wbMeta === 'object' && scanCache.__wbMetaV !== WB_META_CACHE_VERSION) {
+      console.warn('[scanCache] wbMeta 子结构版本不符（旧=' + scanCache.__wbMetaV
+        + ' 新=' + WB_META_CACHE_VERSION + '），已丢弃 wbMeta 重建（worldbook 判定缓存保留）');
+      scanCache.wbMeta = {};
+    }
+    scanCache.__wbMetaV = WB_META_CACHE_VERSION;
+    if (!scanCache.wbMeta || typeof scanCache.wbMeta !== 'object') scanCache.wbMeta = {};
     return scanCache;
   };
   const saveScanCache = () => {
@@ -2547,18 +2931,25 @@ app.whenReady().then(() => {
 
   // 扫描世界书目录 (仅限 .json，经 isValidWorldbook 严格防伪过滤)
   // 【修复】升级为深度递归扫描：穿透所有子文件夹/二级文件夹，只要含 .json 世界书就全部提取
-  ipcMain.handle('wb:scan', async (event, dirPath) => {
+  // 🔁 rescan（2026-09-22）：查重/版本对比前需要**重扫磁盘**才能拿到最新数据与真实进度。
+  //    此时目录必然已由用户显式打开过（白名单内）→ 指纹验证是多余的；
+  //    且**顶层无 .json**（全是子目录）的世界书库会被指纹验证误拒。
+  //    ⚠️ 安全边界：`rescan` 只是**跳过"新目录的指纹验证"**，并未放宽 `isPathAllowed` ——
+  //       不在白名单的目录传 rescan 依然会被下面的 isPathAllowed 检查拦下（见下一个 if）。
+  ipcMain.handle('wb:scan', async (event, dirPath, opts) => {
     try {
       if (!dirPath || !fs.existsSync(dirPath)) {
         return { success: false, error: '目录不存在: ' + dirPath };
       }
+      const isRescan = !!(opts && opts.rescan);
       // 【安全加固 v1.8.5】白名单自扩权后门修复（对齐 tavern:pushDir 指纹验证模式）：
       //   旧版无条件 addAllowedRoot(dirPath) —— 被注入的渲染层脚本可传任意目录
       //   （如 C:\Users）直接获得该目录树永久读写授权，整个 isPathAllowed 安全模型被单击穿透。
       //   现在：① 已在白名单（本会话经 dialog:selectGenericFolder 真实选择加入）→ 直接通过；
       //        ② 未授权（如重启后从 localStorage 恢复的世界书目录）→ 必须通过世界书指纹验证
       //          （顶层存在 ≥1 个通过 isValidWorldbook 校验的 .json）才信任并加入白名单。
-      if (!isPathAllowed(dirPath)) {
+      //   ③ rescan=true（已打开过的目录重扫）→ 跳过 ② 的指纹验证（见上方注释）。
+      if (!isPathAllowed(dirPath) && !isRescan) {
         let hasWbFingerprint = false;
         try {
           const names = fs.readdirSync(dirPath).filter(n => n.toLowerCase().endsWith('.json')).slice(0, 20);
@@ -2576,8 +2967,104 @@ app.whenReady().then(() => {
         }
         addAllowedRoot(dirPath);
       }
+      // 🔁 rescan 路径：目录必须已在白名单（本会话打开过），否则拒绝 —— 与上面同一把锁
+      if (isRescan && !isPathAllowed(dirPath)) {
+        return { success: false, error: '该目录未授权（请先通过「打开世界书目录」选择一次）。' };
+      }
       const results = [];
       const skipped = [];   // 📢 DF-18：被跳过的文件必须可见（数量 + 路径 + 原因），不再静默丢弃
+      // 🧠 PK-20：本次扫描的**累计内联预算**用量（按磁盘字节计）与因超预算转懒加载的文件数
+      let inlineBudgetUsed = 0;
+      let inlineSkippedCount = 0;
+
+      // ⚡ 秒开（2026-09-22）：`fastListOnly=true` → **只 readdir + stat，完全不读文件内容**。
+      //    实测 1001 本仅 43ms（读内容要 36s）。渲染层拿到列表后可立即出界面（书名回退文件名），
+      //    随后再调一次普通扫描（走持久化元数据缓存）补全书名/词条数。
+      const fastListOnly = !!(opts && opts.fastListOnly);
+      if (fastListOnly) {
+        const metaCache0 = loadScanCache().wbMeta || {};
+        // 🛡️ PK-24：秒开**不能跳过世界书校验**（DF-18 已踩过同款坑：绕过 `isValidWorldbook`
+        //    会把角色卡 / 预设 / 大表格 / 损坏 JSON 也当世界书入库）。
+        //    解法：复用完整扫描写下的 `worldbook` 缓存里的既有判定 `{ mtime, valid }` ——
+        //    **零额外读盘**即可过滤「上次已判定为非世界书」的文件；未判定的交给阶段 2。
+        const validCache0 = loadScanCache().worldbook || {};
+        const fastOut = [];
+        const fastSkipped = [];
+        let fastTotal = 0;
+        const fastVisited = new Set();
+        // 📊 2026-09-22 提速实测（**结论：已到物理下限，不要优化**）：
+        //    阶段 1（s5000 / 5401 个 `.json`）实测 **~780ms**，其中：
+        //      · 纯 `stat`（5001 文件）        **649ms（83%）** ← 磁盘元数据操作的**物理下限**
+        //      · readdir + 缓存判定 + 组装       ~133ms
+        //    已验证**无效**的优化方向：
+        //      ① 批量 `Promise.all(stat)` 后再统一判定 → 实测 **更慢**（1164ms，并发开销 > 收益）；
+        //      ② 跳过指纹验证（`rescan:true`）→ 与普通路径**几乎相同**（1550 vs 1580ms），
+        //         说明**指纹验证不是瓶颈**；
+        //      ③ 提高并发（T6 实验）→ 并发 2→12 仅改善 **3%**。
+        //    ⇒ **保持逐个 stat 的朴素实现**（简单、无额外复杂度）。
+        const fastWalk = async (dir, depth = 0) => {
+          let realDir;
+          try { realDir = fs.realpathSync(dir); } catch (e) { return; }
+          if (fastVisited.has(realDir)) return;
+          fastVisited.add(realDir);
+          let entries;
+          try { entries = await fs.promises.readdir(dir, { withFileTypes: true }); } catch (e) { return; }
+          // 本层文件：只 stat，不读内容
+          const files = entries
+            .filter(e => !e.name.startsWith('.') && e.isFile() && path.extname(e.name).toLowerCase() === '.json')
+            .map(e => path.join(dir, e.name));
+          await Promise.all(files.map(async (fullPath) => {
+            let st;
+            try { st = await fs.promises.stat(fullPath); } catch (e) { return; }
+            fastTotal++;
+            const mt = Math.round(st.mtimeMs);
+            // 🛡️ PK-24：上次完整扫描已判定「不是世界书」且 mtime 未变 → 直接剔除，不进列表
+            const vc = validCache0[fullPath];
+            if (vc && vc.mtime === mt && vc.valid === false) {
+              fastSkipped.push({ path: fullPath, size: st.size, reason: '此前已判定为非世界书（缓存，mtime 未变）' });
+              return;
+            }
+            // ✅ 上次判定「是世界书」且 mtime 未变 → 可安全使用元数据缓存（0 次读盘）
+            const isKnownValid = !!(vc && vc.mtime === mt && vc.valid === true);
+            const cached = metaCache0[fullPath];
+            const hit = isKnownValid && cached && cached.mtime === mt && cached.size === st.size;
+            fastOut.push({
+              path: fullPath,
+              name: path.basename(fullPath),
+              size: st.size,
+              mtime: st.mtimeMs,
+              // 缓存命中 → 直接给出书名/词条数（0 次读盘）；未命中 → 先给 null，后台补
+              entryCount: hit ? cached.entryCount : null,
+              wbName: hit ? cached.name : null,
+              // 🧠 PK-27 / S1'（2026-09-22 实测踩到的 bug）：
+              //    缓存命中时必须**一并给出 L1a 摘要**（`keyHashes`/`exactContentHash`）。
+              //    ⚠️ 漏了这两个字段的后果：**热缓存下 `metaPending:false` → 阶段 2 被跳过
+              //       → 查重拿不到索引** → 表现为「首次查重正常、再次查重全丢」（极难定位）。
+              //    判定 `hit` 还要求「摘要存在」—— 老缓存（升级前写入）没有摘要字段，
+              //    此时**必须回落 `metaPending:true`**，让阶段 2 补算，而不是返回 `keyHashes: undefined`。
+              ...(hit && Array.isArray(cached.keyHashes)
+                ? { keyHashes: cached.keyHashes, keyCount: cached.keyHashes.length, exactContentHash: cached.exactContentHash || null }
+                : {}),
+              heavy: st.size > SCAN_INLINE_MAX_BYTES,
+              dataLoaded: false,
+              data: null,
+              // metaPending：是否还需要阶段 2 补元数据（也含「尚未判定有效性」/「缓存无摘要」的情况）
+              metaPending: !(hit && Array.isArray(cached.keyHashes))
+            });
+          }));
+          if (depth >= 5) return;
+          for (const entry of entries) {
+            if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
+            if (skipFolders.includes(entry.name.toLowerCase())) continue;
+            await fastWalk(path.join(dir, entry.name), depth + 1);
+          }
+        };
+        await fastWalk(dirPath);
+        try {
+          event.sender.send('wb:scan-progress', { phase: 'done', done: fastTotal, total: fastTotal, current: '' });
+        } catch (e) { /* 忽略 */ }
+        return { success: true, data: fastOut, skipped: fastSkipped, fast: true, inlineMB: 0, inlineSkipped: 0 };
+      }
 
       // 📊 T2 真进度条（2026-09-21）：`wb:scan` 旧形态是**单次 IPC 一次性返回** ——
       //    渲染层在 await 期间拿不到任何进度，上百本书时用户只能干等（窗口看似卡死）。
@@ -2652,6 +3139,8 @@ app.whenReady().then(() => {
         if (depth >= 5) return;
         // 本目录 JSON 并发解析（严格防伪校验：确保只拦截真正的世界书 JSON）
         const cache = (loadScanCache().worldbook = loadScanCache().worldbook || {});
+        // ⚡ 秒开：世界书**元数据缓存**（只存 name/entryCount，不存正文）
+        const metaCache = (loadScanCache().wbMeta = loadScanCache().wbMeta || {});
 
         // 📊 DF-18 分级：先 stat 一遍，把「大文件」与「常规」分开 ——
         //    常规维持 32 并发；大文件单独低并发批次，避免 50MB × 32 打爆主进程。
@@ -2714,13 +3203,46 @@ app.whenReady().then(() => {
             const valid = isValidWorldbook(wbData);
             cache[fullPath] = { mtime: mt, valid };
             if (valid) {
+              // 🧠 PK-20：**累计内联预算**用尽 → 判定仍然做（保证正确性），但**不保留正文**。
+              //    ⚠️ 关键教训（首次实现踩到）：不能在「读文件之前」就 `return` 只回元数据 ——
+              //       那样会**绕过 `isValidWorldbook` 校验**，把目录里的诱饵 JSON（角色卡 / 大表格）
+              //       也当成世界书入库（实测 36 个诱饵被误判为有效：501→537）。
+              //    ⚠️ 也不能用 `st.size`（磁盘字节）当预算口径 —— 字节 ≠ 对象体积，
+              //       用它推算会严重低估内存占用。**必须用 parse 后的真实字符量**（`content.length`），
+              //       它直接反映 JS 字符串内存（UTF-16 每字符 2 字节）。
+              const willInline = inlineBudgetUsed < SCAN_INLINE_TOTAL_MAX_BYTES;
+              if (willInline) inlineBudgetUsed += content.length;
+              else inlineSkippedCount++;
               const entriesArr = Array.isArray(wbData.entries) ? wbData.entries : [];
+              // ⚡ 秒开：把「书名 / 词条数」写入**持久化元数据缓存**（下次秒开可直接命中，0 次读盘）
+              const wbDisplayName = (typeof wbData.name === 'string' && wbData.name.trim())
+                ? wbData.name.trim() : path.basename(fullPath, '.json');
+              // 🧠 PK-27 / S1'：顺带产出 **L1a 摘要**（正文已在内存 → **零额外读盘**，实测 0.04ms/本）
+              //    ⚠️ 与 `wb:meta` **同一份 metaCache / 同一口径**，避免「扫一次有、扫一次无」
+              const keyHashes = buildKeyHashes(entriesArr);
+              const exactHash = entriesArr.length ? exactContentHash(entriesArr) : null;
+              // 🧬 S3'（2026-09-23）：**L1b simhash**（默认关闭 —— 173ms/本，见 `WB_STORE_SIMHASH` 注释）
+              const simhash = (WB_STORE_SIMHASH && entriesArr.length)
+                ? computeSimhash64(simhashInputOf(entriesArr)) : null;
+              metaCache[fullPath] = {
+                mtime: mt, size: st.size, name: wbDisplayName, entryCount: entriesArr.length,
+                keyHashes, exactContentHash: exactHash,
+                ...(simhash ? { simhash } : {})
+              };
               results.push({
                 path: fullPath, name: path.basename(fullPath),
-                size: st.size, mtime: st.mtimeMs, entryCount: entriesArr.length,
-                // heavy = 大文件（>5MB，走低并发档）；用于界面提示与懒加载判断
-                heavy: st.size > SCAN_INLINE_MAX_BYTES,
-                dataLoaded: true, data: wbData
+                size: st.size, mtime: st.mtimeMs,
+                // 未内联时仍给出准确词条数（已 parse，零额外成本）——用户能看到「这本有多少条」
+                entryCount: entriesArr.length,
+                wbName: wbDisplayName,
+                // 🧠 L1a 摘要随扫描结果一起回渲染层（供查重直接用，**无需二次读盘**）
+                keyHashes, exactContentHash: exactHash,
+                // 🧬 L1b（默认关闭）
+                simhash: simhash || null,
+                // heavy = 大文件（>5MB，走低并发档）**或**因预算未内联；用于界面提示与懒加载判断
+                heavy: st.size > SCAN_INLINE_MAX_BYTES || !willInline,
+                dataLoaded: willInline,
+                data: willInline ? wbData : null
               });
             } else {
               skipped.push({ path: fullPath, size: st.size, reason: '结构校验未通过（不是标准世界书）' });
@@ -2761,11 +3283,171 @@ app.whenReady().then(() => {
       // � T2：终态进度（done=total）—— 渲染层据此把进度条推到 100% 再收起
       progressState.done = progressState.total;
       sendWbProgress('done');
+      // 🧠 PK-20：把「累计内联预算」的用量与转懒加载的文件数回传，便于渲染层写日志/自查
+      const inlineMB = Math.round(inlineBudgetUsed / 1048576);
+      if (inlineSkippedCount > 0) {
+        console.warn(`[wb:scan] 累计内联预算 ${inlineMB}MB 已用尽（上限 ${Math.round(SCAN_INLINE_TOTAL_MAX_BYTES / 1048576)}MB）`
+          + ` → 其余 ${inlineSkippedCount} 本仅回元数据，正文按需懒加载（避免渲染层 OOM，见 PK-20）`);
+      }
       // 📢 DF-18：skipped 一并回传（渲染层显示「N 个文件被跳过」+ 可展开文件名）
-      return { success: true, data: results, skipped };
+      return {
+        success: true, data: results, skipped,
+        inlineMB, inlineSkipped: inlineSkippedCount
+      };
     } catch (err) {
       // 📊 T2：失败也要收尾，否则进度条会永远停在中间（渲染层收不到 done 无法复位）
       try { sendWbProgress('done'); } catch (e) { /* 忽略 */ }
+      return { success: false, error: err.message };
+    }
+  });
+
+  // ⚡ 秒开阶段 2：后台补全世界书元数据（书名 / 词条数）+ **L1a 摘要**（PK-27 / S1'）
+  //
+  // 为什么单独开一条通道：阶段 1（`fastListOnly`）只 readdir+stat（43ms）就让界面出来；
+  //   书名/词条数需要读文件（36s/1001 本），**不能阻塞首屏**，故放到后台慢慢补。
+  // 缓存策略：命中 `wbMeta`（path+mtime+size 一致）→ **不读盘**直接返回；否则读一次并写缓存。
+  // 只返回 `{path, wbName, entryCount, keyHashes, exactContentHash}`，**绝不返回正文**（那正是 PK-20 的 OOM 根因）。
+  // 🛡️ PK-24：本通道**必须**顺带跑 `isValidWorldbook` —— 阶段 1 只按 `.json` 后缀列出，
+  //   若不在这里校验，角色卡 / 预设 / 大表格 / 损坏 JSON 会被当成世界书（DF-18 同款坑）。
+  //   判定结果写回 `worldbook` 缓存（`{mtime, valid}`），下次秒开阶段 1 就能**零读盘**过滤。
+  // 🧠 PK-27 / S1'：**顺带产出 L1a 摘要**（keys hash + exactContentHash）——
+  //   正文本就在这里 parse 过，算摘要**零额外读盘**（实测 0.04ms/本）。
+  //   ⇒ 阶段 2 的这 160s **同时完成「补元数据」与「建查重索引」两件事**，之后查重永不重读正文。
+  // 🛡️ S1' 新增**单本体积守卫**（v3 评审 §3.5 盲区）：超限书只回元数据 + `oversized`，不读正文不算摘要。
+  ipcMain.handle('wb:meta', async (event, paths) => {
+    try {
+      if (!Array.isArray(paths) || !paths.length) return { success: true, data: [] };
+      const metaCache = (loadScanCache().wbMeta = loadScanCache().wbMeta || {});
+      const validCache = (loadScanCache().worldbook = loadScanCache().worldbook || {});
+      const out = [];
+      let dirty = false;
+      let done = 0;
+      let oversizedCount = 0;
+      const total = paths.length;
+      const sendMetaProgress = () => {
+        try { event.sender.send('wb:meta-progress', { done, total }); } catch (e) { /* 忽略 */ }
+      };
+      // 分批并发（`fs.promises` 真异步，否则并发无效 —— T6 教训）
+      for (let i = 0; i < paths.length; i += WB_META_CONCURRENCY) {
+        const batch = paths.slice(i, i + WB_META_CONCURRENCY);
+        const part = await Promise.all(batch.map(async (p) => {
+          done++;
+          if (!p || !isPathAllowed(p)) return null;
+          let st;
+          try { st = await fs.promises.stat(p); } catch (e) { return null; }
+          const mt = Math.round(st.mtimeMs);
+          // 🛡️ PK-24：已判定为「非世界书」且 mtime 未变 → 直接回报无效，不读盘
+          const vc0 = validCache[p];
+          if (vc0 && vc0.mtime === mt && vc0.valid === false) {
+            return { path: p, wbName: null, entryCount: null, valid: false, cached: true };
+          }
+          // 🛡️ S1' 体积守卫：超限书**不读正文、不算完整摘要**（否则 8 并发遇 200MB 书 → 1.6GB 峰值）
+          //    ⚠️ 与扫描主路径 `SCAN_PARSE_MAX_BYTES` 同口径，避免「扫描认为有效、查重认为排除」的口径分裂
+          //    🌊 P1-2（2026-09-23，v3 评审 P0-3 选项 B）：**改为流式提取 keys** ——
+          //       超限书不再「永远无法参与查重」，而是用 O(单条 key) 内存产出 L1a 摘要。
+          //       ⚠️ 仍然**不物化整个 JSON**（这是 50MB 守卫的初衷：防并发峰值）。
+          if (st.size > WB_META_MAX_BYTES) {
+            oversizedCount++;
+            // 命中缓存（同 mtime+size）→ 直接复用，不重扫
+            const oc = metaCache[p];
+            if (oc && oc.mtime === mt && oc.size === st.size && Array.isArray(oc.keyHashes)) {
+              return {
+                path: p, wbName: oc.name, entryCount: oc.entryCount, valid: true,
+                oversized: true, size: st.size, cached: true,
+                keyHashes: oc.keyHashes, exactContentHash: oc.exactContentHash || null,
+                streamed: true
+              };
+            }
+            try {
+              const sr = await buildKeyHashesStreaming(p);
+              // ⚠️ 超大书**不写 `validCache`**（流式扫描**没有**做 `isValidWorldbook` 完整判定，
+              //    写进去会让下次秒开误认为「已判定有效」→ 口径分裂）。
+              //    只写 `metaCache`（它按 mtime+size 校验，是安全的）。
+              metaCache[p] = {
+                mtime: mt, size: st.size, name: sr.name, entryCount: null,
+                keyHashes: sr.keyHashes, exactContentHash: null
+              };
+              dirty = true;
+              return {
+                path: p, wbName: sr.name, entryCount: null, valid: true,
+                oversized: true, size: st.size, cached: false,
+                keyHashes: sr.keyHashes, exactContentHash: null,
+                streamed: true, truncated: sr.truncated
+              };
+            } catch (e) {
+              // 流式失败（文件损坏 / 非 JSON）→ 退化为「只回元数据」（旧行为，不静默报错）
+              console.warn(`[wb:meta] 超大书流式提取失败（退化为只回元数据）: ${path.basename(p)} — ${e.message}`);
+              return {
+                path: p, wbName: null, entryCount: null, valid: true,
+                oversized: true, size: st.size, cached: false, streamError: e.message
+              };
+            }
+          }
+          const cached = metaCache[p];
+          if (cached && cached.mtime === mt && cached.size === st.size) {
+            return {
+              path: p, wbName: cached.name, entryCount: cached.entryCount, valid: true, cached: true,
+              // 🧠 S1'：命中缓存时一并返回 L1a 摘要（0 次读盘）
+              keyHashes: cached.keyHashes, exactContentHash: cached.exactContentHash,
+              // 🧬 S3'（2026-09-23）：L1b simhash 也一并返回（未开启落盘时为空）
+              simhash: cached.simhash || null
+            };
+          }
+          // 未命中 → 读一次并写缓存
+          try {
+            const text = await fs.promises.readFile(p, 'utf-8');
+            const data = JSON.parse(text);
+            // 🛡️ PK-24：与完整扫描**同一把守门员**，结果写回 worldbook 缓存供下次秒开过滤
+            const valid = isValidWorldbook(data);
+            validCache[p] = { mtime: mt, valid };
+            dirty = true;
+            if (!valid) {
+              // ❌ 非世界书：**不写 metaCache**（避免产生假书名/假词条数），并清理可能存在的旧记录
+              if (metaCache[p]) { delete metaCache[p]; }
+              return { path: p, wbName: null, entryCount: null, valid: false, cached: false };
+            }
+            const entries = Array.isArray(data.entries) ? data.entries
+              : (data.entries && typeof data.entries === 'object' ? Object.values(data.entries) : null);
+            const nm = (typeof data.name === 'string' && data.name.trim())
+              ? data.name.trim() : path.basename(p, '.json');
+            const cnt = entries ? entries.length : 0;
+            // 🧠 S1'：**L1a 摘要**（零额外读盘 —— 正文已在内存）
+            const keyHashes = entries ? buildKeyHashes(entries) : [];
+            const exactHash = entries ? exactContentHash(entries) : null;
+            // 🧬 S3'（2026-09-23）：**L1b simhash**（默认关闭；开启则零额外读盘，仅多花 CPU）
+            const simhash = (WB_STORE_SIMHASH && entries && entries.length)
+              ? computeSimhash64(simhashInputOf(entries)) : null;
+            metaCache[p] = {
+              mtime: mt, size: st.size, name: nm, entryCount: cnt,
+              // ↓ L1a（供同名查重 S2'）
+              keyHashes, exactContentHash: exactHash,
+              // ↓ L1b（供内容级查重 S3'；未开启时为 undefined —— 缓存里不占空间）
+              ...(simhash ? { simhash } : {})
+            };
+            return {
+              path: p, wbName: nm, entryCount: cnt, valid: true, cached: false,
+              keyHashes, exactContentHash: exactHash,
+              simhash: simhash || null
+            };
+          } catch (e) {
+            // 解析失败 → 判定无效（与完整扫描一致：坏 JSON 不是世界书）
+            validCache[p] = { mtime: mt, valid: false };
+            if (metaCache[p]) delete metaCache[p];
+            dirty = true;
+            return { path: p, wbName: null, entryCount: null, valid: false, error: e.message, cached: false };
+          }
+        }));
+        for (const x of part) if (x) out.push(x);
+        sendMetaProgress();
+      }
+      if (dirty) saveScanCache();
+      if (oversizedCount > 0) {
+        // 📢 PK-26 教训「静默 = 坏了」：超限书**必须可见**（否则用户以为查重漏了书）
+        console.warn(`[wb:meta] ${oversizedCount} 本世界书超过体积守卫 ${Math.round(WB_META_MAX_BYTES / 1048576)}MB，已跳过摘要（oversized）`);
+      }
+      try { event.sender.send('wb:meta-progress', { done: total, total, finished: true, oversized: oversizedCount }); } catch (e) { /* 忽略 */ }
+      return { success: true, data: out, oversized: oversizedCount };
+    } catch (err) {
       return { success: false, error: err.message };
     }
   });

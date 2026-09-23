@@ -15,8 +15,8 @@
                 <label v-for="wb in worldbooks" :key="wb.path" class="flex items-center gap-3 p-2.5 bg-zinc-900/50 border border-zinc-700 rounded-lg cursor-pointer hover:border-amber-500/50 transition">
                     <input type="checkbox" :checked="selectedPaths.includes(wb.path)" @change="togglePath(wb.path, $event.target.checked)" class="rounded bg-zinc-900 border-zinc-700 text-amber-500 focus:ring-0">
                     <div class="flex flex-col min-w-0 flex-1">
-                        <span class="text-xs font-bold text-zinc-200 truncate">{{ (wb.data && wb.data.name) || wb.name }}</span>
-                        <span class="text-[10px] text-zinc-500 font-mono">{{ (wb.data && wb.data.entries) ? wb.data.entries.length : 0 }} 个词条 | {{ wb.name }}</span>
+                        <span class="text-xs font-bold text-zinc-200 truncate">{{ wbNameOf(wb) }}</span>
+                        <span class="text-[10px] text-zinc-500 font-mono">{{ wbCountOf(wb) }} 个词条 | {{ wb.name }}</span>
                     </div>
                 </label>
             </div>
@@ -47,6 +47,15 @@ export default {
                 ? [...this.selectedPaths, path]
                 : this.selectedPaths.filter(p => p !== path);
             this.$emit('update:selectedPaths', next);
+        },
+        // ⚡ PK-26：秒开后 `wb.data` 为 null → 书名/词条数走**轻量字段**（否则全显「0 个词条」）
+        wbNameOf(wb) {
+            return (wb && (wb.wbName || (wb.data && wb.data.name) || wb.name)) || '未命名';
+        },
+        wbCountOf(wb) {
+            if (!wb) return 0;
+            if (typeof wb.entryCount === 'number') return wb.entryCount;
+            return (wb.data && Array.isArray(wb.data.entries)) ? wb.data.entries.length : 0;
         }
     }
 };

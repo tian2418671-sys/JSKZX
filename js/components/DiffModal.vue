@@ -19,7 +19,7 @@
                     <img v-if="masterItem && masterItem.avatar" :src="masterItem.avatar" class="w-10 h-10 rounded object-cover border border-emerald-500/50">
                     <span v-else class="text-3xl opacity-50">{{ iconFor(masterItem) }}</span>
                     <div class="flex flex-col min-w-0">
-                        <span class="text-emerald-400 truncate">👑 推荐版: {{ (masterItem && masterItem.data && masterItem.data.name) || (masterItem ? masterItem.name : '未知') }}</span>
+                        <span class="text-emerald-400 truncate">👑 推荐版: {{ displayNameOf(masterItem) }}</span>
                         <span class="text-[10px] text-zinc-500 font-mono truncate">{{ fileNameOf(masterItem) }}</span>
                     </div>
                 </div>
@@ -27,7 +27,7 @@
                     <img v-if="compareItem && compareItem.avatar" :src="compareItem.avatar" class="w-10 h-10 rounded object-cover border border-amber-500/50">
                     <span v-else class="text-3xl opacity-50">{{ iconFor(compareItem) }}</span>
                     <div class="flex flex-col min-w-0">
-                        <span class="text-amber-400 truncate">🔍 对比版: {{ (compareItem && compareItem.data && compareItem.data.name) || (compareItem ? compareItem.name : '未知') }}</span>
+                        <span class="text-amber-400 truncate">🔍 对比版: {{ displayNameOf(compareItem) }}</span>
                         <span class="text-[10px] text-zinc-500 font-mono truncate">{{ fileNameOf(compareItem) }}</span>
                     </div>
                 </div>
@@ -47,7 +47,12 @@
                     <!-- 🧩 词条级对齐：把「不对称增删」表达成 only-a / only-b / both 三类 -->
                     <template v-if="f.isEntryPairs">
                         <div class="space-y-1.5">
-                            <div v-for="(p, pIdx) in f.pairs" :key="pIdx"
+                            <!-- ⚡ 分页（2026-09-22）：397 个词条卡片 × 两侧 ≈ 1.2 万 DOM 节点，
+                                 一次性全渲染是弹窗卡顿的两大来源之一（另一处是整篇比对） -->
+                            <div class="text-[10px] text-zinc-500 px-1 pb-1">
+                                显示前 {{ visiblePairs(idx, f.pairs).length }} / {{ (f.pairs || []).length }} 个词条
+                            </div>
+                            <div v-for="(p, pIdx) in visiblePairs(idx, f.pairs)" :key="pIdx"
                                  class="border rounded-lg overflow-hidden"
                                  :class="p.side === 'only-b' ? 'border-emerald-500/40 bg-emerald-950/20'
                                        : p.side === 'only-a' ? 'border-rose-500/40 bg-rose-950/20'
@@ -80,13 +85,20 @@
                                                       :class="keyClass(payloadFor(p), k, 'a')">{{ k }}</span>
                                             </div>
                                             <!-- 🎨 行对齐差异着色：变更行红/绿底 + 行内精确高亮 -->
+                                            <!-- ⚡ 分块渲染：单词条正文可达数千行，一次性全渲染会卡死主线程 -->
                                             <div v-if="p.side === 'both' && payloadFor(p).changed"
                                                  class="text-zinc-400 max-h-[220px] overflow-y-auto custom-scrollbar rounded border border-zinc-800/60 bg-black/20">
-                                                <div v-for="(row, rIdx) in payloadFor(p).diffRows" :key="rIdx"
+                                                <div v-for="(row, rIdx) in visibleEntryRows(idx, pIdx, payloadFor(p).diffRows)" :key="rIdx"
                                                      class="flex gap-2 px-1 py-px leading-relaxed"
                                                      :class="rowClass(row.kind)">
                                                     <span class="shrink-0 w-7 text-right text-[9px] text-zinc-600 select-none">{{ row.a ? row.a.no : '' }}</span>
                                                     <span class="min-w-0 whitespace-pre-wrap break-words"><template v-if="row.a"><template v-for="(sg, sIdx) in row.a.segs" :key="sIdx"><span :class="sg.hl ? hlClass(row.kind) : ''">{{ sg.text }}</span></template></template><span v-else class="text-zinc-700">·</span></span>
+                                                </div>
+                                                <div v-if="hasMoreEntryRows(idx, pIdx, payloadFor(p).diffRows)" class="text-center py-1">
+                                                    <button @click="showMoreEntryRows(idx, pIdx)"
+                                                            class="text-[10px] px-2 py-0.5 rounded border border-zinc-700 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 transition">
+                                                        ▼ 显示更多（{{ visibleEntryRows(idx, pIdx, payloadFor(p).diffRows).length }} / {{ payloadFor(p).diffRows.length }} 行）
+                                                    </button>
                                                 </div>
                                             </div>
                                             <!-- 未变更 / 单侧新增：无差异可着色，原样输出 -->
@@ -104,11 +116,17 @@
                                             </div>
                                             <div v-if="p.side === 'both' && payloadFor(p).changed"
                                                  class="text-zinc-400 max-h-[220px] overflow-y-auto custom-scrollbar rounded border border-zinc-800/60 bg-black/20">
-                                                <div v-for="(row, rIdx) in payloadFor(p).diffRows" :key="rIdx"
+                                                <div v-for="(row, rIdx) in visibleEntryRows(idx, pIdx, payloadFor(p).diffRows)" :key="rIdx"
                                                      class="flex gap-2 px-1 py-px leading-relaxed"
                                                      :class="rowClass(row.kind)">
                                                     <span class="shrink-0 w-7 text-right text-[9px] text-zinc-600 select-none">{{ row.b ? row.b.no : '' }}</span>
                                                     <span class="min-w-0 whitespace-pre-wrap break-words"><template v-if="row.b"><template v-for="(sg, sIdx) in row.b.segs" :key="sIdx"><span :class="sg.hl ? hlClass(row.kind) : ''">{{ sg.text }}</span></template></template><span v-else class="text-zinc-700">·</span></span>
+                                                </div>
+                                                <div v-if="hasMoreEntryRows(idx, pIdx, payloadFor(p).diffRows)" class="text-center py-1">
+                                                    <button @click="showMoreEntryRows(idx, pIdx)"
+                                                            class="text-[10px] px-2 py-0.5 rounded border border-zinc-700 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 transition">
+                                                        ▼ 显示更多（{{ visibleEntryRows(idx, pIdx, payloadFor(p).diffRows).length }} / {{ payloadFor(p).diffRows.length }} 行）
+                                                    </button>
                                                 </div>
                                             </div>
                                             <div v-else class="text-zinc-400 whitespace-pre-wrap break-words max-h-[220px] overflow-y-auto custom-scrollbar">{{ payloadFor(p).contentB || '（无正文）' }}</div>
@@ -119,6 +137,12 @@
                             </div>
                             <div v-if="!f.pairs || !f.pairs.length" class="text-[11px] text-zinc-500 italic px-2 py-1">
                                 两本世界书均无词条，无可对齐内容。
+                            </div>
+                            <div v-if="hasMorePairs(idx, f.pairs)" class="text-center pt-2">
+                                <button @click="showMorePairs(idx)"
+                                        class="text-[11px] px-3 py-1 rounded border border-zinc-700 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 transition">
+                                    ▼ 显示更多词条（已显示 {{ visiblePairs(idx, f.pairs).length }} / {{ f.pairs.length }}）
+                                </button>
                             </div>
                         </div>
                     </template>
@@ -150,21 +174,43 @@
                              直读 f.diffText.masterLines 会 null.masterLines → 渲染期 TypeError（AR-39） -->
                         <!-- 🎨 改为「行对齐」渲染：两侧共用同一份 rows（行号一一对应）→ 天然对齐，
                              变更行加底色 + 行内精确高亮（此前两侧各自滚动、行与行对不齐） -->
-                        <div v-else-if="f.diffText" class="grid grid-cols-2 gap-3 text-xs font-mono">
-                            <div class="bg-zinc-950/80 border border-zinc-800 rounded p-2.5 max-h-[300px] overflow-y-auto custom-scrollbar leading-relaxed">
-                                <div v-for="(row, rIdx) in f.diffText.rows" :key="rIdx"
-                                     class="flex gap-2 px-1 py-px rounded-sm"
-                                     :class="rowClass(row.kind)">
-                                    <span class="shrink-0 w-8 text-right text-[9px] text-zinc-600 select-none">{{ row.a ? row.a.no : '' }}</span>
-                                    <span class="min-w-0 whitespace-pre-wrap break-words"><template v-if="row.a"><template v-for="(sg, sIdx) in row.a.segs" :key="sIdx"><span :class="sg.hl ? hlClass(row.kind) : ''">{{ sg.text }}</span></template></template><span v-else class="text-zinc-700">·</span></span>
-                                </div>
+                        <!-- ⚡ 性能（2026-09-22）：**默认折叠 + 分块渲染**。
+                             实测真实 397 词条世界书对比会产生 **34,232 个 DOM 节点 / 单次长任务 750ms**，
+                             而这段内容与下方「🧩 词条级对齐」重复 → 默认收起，要看再点开。 -->
+                        <div v-else-if="f.diffText">
+                            <div class="flex items-center justify-between mb-2">
+                                <button @click="toggleExpanded(idx)"
+                                        class="text-[11px] px-2 py-1 rounded border border-zinc-700 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 transition">
+                                    {{ isExpanded(idx) ? '▼ 收起整篇比对' : `▶ 展开整篇比对（共 ${f.diffText.rows.length} 行）` }}
+                                </button>
+                                <span class="text-[10px] text-zinc-500">
+                                    逐条差异请看上方「🧩 词条级对齐」
+                                </span>
                             </div>
-                            <div class="bg-zinc-950/80 border border-zinc-800 rounded p-2.5 max-h-[300px] overflow-y-auto custom-scrollbar leading-relaxed">
-                                <div v-for="(row, rIdx) in f.diffText.rows" :key="rIdx"
-                                     class="flex gap-2 px-1 py-px rounded-sm"
-                                     :class="rowClass(row.kind)">
-                                    <span class="shrink-0 w-8 text-right text-[9px] text-zinc-600 select-none">{{ row.b ? row.b.no : '' }}</span>
-                                    <span class="min-w-0 whitespace-pre-wrap break-words"><template v-if="row.b"><template v-for="(sg, sIdx) in row.b.segs" :key="sIdx"><span :class="sg.hl ? hlClass(row.kind) : ''">{{ sg.text }}</span></template></template><span v-else class="text-zinc-700">·</span></span>
+                            <div v-if="isExpanded(idx)">
+                                <div class="grid grid-cols-2 gap-3 text-xs font-mono">
+                                    <div class="bg-zinc-950/80 border border-zinc-800 rounded p-2.5 max-h-[300px] overflow-y-auto custom-scrollbar leading-relaxed">
+                                        <div v-for="(row, rIdx) in visibleRows(idx, f.diffText.rows)" :key="rIdx"
+                                             class="flex gap-2 px-1 py-px rounded-sm"
+                                             :class="rowClass(row.kind)">
+                                            <span class="shrink-0 w-8 text-right text-[9px] text-zinc-600 select-none">{{ row.a ? row.a.no : '' }}</span>
+                                            <span class="min-w-0 whitespace-pre-wrap break-words"><template v-if="row.a"><template v-for="(sg, sIdx) in row.a.segs" :key="sIdx"><span :class="sg.hl ? hlClass(row.kind) : ''">{{ sg.text }}</span></template></template><span v-else class="text-zinc-700">·</span></span>
+                                        </div>
+                                    </div>
+                                    <div class="bg-zinc-950/80 border border-zinc-800 rounded p-2.5 max-h-[300px] overflow-y-auto custom-scrollbar leading-relaxed">
+                                        <div v-for="(row, rIdx) in visibleRows(idx, f.diffText.rows)" :key="rIdx"
+                                             class="flex gap-2 px-1 py-px rounded-sm"
+                                             :class="rowClass(row.kind)">
+                                            <span class="shrink-0 w-8 text-right text-[9px] text-zinc-600 select-none">{{ row.b ? row.b.no : '' }}</span>
+                                            <span class="min-w-0 whitespace-pre-wrap break-words"><template v-if="row.b"><template v-for="(sg, sIdx) in row.b.segs" :key="sIdx"><span :class="sg.hl ? hlClass(row.kind) : ''">{{ sg.text }}</span></template></template><span v-else class="text-zinc-700">·</span></span>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div v-if="hasMoreRows(idx, f.diffText.rows)" class="text-center mt-2">
+                                    <button @click="showMoreRows(idx)"
+                                            class="text-[11px] px-3 py-1 rounded border border-zinc-700 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 transition">
+                                        ▼ 显示更多（已渲染 {{ visibleRows(idx, f.diffText.rows).length }} / {{ f.diffText.rows.length }} 行）
+                                    </button>
                                 </div>
                             </div>
                         </div>
@@ -211,9 +257,62 @@ export default {
     },
     emits: ['close'],
     data() {
-        return { _payloadCache: new WeakMap() };
+        return {
+            _payloadCache: new WeakMap(),
+            // ⚡ 渲染节流（2026-09-22 卡顿修复）
+            //   实测：真实 397 词条世界书对比 → **34,232 个 DOM 节点**、单次长任务 **750ms**。
+            //   根因是「整篇词条正文总集比对」（23745 行）一次性全部渲染，
+            //   且该内容与下方「词条级对齐」重复。
+            //   ⇒ ① 整篇比对**默认折叠**（用户要看才展开）；② 任何长列表**分块渲染**。
+            expandedFields: {},   // idx → 是否展开整篇比对
+            renderLimit: {},      // idx → 整篇比对已渲染行数
+            rowLimit: {},         // `${idx}:${pIdx}` → 词条内已渲染行数
+            pairsLimit: {},       // idx → 词条级对齐已渲染卡片数
+            pageSize: 400,        // 每次「显示更多」递增的行数
+            pairsPageSize: 30     // 词条卡片每页数量（397 个卡片 ≈ 1.2 万节点，必须分页）
+        };
+    },
+    watch: {
+        // 每次重新打开弹窗都回到「折叠 + 从头渲染」，避免上一次的展开状态与巨大 DOM 残留
+        show(v) {
+            if (v) {
+                this.expandedFields = {};
+                this.renderLimit = {};
+                this.rowLimit = {};
+                this.pairsLimit = {};
+            }
+        }
     },
     methods: {
+        isExpanded(idx) { return !!this.expandedFields[idx]; },
+        toggleExpanded(idx) { this.expandedFields = { ...this.expandedFields, [idx]: !this.expandedFields[idx] }; },
+        // 词条级对齐：只渲染前 N 个词条卡片（默认 30），其余靠「显示更多」按需追加
+        visiblePairs(idx, pairs) {
+            const limit = this.pairsLimit[idx] || this.pairsPageSize;
+            return pairs.length > limit ? pairs.slice(0, limit) : pairs;
+        },
+        hasMorePairs(idx, pairs) { return pairs.length > (this.pairsLimit[idx] || this.pairsPageSize); },
+        showMorePairs(idx) {
+            this.pairsLimit = { ...this.pairsLimit, [idx]: (this.pairsLimit[idx] || this.pairsPageSize) + this.pairsPageSize * 2 };
+        },
+        // 整篇比对：只渲染前 N 行（默认 400），其余靠「显示更多」按需追加
+        visibleRows(idx, rows) {
+            const limit = this.renderLimit[idx] || this.pageSize;
+            return rows.length > limit ? rows.slice(0, limit) : rows;
+        },
+        hasMoreRows(idx, rows) { return rows.length > (this.renderLimit[idx] || this.pageSize); },
+        showMoreRows(idx) { this.renderLimit = { ...this.renderLimit, [idx]: (this.renderLimit[idx] || this.pageSize) + this.pageSize * 2 }; },
+        // 词条内正文行：同样分块（一个词条可达数千行）
+        rowKey(idx, pIdx) { return idx + ':' + pIdx; },
+        visibleEntryRows(idx, pIdx, rows) {
+            const limit = this.rowLimit[this.rowKey(idx, pIdx)] || this.pageSize;
+            return rows.length > limit ? rows.slice(0, limit) : rows;
+        },
+        hasMoreEntryRows(idx, pIdx, rows) { return rows.length > (this.rowLimit[this.rowKey(idx, pIdx)] || this.pageSize); },
+        showMoreEntryRows(idx, pIdx) {
+            const k = this.rowKey(idx, pIdx);
+            this.rowLimit = { ...this.rowLimit, [k]: (this.rowLimit[k] || this.pageSize) + this.pageSize * 2 };
+        },
         // 🎨 行底色：区分「新增 / 缺失 / 变更」三类，扫一眼就能定位
         //    ⚠️ 用左版视角：added = 右版独有（绿）→ 对左版而言是「本端缺失」
         rowClass(kind) {
@@ -240,11 +339,21 @@ export default {
             return 'bg-emerald-900/50 text-emerald-200 border-emerald-500/40';
         },
         // 依据数据形态返回类型图标：世界书 🌍 / 预设 ⚙️ / 角色卡 🎎
+        // ⚡ PK-26：秒开后世界书 `data` 为 null（懒加载）→ 旧写法直接落到 🎎（把世界书画成角色卡）。
+        //    补轻量判据（`entryCount` / `wbName` 只在世界书扫描时产生）。
         iconFor(item) {
-            if (!item || !item.data) return '🎎';
+            if (!item) return '🎎';
+            if (typeof item.entryCount === 'number' || item.wbName) return '🌍';
+            if (!item.data) return '🎎';
             if (Array.isArray(item.data.entries)) return '🌍';
             if ('temperature' in item.data || 'prompts' in item.data || 'prompt_order' in item.data) return '⚙️';
             return '🎎';
+        },
+        // ⚡ PK-26：秒开后世界书 `data` 为 null（懒加载）→ 书名优先轻量 `wbName`，
+        //    否则弹窗标题回退成文件名，用户看不到真实书名。
+        displayNameOf(item) {
+            if (!item) return '未知';
+            return item.wbName || (item.data && item.data.name) || item.name || '未知';
         },
         // 🛡️ 文件名安全提取：path 缺失（未落盘条目）时不再裸 split 抛错（AR-39 次要崩点）
         fileNameOf(item) {

@@ -102,11 +102,11 @@ if (version) {
 // ── 6. 端到端（可选） ──────────────────────────────────────────────────
 if (E2E) {
     const list = E2E === 'prod'
-        ? [['测卡侧栏端到端（生产构建）', 'scripts/chat-sidebar-test.mjs']]
+        ? [['测卡侧栏端到端（生产构建）', 'scripts/tools/chat-sidebar-test.mjs']]
         : [
-            ['大库重复卡/刷新压测', 'scripts/library-dup-search-refresh.mjs'],
-            ['正则增删 UI 探针', 'scripts/_probe-regex-ui.mjs'],
-            ['测卡编排引擎端到端', 'scripts/chat-engine-test.mjs']
+            ['大库重复卡/刷新压测', 'scripts/tools/library-dup-search-refresh.mjs'],
+            ['正则增删 UI 探针', 'scripts/probes/_probe-regex-ui.mjs'],
+            ['测卡编排引擎端到端', 'scripts/tools/chat-engine-test.mjs']
         ];
     for (const [name, script] of list) {
         const r = run('node', [script], { env: { ...process.env, CDP_PORT: String(PORT) } });

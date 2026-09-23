@@ -9,13 +9,15 @@
  *
  * 本模块输出「**行对齐的双列 diff**」：
  *   · 行级 LCS 对齐（先剥公共前缀/后缀行，再做中间段 LCS，规模可控）；
+ *   · 超长文本（> `MAX_LCS_LINES` 行）**不再按行号逐行比对**，改用**锚点对齐**
+ *     （唯一行锚点 + LIS 保序 + 递归收敛到小段后做精确 LCS）——见 `anchoredOps` 与 PK-21；
  *   · 变更块内的「删 + 增」按顺序**配成一对 `changed`**，而不是拆成两条独立记录；
  *   · 对 `changed` 行再做**行内 token 级高亮**（CJK 按单字、拉丁按整词），
  *     这样「一行里只改了几个字」也能精确定位；
  *   · 两侧行号一一对应，组件只需顺序渲染即可**天然对齐**。
  *
  * 性能保护（长正文不能卡死主线程）：
- *   · 行级 LCS 超过 `MAX_LCS_LINES` → 退化为「按位置逐行比对」并置 `truncated`；
+ *   · 行级 LCS 超过 `MAX_LCS_LINES` → 改用**锚点对齐**（O(n log n) 量级，结果仍可靠）并置 `truncated`；
  *   · 单行行内 LCS 的规模积超过 `MAX_INLINE_PRODUCT` → 该行整段标记，不做精细拆分；
  *   · 全篇行内精细比对有总预算 `MAX_INLINE_BUDGET`，超出后自动降级为整段标记。
  *
@@ -197,21 +199,144 @@ function lcsOps(a, b) {
     return ops;
 }
 
-/** 超长文本的降级策略：按位置逐行比对（O(n)，保证两侧仍严格对齐） */
-function positionalOps(a, b) {
-    const ops = [];
-    const n = Math.max(a.length, b.length);
-    for (let i = 0; i < n; i++) {
-        if (i < a.length && i < b.length) {
-            if (a[i] === b[i]) ops.push({ type: 'same', aIdx: i, bIdx: i });
-            else {
-                ops.push({ type: 'del', aIdx: i, bIdx: -1 });
-                ops.push({ type: 'ins', aIdx: -1, bIdx: i });
-            }
-        } else if (i < a.length) ops.push({ type: 'del', aIdx: i, bIdx: -1 });
-        else ops.push({ type: 'ins', aIdx: -1, bIdx: i });
+/**
+ * 超长文本的降级策略：**锚点对齐**（Patience Diff 风格）。
+ *
+ * ⚠️ 为什么不能「按行号逐行比对」（旧实现 `positionalOps`，见 PK-21）：
+ *   只要文本**中段发生行数变化**（插入/删除行），后续所有行号就**全部错位**，
+ *   于是整段被判 `del` + `ins` → 在 `appendRows` 里按顺序**配成 `changed`**。
+ *   实测：23745 行里只有 2 处真实改动，却报出 **23540 行「变更」（假阳性 99.15%）**。
+ *
+ * ✅ 锚点法不依赖行号：
+ *   ① 找**在两侧都恰好出现一次**的行作为锚点（唯一行 → 高置信度对应关系）；
+ *   ② 用**最长递增子序列（LIS）**保留顺序一致的锚点（防重排导致的错位）；
+ *   ③ 以锚点把区间切成小段，**递归**处理每段；
+ *   ④ 段小到 `ANCHOR_EXACT_LINES` 以内 → 直接做**精确 LCS**（此前的降级正是缺了这一步）。
+ *   代价：O(n log n) 量级，且**行数变化不会再污染后续所有行**。
+ *
+ * 找不到锚点时（两侧行几乎全同、无唯一行）退回「先删后增」——
+ * 那是最保守的表达，不会像按行号配对那样制造大面积假 `changed`。
+ */
+const ANCHOR_EXACT_LINES = 500;   // 区间 ≤ 该行数 → 直接用精确 LCS（500² = 25 万 dp 格，可接受）
+
+/** 找出区间内「两侧都唯一」的行作为锚点（按 A 侧下标升序） */
+function findUniqueAnchors(a, b, a0, a1, b0, b1) {
+    // B 侧：行 → 下标；重复出现记为 -1（非唯一）
+    const bIdxOf = new Map();
+    for (let j = b0; j < b1; j++) {
+        const L = b[j];
+        if (!L) continue;                       // 空行噪声大，不参与锚点
+        if (bIdxOf.has(L)) bIdxOf.set(L, -1);
+        else bIdxOf.set(L, j);
     }
-    return ops;
+    // A 侧：行 → 出现次数
+    const aCount = new Map();
+    for (let i = a0; i < a1; i++) {
+        const L = a[i];
+        if (!L) continue;
+        aCount.set(L, (aCount.get(L) || 0) + 1);
+    }
+    const anchors = [];
+    for (let i = a0; i < a1; i++) {
+        const L = a[i];
+        if (!L) continue;
+        if (aCount.get(L) !== 1) continue;       // A 侧必须唯一
+        const bi = bIdxOf.get(L);
+        if (bi === undefined || bi < 0) continue; // B 侧必须唯一
+        anchors.push({ ai: i, bi });
+    }
+    return anchors;
+}
+
+/** 在 `{ai, bi}` 序列（ai 已升序）中取 bi 的最长严格递增子序列，保序用 */
+function longestIncreasingByB(anchors) {
+    if (!anchors.length) return [];
+    const tails = [];                                  // tails[k] = anchors 下标
+    const prev = new Array(anchors.length).fill(-1);
+    for (let i = 0; i < anchors.length; i++) {
+        let lo = 0;
+        let hi = tails.length;
+        while (lo < hi) {
+            const mid = (lo + hi) >> 1;
+            if (anchors[tails[mid]].bi < anchors[i].bi) lo = mid + 1;
+            else hi = mid;
+        }
+        if (lo > 0) prev[i] = tails[lo - 1];
+        tails[lo] = i;
+    }
+    const out = [];
+    let k = tails.length ? tails[tails.length - 1] : -1;
+    while (k >= 0) { out.push(anchors[k]); k = prev[k]; }
+    out.reverse();
+    return out;
+}
+
+/** 区间版精确 LCS：切片很小，代价可控；返回的 aIdx/bIdx 已加回偏移 */
+function lcsRangeOps(a, b, a0, a1, b0, b1) {
+    return lcsOps(a.slice(a0, a1), b.slice(b0, b1)).map(o => ({
+        type: o.type,
+        aIdx: o.aIdx < 0 ? -1 : o.aIdx + a0,
+        bIdx: o.bIdx < 0 ? -1 : o.bIdx + b0
+    }));
+}
+
+/** 锚点对齐主函数：返回与 `lcsOps` 同构的 ops 序列 */
+function anchoredOps(a, b) {
+    // 递归深度保护：正常情况每层区间至少减半，不会深；防御病态输入
+    const rangeOps = (a0, a1, b0, b1, depth) => {
+        const out = [];
+        // ① 公共前缀行（逐行相等）
+        while (a0 < a1 && b0 < b1 && a[a0] === b[b0]) {
+            out.push({ type: 'same', aIdx: a0, bIdx: b0 });
+            a0++;
+            b0++;
+        }
+        // ② 公共后缀行（先算长度，最后再补，保证顺序）
+        let suf = 0;
+        while (a1 - suf > a0 && b1 - suf > b0 && a[a1 - 1 - suf] === b[b1 - 1 - suf]) suf++;
+        const aEnd = a1 - suf;
+        const bEnd = b1 - suf;
+
+        // ③ 中间段
+        if (a0 >= aEnd && b0 >= bEnd) {
+            // 两侧都空，无需操作
+        } else if (a0 >= aEnd) {
+            for (let j = b0; j < bEnd; j++) out.push({ type: 'ins', aIdx: -1, bIdx: j });
+        } else if (b0 >= bEnd) {
+            for (let i = a0; i < aEnd; i++) out.push({ type: 'del', aIdx: i, bIdx: -1 });
+        } else if ((aEnd - a0) <= ANCHOR_EXACT_LINES && (bEnd - b0) <= ANCHOR_EXACT_LINES) {
+            // 段已足够小 → 精确 LCS（这一步是「不再假阳性」的关键）
+            out.push(...lcsRangeOps(a, b, a0, aEnd, b0, bEnd));
+        } else if (depth <= 0) {
+            // 递归过深（病态输入）→ 保守表达，不再按行号配对
+            for (let i = a0; i < aEnd; i++) out.push({ type: 'del', aIdx: i, bIdx: -1 });
+            for (let j = b0; j < bEnd; j++) out.push({ type: 'ins', aIdx: -1, bIdx: j });
+        } else {
+            const anchors = longestIncreasingByB(findUniqueAnchors(a, b, a0, aEnd, b0, bEnd));
+            if (!anchors.length) {
+                // 无唯一锚点 → 保守表达（**不做按行号配对**，避免大面积假 changed）
+                for (let i = a0; i < aEnd; i++) out.push({ type: 'del', aIdx: i, bIdx: -1 });
+                for (let j = b0; j < bEnd; j++) out.push({ type: 'ins', aIdx: -1, bIdx: j });
+            } else {
+                let pa = a0;
+                let pb = b0;
+                for (const an of anchors) {
+                    out.push(...rangeOps(pa, an.ai, pb, an.bi, depth - 1));
+                    out.push({ type: 'same', aIdx: an.ai, bIdx: an.bi });
+                    pa = an.ai + 1;
+                    pb = an.bi + 1;
+                }
+                out.push(...rangeOps(pa, aEnd, pb, bEnd, depth - 1));
+            }
+        }
+
+        // ④ 补公共后缀行
+        for (let k = 0; k < suf; k++) {
+            out.push({ type: 'same', aIdx: aEnd + k, bIdx: bEnd + k });
+        }
+        return out;
+    };
+    return rangeOps(0, a.length, 0, b.length, 40);
 }
 
 /** 把 ops 转成「行对齐」的输出行；变更块内的删/增按顺序配对为 `changed` */
@@ -293,13 +418,16 @@ export function diffContentForDisplay(textA = '', textB = '') {
     };
     for (let k = 0; k < p; k++) pushSame(k, k);
 
-    // ③ 中间段：LCS（规模受控，超限降级）
+    // ③ 中间段：小段走精确 LCS；大段走**锚点对齐**（Patience 风格，不再按行号比对）
+    //    ⚠️ 旧实现在这里用 `positionalOps`（按行号逐行比对）→ 行数一变后续全错位 →
+    //       大面积假 `changed`（PK-21，实测假阳性 99.15%）。现已改为锚点法。
     const midA = A.slice(p, A.length - s);
     const midB = B.slice(p, B.length - s);
     let midOps;
     if (midA.length > MAX_LCS_LINES || midB.length > MAX_LCS_LINES) {
+        // truncated 的语义 = 「**走了降级路径**」（不再是「结果不可靠」——锚点法结果可靠）
         stats.truncated = true;
-        midOps = positionalOps(midA, midB);
+        midOps = anchoredOps(midA, midB);
     } else {
         midOps = lcsOps(midA, midB);
     }

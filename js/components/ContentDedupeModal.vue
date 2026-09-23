@@ -17,6 +17,16 @@
                 <button @click="$emit('close')" class="text-zinc-400 hover:text-white text-lg">✕</button>
             </div>
 
+            <!-- 📊 内容级查重的扫描进度（设计依据：规格 TC-07 / 最终方案 §185） -->
+            <dedupe-scan-progress
+                :scanning="scanning"
+                :progress="scanProgress"
+                :percent="scanPercent"
+                tone="purple"
+                :label="scanLabel"
+                :indeterminate="indeterminate"
+            />
+
             <div class="flex-1 overflow-y-auto p-5 custom-scrollbar space-y-5">
                 <div v-for="(group, gIdx) in groups" :key="gIdx" class="bg-zinc-900/50 border border-zinc-700/80 rounded-xl p-4">
 
@@ -42,7 +52,8 @@
                                     🕒 {{ v._dateStr }}
                                 </div>
                                 <div class="text-[10px] text-zinc-400 font-mono truncate mb-2" :title="v.item.path">
-                                    📁 {{ v.item.path.split(/[\\/]/).pop() }}
+                                    <!-- 🛡️ AR-39 同款加固：`path` 可能为空（未落盘条目）→ 不能裸 `split` 抛 TypeError -->
+                                    📁 {{ (v.item.path || '').split(/[\\/]/).pop() || '（未知文件）' }}
                                 </div>
                                 <div class="text-[10px] px-2 py-1 rounded font-bold mb-3 bg-purple-500/10 text-purple-300 border border-purple-500/30">
                                     {{ vIdx === 0 ? '👑 内容最完整（推荐保留）' : (v._simPct >= 98 ? '🧬 内容几乎完全一致' : '⚠️ 高度相似，细节有差异') }}
@@ -67,7 +78,8 @@
                 </div>
 
                 <div v-if="groups.length === 0" class="text-center py-12 text-zinc-500 text-sm">
-                    🎉 未发现内容高度相似的重复项
+                    <template v-if="scanning">🔎 正在扫描并比对内容，请稍候…</template>
+                    <template v-else>🎉 未发现内容高度相似的重复项</template>
                 </div>
             </div>
         </div>
@@ -75,11 +87,21 @@
 </template>
 
 <script>
+import DedupeScanProgress from './DedupeScanProgress.vue';
+
 export default {
     name: 'ContentDedupeModal',
+    components: { DedupeScanProgress },
     props: {
         show: { type: Boolean, default: false },
-        groups: { type: Array, default: () => [] }
+        groups: { type: Array, default: () => [] },
+        // 📊 查重扫描进度（内容级查重对三种库通用，故文案可定制）
+        scanning: { type: Boolean, default: false },
+        scanProgress: { type: Object, default: () => ({ phase: 'idle', done: 0, total: 0, current: '' }) },
+        scanPercent: { type: Number, default: 0 },
+        scanLabel: { type: String, default: '正在扫描并比对内容…' },
+        // 不定态：底层重扫无进度通道时用滑动动画，不编假百分比
+        indeterminate: { type: Boolean, default: false }
     },
     emits: ['close', 'open-diff', 'resolve-group']
 };

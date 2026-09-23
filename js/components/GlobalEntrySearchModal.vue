@@ -18,12 +18,16 @@
                            class="w-full h-9 bg-zinc-900 border border-zinc-700 rounded pl-9 pr-3 text-sm text-zinc-200 focus:outline-none focus:border-blue-500">
                 </div>
                 <div class="text-[10px] text-zinc-500 mt-1.5 mb-2">
-                    共索引 {{ indexCount }} 条词条<span v-if="query.trim()">，命中 <span class="text-blue-400 font-bold">{{ results.length }}</span> 条</span>
+                    <span v-if="indexing" class="text-amber-400">⏳ 正在建立全库索引…（部分世界书需按需读取正文）</span>
+                    <template v-else>
+                        共索引 {{ indexCount }} 条词条<span v-if="query.trim()">，命中 <span class="text-blue-400 font-bold">{{ results.length }}</span> 条</span>
+                    </template>
                 </div>
             </div>
 
             <div class="flex-1 overflow-y-auto px-4 pb-4 space-y-2 custom-scrollbar">
-                <div v-if="!query.trim()" class="text-center py-16 text-zinc-500 text-xs">👆 输入关键词开始全库搜索</div>
+                <div v-if="indexing && indexCount === 0" class="text-center py-16 text-zinc-500 text-xs">⏳ 正在建立全库索引，请稍候…</div>
+                <div v-else-if="!query.trim()" class="text-center py-16 text-zinc-500 text-xs">👆 输入关键词开始全库搜索</div>
                 <div v-else-if="results.length === 0" class="text-center py-16 text-zinc-500 text-xs">未找到匹配词条</div>
 
                 <div v-else v-for="(r, i) in results" :key="i" @click="$emit('jump', r)"
@@ -54,7 +58,10 @@ export default {
         show: { type: Boolean, default: false },
         query: { type: String, default: '' },
         results: { type: Array, default: () => [] },
-        indexCount: { type: Number, default: 0 }
+        indexCount: { type: Number, default: 0 },
+        // ⚡ PK-26：索引已改异步（秒开后需按需读入世界书正文）——
+        //    无此标志时，大库索引期间弹窗会显示「共索引 0 条 / 未找到匹配词条」，用户会判定为坏了。
+        indexing: { type: Boolean, default: false }
     },
     emits: ['close', 'update:query', 'jump']
 };

@@ -1100,7 +1100,7 @@
                 <div class="px-4 py-2.5 border-b border-zinc-800 bg-zinc-900/80 flex flex-wrap items-center justify-between shrink-0 gap-2 shadow-sm min-w-0">
 
                     <div class="flex items-center gap-2 flex-1 min-w-[120px]">
-                        <span class="text-xs font-bold text-amber-500 shrink-0 truncate">📖 {{ activeWorldbook.data.name || activeWorldbook.name }}</span>
+                        <span class="text-xs font-bold text-amber-500 shrink-0 truncate">📖 {{ wbTitleOf(activeWorldbook) }}</span>
                     </div>
 
                     <div class="flex items-center gap-1.5 shrink-0 flex-wrap justify-end">
@@ -1137,7 +1137,7 @@
                         <!-- 收起态：📖 可点击展开 + 竖排词条数 -->
                         <div v-if="isWbSidebarCollapsed" class="flex-1 py-4 flex flex-col items-center gap-3 text-zinc-500">
                             <span class="cursor-pointer text-lg hover:text-emerald-400 transition" @click="isWbSidebarCollapsed = false" title="展开词条列表">📖</span>
-                            <span class="text-[10px] font-mono font-bold writing-vertical-rl">{{ (activeWorldbook.data && activeWorldbook.data.entries) ? activeWorldbook.data.entries.length : 0 }} 词条</span>
+                            <span class="text-[10px] font-mono font-bold writing-vertical-rl">{{ wbCountOf(activeWorldbook) }} 词条</span>
                         </div>
 
                         <!-- 展开态：搜索 + 筛选/排序 + 批量 + 词条列表 -->
@@ -1452,6 +1452,14 @@ export default {
 
         // ✅ [世界书编辑器] 左侧词条列表可收起（纯视觉，不影响数据）
         const isWbSidebarCollapsed = ref(false);
+        // ⚡ PK-26：秒开后 `activeWorldbook.data` 可能为 null（懒加载）→
+        //    标题栏书名与「N 词条」必须走**轻量字段**（否则显示成「未命名 / 0 词条」）。
+        const wbTitleOf = (wb) => (wb && (wb.wbName || (wb.data && wb.data.name) || wb.name)) || '未命名';
+        const wbCountOf = (wb) => {
+            if (!wb) return 0;
+            if (typeof wb.entryCount === 'number') return wb.entryCount;
+            return (wb.data && Array.isArray(wb.data.entries)) ? wb.data.entries.length : 0;
+        };
         // ✅ [世界书编辑器] 当前选中编辑的词条（列表+详情布局）
         const currentEntry = ref(null);
         // 【修复】切换世界书时清空当前选中词条（防旧书词条残留，详情面板 v-model 误改旧书对象）
@@ -2074,6 +2082,8 @@ export default {
             statusLibTab: ref('render'),
             statusLibCollapsed: ref(false),
             isWbSidebarCollapsed,
+            wbTitleOf,
+            wbCountOf,
             isToolbarMenuOpen,
             toolbarMenuBtn,
             toolbarMenuPos,

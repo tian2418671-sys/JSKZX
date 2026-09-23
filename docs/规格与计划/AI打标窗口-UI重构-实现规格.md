@@ -95,7 +95,7 @@
 | `npm test` | **471 / 471 通过**（41 个测试文件） |
 | `npm run build:web` | 干净（无警告） |
 | 生产构建真实启动冒烟 | 无 `[Vue 错误]`、无 `crash.log` |
-| CDP 探针 `scripts/_probe-aitag-nav.mjs` | **12 / 12 通过** |
+| CDP 探针 `scripts/probes/_probe-aitag-nav.mjs` | **12 / 12 通过** |
 | 截图人工核对 | 三组七分区布局与原型一致 |
 
 **探针断言清单**（`_probe-aitag-nav.mjs`）：

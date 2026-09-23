@@ -2,7 +2,7 @@
 
 > 本目录存放**可复用的技术资产**：完整代码片段、实测技术数据、外部 API 参考、格式规范、探针工具。
 > 与 `docs/bugs/` 的分工：那里写「坏在哪、怎么修」，这里写「**代码长什么样、实测数字是多少、外部接口怎么用**」。
-> 最后整理：2026-09-21
+> 最后整理：2026-09-22
 
 ---
 
@@ -33,6 +33,23 @@
 
 ## 四、探针与工具脚本速查（`scripts/`）
 
+### 目录结构（2026-09-23 整理）
+
+> **整理前**：`scripts/` 根目录平铺 **133 个文件**（其中探针 85 个，且多为同一问题的重复版本，
+> 如 `progress-tail`/`tail2`/`tail3`/`tail4` 四个探针探同一个进度条）。
+> **整理后**：根目录只留**门禁脚本**，其余按用途分两个子目录。
+
+| 位置 | 内容 | 数量 |
+|---|---|---|
+| `scripts/`（根） | **门禁 / 校验**：`check-batch-read-guard.mjs`、`check-doc-links.mjs`、`check.py`、`checkkit.py`、`extract-release-notes.mjs`、`release-check.mjs` —— 被 `npm scripts` 或发版流程直接调用，路径不能变 | 6 |
+| `scripts/probes/` | **探针**（`_probe-*`）：取证、压测、端到端验证 | 71 |
+| `scripts/tools/` | **工具**：调试（`_cdp-*` / `_dbg-*` / `_heap-*` / `_heat-*`）、测试（`*-test` / `*-smoke`）、扫描分析（`scan-*` / `audit-*` / `extract-*`）、一次性清洗 | 47 |
+
+> 🛑 **探针纪律**（2026-09-23 立规，见 [`../../AI交接指导.md`](../../AI交接指导.md)）：
+> 探针是**一次性工具**，不是交付物。**一个 bug 最多留 1 个探针**（迭代时改同一个文件，禁止 `xxx2.mjs`）；
+> 纯探索用 `node -e` 内联跑完即弃；**落地必须同一次操作内登记进本表**，否则删掉。
+> 只有「能定阈值」或「能长期当门禁」的才值得留存。
+
 ### 发版与文档卫生
 
 | 脚本 | 用途 |
@@ -40,7 +57,8 @@
 | `check.py`（Python） | **一键检查**：语法 / 单测 / 构建 / 文档链接 / 版本一致性 / 对外文件禁词 / 仓库卫生。`python scripts/check.py` 全跑、`--fast` 跳过 #slow、`--only docs,#git`、`--changed` 只跑命中改动的、`--strict` 提醒也算失败、`--json out.json` 出报告、`--list` 看清单、`--new NAME` 生成扩展模板。检查项全在 `scripts/pychecks/`（加检查**不用改运行器**，见 `pychecks/README.md`） |
 | `checkkit.py`（Python） | 上述框架的类型与工具（`Check` / `Context` / `ok()/warned()/failed()`），扩展模块直接 `from checkkit import ...` |
 | `release-check.mjs` | **发版前置自查**（语法 + 单测 + 构建 + 文档一致性 + git 状态），`--e2e dev/prod` 加跑端到端 |
-| `check-doc-links.mjs` | 校验全仓库 markdown 的相对链接能否解析（当前 58 文件 / 137 条全有效） |
+| `check-doc-links.mjs` | 校验全仓库 markdown 的相对链接能否解析（当前 50 文件 / 275 条全有效） |
+| `check-batch-read-guard.mjs` | **CI 白名单守卫（PK-27 / S4'）**：批量读世界书正文**必须走唯一入口** —— `ensureWorldbookLoaded` 只允许出现在白名单清单里，其余任何文件出现即 fail。接 `npm run guard:batch-read`（含在 `npm run check` 里） |
 | `extract-release-notes.mjs` | 从 `RELEASE_NOTES.md` 抽取指定版本段（默认当前 `package.json` 版本）到临时文件，供 `gh release create --notes-file` 使用——**不要手抄正文** |
 | `dev-run.ps1` | dev 启动（含终端编码修正） |
 
@@ -71,11 +89,70 @@
 | `_heap-audit.mjs` | 堆构成审计（按字段拆「文本 vs 对象开销」） |
 | `_probe-index.mjs` / `_probe-index2.mjs` | 索引诊断（包装 `__jskDiag.idx` 的 clear / buildAsync；第二个抓运行期 console 看重建是否被合并） |
 | `_probe-regex-ui.mjs` | 正则/状态栏增删 UI 端到端（含原生确认框应答） |
-| `_probe-wb-scan-progress.mjs` | **T2 真进度条**端到端：真实目录 + 真实 IPC，断言单次 `wb:scan` 期间收到多条 `wb:scan-progress`（旧实现 0 条）、`total` 准确、`done` 单调不减、终态 `done===total`、带 `current`、窗口不白屏。用法：`$env:CDP_PORT=9360; $env:SCAN_DIR="<目录>"; node scripts/_probe-wb-scan-progress.mjs` |
-| `_probe-wb-sidebar-crash.mjs` | **AR-40**端到端：点「🌍 世界书库」/ 反复切模式 → 断言侧栏 `<aside>` **未被卸载**、无 `_ctx.* is not a function` 渲染期错误。用法：`$env:CDP_PORT=9365; node scripts/_probe-wb-sidebar-crash.mjs`（需 dev 模式实例） |
-| `_probe-aitag-nav.mjs` | **AI 打标窗口布局重构（静态结构）**：12 条断言 —— 左导航三组七分区齐全、逐分区切换后特征控件可见（判据用 `offsetParent` 而非 `innerText`，后者会误判隐藏分区）、「管理规则表」入口去重、三层开关 / API 字段 / 破限区未丢、无渲染错误。用法：`$env:CDP_PORT=9375; node scripts/_probe-aitag-nav.mjs` |
+| `_probe-wb-scan-progress.mjs` | **T2 真进度条**端到端：真实目录 + 真实 IPC，断言单次 `wb:scan` 期间收到多条 `wb:scan-progress`（旧实现 0 条）、`total` 准确、`done` 单调不减、终态 `done===total`、带 `current`、窗口不白屏。用法：`$env:CDP_PORT=9360; $env:SCAN_DIR="<目录>"; node scripts/probes/_probe-wb-scan-progress.mjs` |
+| `_probe-wb-sidebar-crash.mjs` | **AR-40**端到端：点「🌍 世界书库」/ 反复切模式 → 断言侧栏 `<aside>` **未被卸载**、无 `_ctx.* is not a function` 渲染期错误。用法：`$env:CDP_PORT=9365; node scripts/probes/_probe-wb-sidebar-crash.mjs`（需 dev 模式实例） |
+| `_probe-aitag-nav.mjs` | **AI 打标窗口布局重构（静态结构）**：12 条断言 —— 左导航三组七分区齐全、逐分区切换后特征控件可见（判据用 `offsetParent` 而非 `innerText`，后者会误判隐藏分区）、「管理规则表」入口去重、三层开关 / API 字段 / 破限区未丢、无渲染错误。用法：`$env:CDP_PORT=9375; node scripts/probes/_probe-aitag-nav.mjs` |
 | `_probe-aitag-hot.mjs` | **AI 打标窗口动态行为热测**：30 条断言 —— 徽标联动、跨分区状态保持、分区互斥、进度条位置、管线全关保护、取消 / ✕ / 开合循环 ×5、窄窗 900×620、规则弹窗、**副作用校验（不得误开无关弹窗）**。⚠️ 实例须加 `--disable-renderer-backgrounding --disable-backgrounding-occluded-windows --disable-background-timer-throttling` 启动，否则窗口被遮挡时 rAF 被节流 → Vue 过渡卡住 → 假失败（详见文件头注） |
-| `_probe-aitag-run.mjs` | **AI 打标真实 API 端到端**：真实入口 + 真实 UI 按钮启动，校验打标中「取消 / ✕ 关闭」被禁用、进度推进、逐卡日志有结论、无渲染错误。🚫 **会真实写卡** → 只能跑在隔离库副本上（探针内含真实库路径检测，命中即退出码 2）。用法：`$env:CDP_PORT=9375; $env:TAG_COUNT=2; node scripts/_probe-aitag-run.mjs` |
+| `_probe-aitag-run.mjs` | **AI 打标真实 API 端到端**：真实入口 + 真实 UI 按钮启动，校验打标中「取消 / ✕ 关闭」被禁用、进度推进、逐卡日志有结论、无渲染错误。🚫 **会真实写卡** → 只能跑在隔离库副本上（探针内含真实库路径检测，命中即退出码 2）。用法：`$env:CDP_PORT=9375; $env:TAG_COUNT=2; node scripts/probes/_probe-aitag-run.mjs` |
+| `_probe-dedupe-progress.mjs` | **AR-42** 查重进度条**位置修正**端到端（15/15）：断言①浏览库后侧栏**无**进度条、改用日志反馈；②查重前**确实重扫磁盘**；③扫描期间**弹窗内**出现进度文案（`withProgress=true`）；④进度带当前文件名、`phase` 序列 `parsing→done→idle`；⑤查重后收起、无 TDZ。用法：`node scripts/probes/_probe-dedupe-progress.mjs "<世界书目录>"` |
+| `_probe-wb-regression.mjs` | 世界书**功能回归**（100 本库）：扫描/entries 归一化/进度复位/侧栏存活/分组/搜索/词条数筛选/`wbEntryCount`/同名查重/内容级查重/模式反复切换/渲染期错误。用法：`node scripts/probes/_probe-wb-regression.mjs "<目录>"`（**位置参数**，环境变量跨命令会丢） |
+| `_probe-wb-stress-500-lib.mjs` | **PK-20** 501 本大库压测（**会崩**，用于复现）：分级是否正确、进度条、堆水位、二次扫描、列表渲染、搜索筛选。用法：`node scripts/probes/_probe-wb-stress-500-lib.mjs`（`WB_DIR` / `EXPECT_LOADED` / `EXPECT_SKIPPED` 可调） |
+| `_probe-wb-scale-sweep.mjs` | **PK-20** 规模梯度全自动扫描：每档**独立 profile** + 硬超时，靠 `scan_cache.json` 条数区分「主进程扫完」与「渲染层超时/崩溃」，直接定位临界点。用法：`node scripts/probes/_probe-wb-scale-sweep.mjs [s050 s100 ...]`（`SCAN_TIMEOUT_MS` 可调） |
+| `_probe-scan-phases.mjs` | **PK-23** 扫描阶段分解：分别量 ①递归 `readdir`、②+`stat`、③读全部内容+`parse` 的耗时，**定位耗时归属**（实测 1001 本：7ms / 43ms / **36.0s** → 瓶颈 100% 在③）。用法：`node scripts/probes/_probe-scan-phases.mjs "<目录>"` |
+| `_probe-instant-open.mjs` | **PK-23** ⚡ 秒开验证：阶段 1（`fastListOnly`）耗时、元数据补全率、二次缓存命中、渲染堆、侧栏存活。用法：`node scripts/probes/_probe-instant-open.mjs "<目录>"` |
+| `_probe-readtext-error.mjs` | **DF-20** 真因验证：真实启动 + 真实大库，断言 `readText` 返回体形状与懒加载结果（修复后 `after: true`、`loadError: null`）。用法：`node scripts/probes/_probe-readtext-error.mjs "<目录>"` |
+| `_probe-content-dedupe-fix.mjs` | 内容级查重**流式提取**（读一本 → 提取 → 立即释放）+ 懒加载修复验证 |
+| `_probe-wb-stress-5k.mjs` | **5000 本极端压测**（⚡ 秒开 / 完整扫描 / 渲染层 / 同名查重 / 差异比对 / 内容级查重 / 模式切换 / OOM）。⚠️ **预期数量自己数磁盘**（不写死，否则库构成一变就误报）。用法：`node scripts/probes/_probe-wb-stress-5k.mjs "<目录>"` |
+| `_probe-wb-valid-gate.mjs` | **PK-24** 校验门禁验证（**9/9**）：秒开阶段 1 **不得跳过 `isValidWorldbook`** —— 断言①最终入库数 = 磁盘有效数（诱饵已剔除）、剔除数 = 磁盘无效数、零漏收；②二次（有缓存）阶段 1 **精准列出**（诱饵从不出现）且秒开。⚠️ **必须用全新 profile** 才能测「首次」路径。用法：`node scripts/probes/_probe-wb-valid-gate.mjs "<目录>"` |
+| `_probe-instant-regression.mjs` | **PK-26** 秒开回归门禁（**带断言，退出码即结果**）：秒开态 `entryCount`/`wbName` 覆盖率、`wbEntryCount()` 真实值、同名查重 `_entryCount` **不得为 0**、重合度**不得是反向的「0%」**、差异比对**必须走世界书分支**且不出现「设定完全一致」。⚠️ 修复前此脚本是「大量 0 / 0%」的取证工具，现已加断言。用法：`node scripts/probes/_probe-instant-regression.mjs "<目录>"` |
+| `_probe-pk26-release.mjs` | **PK-26 后续**「用后释放」专项门禁（**7/7**）：断言同名查重过程中确实逐本载入正文（**峰值 > 查重前**）、且终值**回落到查重前水平**（未累积）、未把全部书留在内存、词条数为真实值、堆未失控。⚠️ **判据必须看「峰值 → 终值」的回落**，不能写「终值必须为 0」—— 扫描器会按内联预算主动载入少量书（PK-20 既有设计），那样会恒失败。用法：`node scripts/probes/_probe-pk26-release.mjs "<目录>"` |
+| `_probe-l1-size.mjs` | **PK-27 架构方案**：**L1 摘要体积实测**（离线，不起应用）—— 去重触发词数/长度分布、**原字符串方案 vs `Uint32Array` hash 方案的真实体积**（含 JS 字符串头部与数组槽开销）、体积系数（parse 后字符/磁盘字节）、非 BMP（emoji）占比、hash 计算耗时、全库外推。**改 L1 设计前必跑**（实测推翻了原估算 16~32 倍）。用法：`node scripts/probes/_probe-l1-size.mjs "<目录>" [采样本数]`（`TOTAL_BOOKS` 可调外推基数） |
+
+### PK-27 架构改造专项（L1 摘要 / simhash / 进度条）
+
+| 脚本 | 用途 |
+|---|---|
+| `_probe-load-speed.mjs` | **世界书库加载速度实测**（分阶段独立计时，**直调 IPC 不含 UI**）：阶段 1 秒开 / 阶段 2 元数据补全 / L1 摘要产出 / 冷启动总计 / 二次热启动。**结论：阶段 1 已到磁盘物理下限（83% 是 `stat`）** —— 3 种优化尝试均已实测无效并回滚。<br>⚠️ **不含 UI 渲染** ⇒ 用户感知耗时请用 `_probe-wb-load-e2e.mjs` / `_probe-wb-firstpaint.mjs` |
+| `_probe-wb-load-e2e.mjs` | **世界书库加载速度端到端**（**浏览库**，非查重）：走真实入口 `scanWorldbookDir`，采样「首屏可用」。⚠️ 含 `rAF` 判据对照（证明它会被节流） |
+| `_probe-wb-load-breakdown.mjs` | **加载耗时分段定位**：直调 IPC vs 真实入口（含 UI）对照 + 冷/热/清空三种场景 + **`setTimeout(0)` 与 `rAF` 双判据** |
+| `_probe-wb-firstpaint.mjs` | **首屏可用复测**（只测首屏，不等后台续补）：冷/热两轮 + DOM 节点数 + 5 条断言。用于验 P2-1 回归修复 |
+| `_probe-p1p2-e2e.mjs` | **P1-P2 端到端**：阶段 1 秒开 / P2-1 首批 / P1-1 simhash 默认关闭 / P1-2 oversized 流式（6 条断言） |
+| `_probe-oversized-stream.mjs` | **P1-2 流式提取真实效果**：现造 >50MB 超大书，比对「完整 parse vs 流式」的**堆峰值**（实测 **92MB → 12MB，7.7×**）与 keys 逐字节等价 |
+| `_probe-l1-render.mjs` | **S2' 验证**（CDP）：L1 摘要是否**真的到达渲染层**、同名查重是否**真的不读正文**。用法：`node scripts/probes/_probe-l1-render.mjs "<目录>"` |
+| `_probe-dedupe-pure.mjs` | **S2' 纯查重耗时**（CDP，**跳过「查重前重扫」**）：把「扫描耗时」与「查重算法耗时」分离 —— s1000 **70.8s → 9ms** 的取证工具 |
+| `_probe-progress-continuity.mjs` | **AR-45 / AR-46 进度条连续性门禁**（**9/9**）：高频采样断言**不横跳**（不得回退后再前进）、**不倒退**、**不变光条**（全程确定态）、不闪烁、终态到 100%；<br>🛑 **AR-46 新增 4 条（关键）**：数字与条宽**一致**（同源校验）、数字**不出现「0 / ?」**、数字**单调不减**、终态 `done===total`。⚠️ **必须同时采「条宽」与「数字文本」** —— 旧版只采条宽（内部变量）⇒ **5/5 通过是假绿**（盲区） |
+| `_probe-progress-jump.mjs` | **AR-46 横跳复现与定位**（10ms 采样）：同时采 `dedupeScanPercent`（条宽）**与 `wbScanPercent`**（阶段 1 数据源）+ 阶段文案，**连跑冷/热两轮**（横跳常在热缓存下才出现）。用于定位「是哪条数据路径在倒退」 |
+| `_probe-progress-render.mjs` | **AR-46 渲染结果取证**：采**渲染后的 DOM 文本**（`data-testid` 的条宽 + 数字 + 文案）而非内部变量 —— 因为**用户看到的是渲染结果**。断言「数字百分比 vs 条宽」「不得掉回 0 / ?」「数字单调」 |
+| `_probe-dedupe-ux.mjs` | **查重 UX 三问排查 v2**（用户 2026-09-22 反馈）：进度取值多样性、陈旧结果残留次数、扫描期间弹窗文案是否存在 |
+| `_probe-card-diff-forensic.mjs` | **AR-47 / AR-48 取证门禁**（角色卡查重）：① **进度条时间线**（`I`=不定态 / `-数字`=确定态）—— 断言「只有重扫阶段是不定态」、不定态期间百分比**必须为 0**（防上一轮残留）；② 首组 `_nameOnly` / `_nameOnlyDist` 是否被正确标注；③ 差异比对两侧绑定的**确实是传入的那两张卡**。用法：`$env:CDP_PORT=9370; node scripts/probes/_probe-card-diff-forensic.mjs`（**需先启动应用并加载真实卡库**） |
+| `_probe-card-name-dist.mjs` | **角色卡 `name` 字段分布统计**（AR-48 取证）：唯一名数 / 唯一文件名数 / 重名组数 / 占位名数量 / Top 重名榜。用于判定「同名查重误报」的**数据面规模** |
+| `_probe-card-name-raw.mjs` | **直读 PNG 内嵌元数据**（不经应用解析）：对比「卡内真实 `name`」vs「文件名」，找出「同名但文件名不同」的实例。⚠️ 用**独立脚本**读盘是为了排除「应用解析 bug」这一可能性 —— 本次据此证实**两张卡真的都叫 `"1"`**（数据问题，非解析 bug）。用法：`node scripts/probes/_probe-card-name-raw.mjs "<卡库目录>" [最多张数]` |
+| `_probe-card-raw-of.mjs` | **查看指定卡片的原始元数据**（spec / `name` / `creator` / 描述长度 / 首句长度）：`node scripts/probes/_probe-card-raw-of.mjs "<文件1>" ["<文件2>" …]` |
+| `_probe-card-name-falsepos.mjs` | **同名查重假阳性比例统计**（AR-48 量化）：对真实库跑同名查重，按「组内最大描述相似度」分桶（0-20% / 20-50% / 50-80% / 80-100%）。**实测 1910 组中 350 组（18.3%）< 20%** |
+| `_probe-card-simhash-dist.mjs` | **「仅名称相同」阈值实测**（AR-48 定阈值依据）：对比「同名组内两两距离」与「随机不同名两两距离」的分布 + 直方图。**实测：同名同源 p50 = 0 / p75 = 0；无关 p50 = 31 / p25 = 28**（与理论期望 32 吻合）⇒ 定 **T = 24**。用法：`node scripts/probes/_probe-card-simhash-dist.mjs "<卡库目录>" [最多张数]` |
+| `_probe-nameonly-cost.mjs` | **「仅名称相同」判定性能实测**（AR-48 可行性依据）：对参与同名的全部卡算 simhash 的耗时（**不截断 vs 截断 1200 字**）。实测 4547 张 / 14.6M 字 → 全量 **2.0s** / 截断 **0.7s**（**成本可接受，故未截断**） |
+| `_probe-dedupe-cards.mjs` | **角色卡 / 预设查重热测试**（用户反馈第 2 点）：角色卡同名查重、预设查重、角色卡内容查重（MinHash+LSH 路径）。⚠️ 库为空时对应项标 **SKIP**（环境不满足不计入失败） |
+| `_probe-diff-perf.mjs` | **PK-22 差异弹窗卡顿修复验证**（**10/10**）：DOM 节点数、首屏耗时、分块渲染上限、重开后状态复位。⚠️ **不要用 `requestAnimationFrame` 等「渲染完成」**（后台窗口不触发，实测假耗时 191333ms）；DOM 节点数才是确定性指标 |
+| `_probe-wb-diff-real.mjs` | **世界书「差异着色」真实数据端到端**：断言三种行底色齐备、行内精确高亮、两侧行号列数量相等、无渲染期错误 |
+| `_probe-content-dedupe-lazy.mjs` | 诊断：内容级查重在**懒加载库**上是否失效（PK-20 修复的**副作用排查**） |
+| `_probe-wb-stress-500.mjs` | 热测试 · 世界书导入压力测试（500 本 / ≥4MB） |
+| `_probe-wb-verify3.mjs` | 核实 501 本压测中 3 个「失败项」**是否为真缺陷**（而非探针假设过期）—— 「用户报故障先验证、别盲改」的落地工具 |
+| `_probe-linktest.mjs` | 一次性诊断：`fs.linkSync` 在 D: 同卷内失败的原因（与项目功能无关，保留备查） |
+
+**离线（不需起应用）**：
+
+| 脚本 | 用途 |
+|---|---|
+| `_probe-simhash-tune.mjs` | **S0.5 特征方案实验**（离线，不碰线上代码）：char n-gram 阶数 / 采样步长 / 位宽 / 阈值网格搜索，输出「准确率 vs 耗时」曲线 —— **simhash 定稿依据** |
+| `_probe-simhash-perf.mjs` | **S0.5 性能优化验证**：BigInt 版 **1387ms/本** vs number 版 **43ms/本**（**32×**）的对照实验 |
+| `_probe-simhash-verify.mjs` | **S3' 阈值复核（通用版）**：**逐字复刻线上实现**（number 双 32 位 + step=4）在真实库上量「漏报 / 误报」。支持 `--pos` / `--neg` 手动精确标注，或无参时用「同名 = 疑似同源」自动标注。⚠️ **自动标注在「同族不同副本」库上有噪声**（会把跨副本对误标为无关 → 误报率虚高）—— 精确结论请用手动标注或 `verify2` |
+| `_probe-simhash-verify2.mjs` | **S3' 阈值复核（精确标注版）** ✅ 实测通过：**MD5 去重**取唯一内容书 + 按**书名前缀**划分家族 → 同家族 = 正样本、跨家族 = 负样本。实测（s1000）正 max **14** / 负 min **33** / 间隙 **19** ⇒ **漏报 0% / 误报 0%**，T=19 落在安全区间 [14, 33) 内 |
+| `_probe-simhash-opt.mjs` | **S3' 前置优化**：进一步避免 `substring` 分配（滑窗直接取码点）的收益验证 |
+| `_dbg-simhash.mjs` | 一次性调试：定位 simhash **「全 0」**原因 |
+| `_dbg-wb-unique.mjs` | 一次性探查：压力库中「唯一内容」书及其关系，为 simhash 实验准备**正负样本** |
+| `_probe-wb-lib-audit.mjs` | **磁盘实测**：用与 `main.js` **完全相同**的 `isValidWorldbook` 判据统计压力库真实构成（有效 / 诱饵 / 超大），**以磁盘事实为准** —— 解决「探针预期 501」与「应用实测 537」的口径分歧 |
+| `_probe-wb-scan-diff.mjs` | **对照探针**：应用扫描结果 **vs** 磁盘事实（定位「诱饵被误判为有效」） |
+| `_probe-make-wb-5k.mjs` | **5000 本压力库生成器**（**硬链接，零拷贝**）：造 `s5000`（5401 个 json / 34.8GB，有效 5001 + 诱饵 400）。用法：`node scripts/probes/_probe-make-wb-5k.mjs`（`--clean` 删除） |
 
 ### 离线探针（不需起应用）
 
@@ -83,22 +160,26 @@
 |---|---|
 | `_probe-latin-prefix.mjs` / `_probe-latin-prefix-options.mjs` | **PK-19** 拉丁前缀检索：前者量「全表扫 vs 现状」的代价曲线；后者做**三方案对照**（有序数组前缀区间 / 首字母桶 / bigram 桶）的**正确性 + 速度 + 内存**，并把「结果必须与基线逐条一致」作为硬判据 —— 实测 `(a)(b)` 破坏子串语义、`(c)` 全对且快 20~70 倍 |
 | `_probe-scan-head-check.mjs` | **T4/T5** 构造实验：造多种「`entries` 位置 / 首条形态」的世界书，逐字复刻主进程的头部预检与 `isValidWorldbook` 判据，算误杀率；并二分出「`entries` 被挤出前 64KB 的体积门槛」 |
-| `_probe-real-head-check.mjs` | **T4 真实库**：扫指定目录每本书的 `entries` **字节偏移**（4MB 分块扫描，不整文件载入）vs 64KB 头窗，输出误杀清单与误杀率。用法：`node scripts/_probe-real-head-check.mjs "H:\01\全局世界书"` |
-| `_probe-real-validity.mjs` | **T5 真实库**：逐本跑 `isValidWorldbook`（含「扫前 20 条」的候选修法对照），列出被拒清单 + 首条形态 + 字典形态统计。用法：`node scripts/_probe-real-validity.mjs "H:\01\全局世界书"` |
-| `_probe-heavy-concurrency.mjs` | **T6** 分级扫描并发：逐字复刻 `handleOne`（**必须 `fs.promises` 真异步**），在多并发档量 耗时 / 堆峰值 / 判定一致性；生产常量**从 `main.js` 动态读取**（改参数无需同步注释）。用法：`node --expose-gc scripts/_probe-heavy-concurrency.mjs "H:\01\全局世界书" 1 2 3 6 12` |
+| `_probe-real-head-check.mjs` | **T4 真实库**：扫指定目录每本书的 `entries` **字节偏移**（4MB 分块扫描，不整文件载入）vs 64KB 头窗，输出误杀清单与误杀率。用法：`node scripts/probes/_probe-real-head-check.mjs "H:\01\全局世界书"` |
+| `_probe-real-validity.mjs` | **T5 真实库**：逐本跑 `isValidWorldbook`（含「扫前 20 条」的候选修法对照），列出被拒清单 + 首条形态 + 字典形态统计。用法：`node scripts/probes/_probe-real-validity.mjs "H:\01\全局世界书"` |
+| `_probe-heavy-concurrency.mjs` | **T6** 分级扫描并发：逐字复刻 `handleOne`（**必须 `fs.promises` 真异步**），在多并发档量 耗时 / 堆峰值 / 判定一致性；生产常量**从 `main.js` 动态读取**（改参数无需同步注释）。用法：`node --expose-gc scripts/probes/_probe-heavy-concurrency.mjs "H:\01\全局世界书" 1 2 3 6 12` |
+| `_probe-textdiff-real.mjs` | **PK-21** 差异算法真实数据验证：纯 Node 直接 `import` `js/utils/textDiff.js`（与浏览器同一份源码），断言单条词条（≤1500 行走精确 LCS）**全部正确**，并揭出全篇超预算降级后的**假阳性 99.15%**。用法：`node scripts/probes/_probe-textdiff-real.mjs` |
+| `_probe-make-wb-lib.mjs` | **压力库生成器**：造 542 个 `.json` / ≈3.5GB 世界书库（20 组 × 27，含 4 个改写变体 + 3 类诱饵 + 52.7MB 超巨书）。用法：`node scripts/probes/_probe-make-wb-lib.mjs`（`--clean` 删除） |
+| `_probe-make-wb-scale.mjs` | **规模梯度库**（用**硬链接**零拷贝）：造 `s050/s100/s200/s300/s400`。用法：`node scripts/probes/_probe-make-wb-scale.mjs`（`--clean` 删除） |
+| `_probe-ctx-shape.mjs` / `_probe-ctx-shape2.mjs` / `_probe-ctx-shape3.mjs` | **Vue 3.5 `appCtx` 取法排查**（一次性）：实测 `app._instance` **恒为 `null`**，正确路径是 `app._container._vnode.component.provides.appCtx`。**旧探针（如 `_probe-diff-coloring.mjs`）用的 `app._instance.provides` 已失效** |
 
 ### 端到端 / 热测试
 
 | 脚本 | 用途 |
 |---|---|
 | `chat-sidebar-test.mjs` | 测卡侧栏 7 分区（生产 `app://` 构建） |
-| `card-plugins-test.mjs` | **卡内插件页签**端到端（黑盒 DOM）：页签存在 / 面板渲染 / 徽标与条目数一致 / 展开内嵌代码编辑器 / ⛶ 全屏放大与 Esc 关闭 / 只读分组可展开 / 无渲染层报错。用法：实例带 `--remote-debugging-port=9351` + `$env:CDP_PORT="9351"; node scripts/card-plugins-test.mjs`；可选 `PLUGIN_CARD_TERMS`（找带插件卡的搜索词）、`TEST_ADD=1`（额外验「空容器卡一键新建」，**仅改内存不保存**） |
-| `auto-group-test.mjs` | **自动分组 + 清理空分组（DF-16）**端到端（隔离库真实物理移动 + 回滚）：①环境校验（预置分组已加载）②档案恢复 ③保存落盘（容错重试）④预览只读（计数 / 人外将新建 / 文件未动）⑤非法正则边界 ⑥执行（3 张真实移动 + 自动建文件夹 + 内存同步 + 未命中/已分组卡未动）⑦制造变动（删一张）⑧回滚（逆序还原 + 「已不存在」单列 + 日志清空）⑨清理空分组（配置空组 + 分组空文件夹删除、孤儿空目录保留、有卡分组不动）⑩🤖 LLM 分辨（本地 mock 服务端口 9358：1 批请求 / 请求体含判定标准与卡信息 / 建议入计划 / 重扫缓存并回 0 新请求 / DOM 默认不勾 / 真实移动 + 回滚）⑪无渲染层报错。用法：`node scripts/auto-group-test.mjs --prep` → 起 dev 实例（vite 5177 + `--remote-debugging-port=9359 --user-data-dir=%TEMP%\jsk-ag-profile`）→ `node scripts/auto-group-test.mjs` → `--cleanup`。⚠️ 只跑隔离库（脚本内含防呆）；⚠️ 重跑前先强杀同 profile 残留实例（旧实例关闭时 beforeunload 冲刷会回写旧配置） |
+| `card-plugins-test.mjs` | **卡内插件页签**端到端（黑盒 DOM）：页签存在 / 面板渲染 / 徽标与条目数一致 / 展开内嵌代码编辑器 / ⛶ 全屏放大与 Esc 关闭 / 只读分组可展开 / 无渲染层报错。用法：实例带 `--remote-debugging-port=9351` + `$env:CDP_PORT="9351"; node scripts/tools/card-plugins-test.mjs`；可选 `PLUGIN_CARD_TERMS`（找带插件卡的搜索词）、`TEST_ADD=1`（额外验「空容器卡一键新建」，**仅改内存不保存**） |
+| `auto-group-test.mjs` | **自动分组 + 清理空分组（DF-16）**端到端（隔离库真实物理移动 + 回滚）：①环境校验（预置分组已加载）②档案恢复 ③保存落盘（容错重试）④预览只读（计数 / 人外将新建 / 文件未动）⑤非法正则边界 ⑥执行（3 张真实移动 + 自动建文件夹 + 内存同步 + 未命中/已分组卡未动）⑦制造变动（删一张）⑧回滚（逆序还原 + 「已不存在」单列 + 日志清空）⑨清理空分组（配置空组 + 分组空文件夹删除、孤儿空目录保留、有卡分组不动）⑩🤖 LLM 分辨（本地 mock 服务端口 9358：1 批请求 / 请求体含判定标准与卡信息 / 建议入计划 / 重扫缓存并回 0 新请求 / DOM 默认不勾 / 真实移动 + 回滚）⑪无渲染层报错。用法：`node scripts/tools/auto-group-test.mjs --prep` → 起 dev 实例（vite 5177 + `--remote-debugging-port=9359 --user-data-dir=%TEMP%\jsk-ag-profile`）→ `node scripts/tools/auto-group-test.mjs` → `--cleanup`。⚠️ 只跑隔离库（脚本内含防呆）；⚠️ 重跑前先强杀同 profile 残留实例（旧实例关闭时 beforeunload 冲刷会回写旧配置） |
 | `chat-engine-test.mjs` | 测卡引擎管线（宏 / 世界书 / EJS / payload / 分段渲染 / swipe） |
 | `builtin-cat-test.mjs` | 内置大分类定制：改名 / 隐藏 / 恢复 / 清理还原（**结束时还原，不破坏用户数据**） |
 | `ai-category-modal-smoke.mjs` | AI 归类「自动建类」UI 冒烟（🆕 新建徽标与 optgroup 渲染） |
 | `sanitize-live.mjs` | `sanitizeImportedTags` 开关的**真实导入**热测试（`probe` / `set` / `import` / `check` 四步） |
-| `live-vector-test.cjs` | 在真实 Electron 主进程里验 `vectorManager`（标签展开 + 0.35 阈值）：`npx electron scripts/live-vector-test.cjs` |
+| `live-vector-test.cjs` | 在真实 Electron 主进程里验 `vectorManager`（标签展开 + 0.35 阈值）：`npx electron scripts/tools/live-vector-test.cjs` |
 | `prod-library-regression.mjs` | **生产模式**（`app://`，无调试句柄）卡库回归：首屏＋刷新×5＋搜索×5＋搜索中刷新，断言「真重复组恒为 0 / 计数不归零」（防 PK-01、PK-02、DF-08、DF-09 复活）。用法：`npx electron . --disable-gpu --remote-debugging-port=9350` + `$env:CDP_PORT="9350"` |
 | `prod-ui-regression.mjs` | 生产模式 UI 回归（AR-18 正则·状态栏新增首条 / AR-19 添加要切 Tab）。⚠️ 卡片行选择器**尚未校准，当前未跑通**，仅作待修工具保留 |
 
@@ -109,10 +190,10 @@
 
 | 脚本 | 用途 |
 |---|---|
-| `audit-card-underscore-fields.py` | 全库审计：列出真实卡片里**非前端内部**的 `_` 前缀字段与所有 `uid` 的位置和数量（`python scripts/audit-card-underscore-fields.py <库根> [张数]`）。改清洗规则前**先跑它**——这是判断「会不会误删用户数据」的唯一依据 |
+| `audit-card-underscore-fields.py` | 全库审计：列出真实卡片里**非前端内部**的 `_` 前缀字段与所有 `uid` 的位置和数量（`python scripts/tools/audit-card-underscore-fields.py <库根> [张数]`）。改清洗规则前**先跑它**——这是判断「会不会误删用户数据」的唯一依据 |
 | `audit-preset-worldbook-underscore.py` | 同上，但扫**预设 / 独立世界书**类 JSON（判据：`prompts`+`prompt_order` 或 `entries`）。结论：预设与独立世界书里无 `_` 前缀字段，但**独立世界书 `entries[i].uid` 大量存在**（DF-14「遗留待决」的依据） |
 | `save-strip-live-ui.mjs` | **渲染层 4 处清洗点**的真实运行验证：`downloadJson` / 卡片内嵌世界书导入 / 独立世界书导入；反向断言第三方 `extensions._filename` 与扩展内部 `uid` 不被误删。全程只动内存，结束还原 |
-| `save-strip-real-cards.mjs` | **离线**批量验证：抽真实卡片 → 注入 `uid`/`_collapsed` → 过清洗 → 断言注入字段被剔除、第三方字段 0 丢失、其余内容逐字段不变。`node scripts/save-strip-real-cards.mjs "I:\03\角色色卡"`（无需 Electron） |
+| `save-strip-real-cards.mjs` | **离线**批量验证：抽真实卡片 → 注入 `uid`/`_collapsed` → 过清洗 → 断言注入字段被剔除、第三方字段 0 丢失、其余内容逐字段不变。`node scripts/tools/save-strip-real-cards.mjs "I:\03\角色色卡"`（无需 Electron） |
 | `save-strip-prep-samples.mjs` | 从库里挑出含第三方 `_` 字段的真实卡片，复制成样本到指定目录（给下面两个热测试用） |
 | `save-strip-live-card.mjs` | **真实 IPC 链路**验证 PNG 卡片保存：渲染层 `readBuffer` → 注入污染 → `saveCard()` 真存 → 读回断言（含 PNG 结构完好、字节数一致）。前置：dev server + `--remote-debugging-port=9222` |
 | `save-strip-live-worldbook.mjs` | 同上，覆盖另外 3 条落盘路径：`saveCard(.json)` / `wb:create` / `wb:save`（结束自动删样本，不动用户卡片库） |
@@ -134,7 +215,7 @@
 | `scan-rejected-cards.cjs` | 在万卡库里找出「像角色卡但被血统鉴定拒绝」的 JSON |
 | `scan-theme-accent.cjs` | 扫描浅色主题下可能看不清的强调色文字类（-200/-300/-400）与未覆盖的深色类 |
 | `scan-theme-gaps.cjs` | 精确扫描：使用中但 `[data-theme="light"]` 未覆盖的深色类（含透明度变体） |
-| `_probe-card-plugins.mjs` | **卡内插件容器形态 / 解析开销**（**离线**，不需起应用）：`node scripts/_probe-card-plugins.mjs "<库根>" [--perf] [张数]`。输出各容器路径（`tavern_helper.scripts` / 键值对数组形态 / 旧版 `TavernHelper_scripts` / `regex_scripts` / MVU / 第三方写卡扩展…）命中的卡数与样例，并列出脚本条目字段组合；`--perf` 另给 `harvestCardPlugins()` 单次耗时（最重 5 张 + 均值）。**改任何「读写卡内插件」的功能前先跑它** —— 这是判断「要兼容哪些形态」的唯一依据（实测 76 张库：主流形态 14 张、键值对数组 11 张、旧版 4 张） |
+| `_probe-card-plugins.mjs` | **卡内插件容器形态 / 解析开销**（**离线**，不需起应用）：`node scripts/probes/_probe-card-plugins.mjs "<库根>" [--perf] [张数]`。输出各容器路径（`tavern_helper.scripts` / 键值对数组形态 / 旧版 `TavernHelper_scripts` / `regex_scripts` / MVU / 第三方写卡扩展…）命中的卡数与样例，并列出脚本条目字段组合；`--perf` 另给 `harvestCardPlugins()` 单次耗时（最重 5 张 + 均值）。**改任何「读写卡内插件」的功能前先跑它** —— 这是判断「要兼容哪些形态」的唯一依据（实测 76 张库：主流形态 14 张、键值对数组 11 张、旧版 4 张） |
 
 > ⚠️ **探针铁律**：读应用单例状态**必须**走 `window.__jskDiag.*`（应用真正使用的那份），
 > 自己 `import('/js/utils/xxx.js')` 会因 Vite 的 `?t=` 查询参数拿到**另一个模块实例**，读数全错。
@@ -170,6 +251,6 @@
 | 下载源顺序 | ① hf-mirror（国内 ~9MB/s）→ ② huggingface 官方 → ③ GitHub 仓库兜底（onnx 分 8 片，断点续传 + `tmp/rename` 原子写 + 120s 超时） |
 | 已知坑 | hf-mirror 会 **RST 掉 transformers.js 的 UA**（需在 require 前包装 `fetch` 注入浏览器 UA）；`raw.githubusercontent.com` 国内极慢（用 gh-proxy / ghfast 加速）；GitHub 单文件 100MB 限制（故分片） |
 | 关键参数 | 相似度阈值默认 **0.35**（三处必须对齐：`useAITools.js` / `AITagModal.vue` / `main/vectorManager.js`）；短标签先按 `LABEL_TEMPLATE` 展开成描述句再嵌入，展开文本同时作为缓存 hash 输入 |
-| 验证脚本 | `scripts/vector-model-test.cjs`（命中率 / 误报基线）、`scripts/live-vector-test.cjs`（真实主进程环境） |
+| 验证脚本 | `scripts/tools/vector-model-test.cjs`（命中率 / 误报基线）、`scripts/tools/live-vector-test.cjs`（真实主进程环境） |
 
 > 完整的现象 / 根因 / 修复 / 防再犯，见 [`../bugs/BUG-AI打标与标签.md`](../bugs/BUG-AI打标与标签.md)（AI-03、AI-04）。

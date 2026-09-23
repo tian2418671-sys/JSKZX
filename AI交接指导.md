@@ -10,7 +10,7 @@
 > | 待做功能与排期 | `docs/规格与计划/后续升级计划.md` |
 > | 文档总地图 | `docs/README.md` |
 >
-> 最后更新：2026-09-21 ｜ 当前版本 **v2.2.13**（已发布 + OTA）
+> 最后更新：2026-09-22 ｜ 当前版本 **v2.2.13**（已发布 + OTA）
 
 ---
 
@@ -23,8 +23,8 @@
 | 仓库 | `https://github.com/tian2418671-sys/JSKZX.git`（远端 `origin`） |
 | 分支 | 本地 `master`（与 origin 同步） |
 | 构建产物 | `sillytavern-card-manager-<版本>.exe`（NSIS 安装版）+ `latest.yml` + `.exe.blockmap` + zip 绿色版 |
-| 测试 | `npm test` = `node --test "test/**/*.test.mjs"` → 当前 **471 用例全绿**（41 个测试文件） |
-| 规模 | `js/components/` 41 个 SFC、`js/composables/` 37 个模块（含 `chat/` 引擎 16 个）、`js/utils/` 解析与索引工具 |
+| 测试 | `npm test` = `node --test "test/**/*.test.mjs"` → 当前 **504 用例全绿**（44 个测试文件） |
+| 规模 | `js/components/` 47 个 SFC、`js/composables/` 41 个模块（顶层 24 + `chat/` 引擎 17）、`js/utils/` 解析与索引工具 |
 | 用户习惯 | 说「**一条龙服务**」= 升版本号 → 更新文档三件套 → 打包 → 提交推送 → 发 GitHub Release（含 `latest.yml` 保 OTA） |
 | 典型库 | 日常小库 `E:\AI\酒馆工具\角色卡`（75 张）；压测大库 `I:\03\角色色卡`（11,186 张 / 9.76GB）；2 万卡副本由脚本现造 |
 
@@ -63,6 +63,19 @@ node scripts/release-check.mjs                   # 语法 + 单测 + 构建 + �
     （更新须带 `@<版本>`）→ 装完新开终端，需界面命令 / 语言服务生效时提示重载窗口。
     **不得**因「本机没装」就跳过检查 / 手工糊弄 / 声称做不到；装不上时走纯 CLI 等价通道（如 `npx --yes <包名>`）兜底并说明原因。
     细则见用户级指令 `%APPDATA%\Code\User\prompts\instructions\ai-extension-workflow.instructions.md`。
+11. 🔬 **验证要克制：先修代码，后验证；一个 bug 最多留 1 个探针** ——
+    **探针是一次性工具，不是交付物**。禁止「先写一堆探针探索」再修代码。
+    - 纯探索（量个耗时 / 看一眼字段）→ 用 **`node -e` 内联**跑完即弃，**不落地成文件**；
+    - 确需落地 → **一个 bug 只留 1 个探针**，迭代时**改同一个文件**（禁止 `xxx2.mjs` / `xxx3.mjs` / `xxx-tail2.mjs`）；
+    - 落地后**同一次操作内**登记进 [`docs/技术支持/README.md`](docs/技术支持/README.md) 的脚本表，否则删掉；
+    - 只有「**能定阈值**」或「**能长期当门禁**（带断言、退出码即结果）」的才值得留存，纯取证的一次性用完删；
+    - 优先序：`npm test` 单测 → `node -e` 内联 → 已有探针 → **新建探针（最后手段）**。
+    > 📌 **为什么立这条**（2026-09-23 用户明确批评「写这么多探针有什么作用，浪费 token 么」）：
+    > 实测当时探针 **85 个 / 12,050 行**，业务代码 **40,982 行** ⇒ 探针 ≈ 业务代码的 **29%**；
+    > 其中 **19 个写完从未登记**（等于垃圾），**14 个是同一问题的重复版本**
+    > （`progress-tail`/`tail2`/`tail3`/`tail4` 四个探一个进度条；`simhash-opt`/`perf`/`tune`/`verify`/`verify2` 五个探一个阈值）。
+    > **探针多 ≠ 验证牢** —— AR-46 已证明「5/5 全绿的探针是假绿」（只采内部变量、没采用户实际看到的东西）。
+    > 结论（数字 / 阈值 / 判据）应写进 `docs/**`，**不是**留一堆脚本。
 
 > 📌 **真实库清单**（本机）：
 >
@@ -86,7 +99,7 @@ node scripts/release-check.mjs                   # 语法 + 单测 + 构建 + �
 - **下一刀（P1b，未做）**：剩余 2,053MB 里 1,877MB 是「词条对象 + 倒排索引」，目标应是**词条对象本身**与索引规模，而不是文本。
 - 已知遗留（非阻塞）：
   - `js/components/App.vue` 有十余处 `U+FFFD` 乱码**在注释里**（不影响功能，未修）；
-  - 冷启动真机复测（重启电脑后跑 `node scripts/measure-startup.mjs --label 冷启动`）尚未做；
+  - 冷启动真机复测（重启电脑后跑 `node scripts/tools/measure-startup.mjs --label 冷启动`）尚未做；
   - 移动版（`JSK管理APP`）**未同步**桌面版修复 → 待办已**独立成文**：
     [`docs/规格与计划/移动版同步-待办清单.md`](docs/规格与计划/移动版同步-待办清单.md)（M1~M7 逐项取证要点）。
 
@@ -94,6 +107,16 @@ node scripts/release-check.mjs                   # 语法 + 单测 + 构建 + �
 > （AR-39 / AR-40 / AR-41 / DF-17 / DF-18 / DF-19 / PK-18 / PK-19；471 用例全绿；**未打包、未推送 Release**）。
 > 详见 [`docs/规格与计划/查重扫描与检索-最终方案.md`](docs/规格与计划/查重扫描与检索-最终方案.md) 与
 > [`剩余任务.md`](docs/规格与计划/查重扫描与检索-剩余任务.md)（Phase 3 已完成）。
+>
+> **后续进展（2026-09-22）**：世界书大库**三层架构（L0 元数据 / L1 摘要 / L2 正文）已全部落地** ——
+> S0 止血（唯一批量读正文入口）→ S0.5 特征实验 → S1' L1 摘要（主进程算、随扫描产出）→
+> S2' 同名查重只读索引 → S3' simhash 内容查重 → S4' CI 白名单守卫；
+> 另有 **AR-45 进度条横跳修复**与**加载速度实测**（结论：**已到磁盘物理下限，无提速空间**）。
+> 实测：同名查重 s1000 **70.8s → 9ms**、s5000 **OOM 被杀 → 7/7 通过**；L1 索引 **353.7MB → 23.4MB**；
+> 504 用例全绿；**未打包、未推送 Release**。
+> 详见 [`docs/规格与计划/世界书大库-加载与查重架构方案.md`](docs/规格与计划/世界书大库-加载与查重架构方案.md)、
+> [`S0.5-simhash特征方案实验报告.md`](docs/规格与计划/S0.5-simhash特征方案实验报告.md) 与
+> [`后续计划-20260922-PK27架构改造收尾.md`](docs/规格与计划/后续计划-20260922-PK27架构改造收尾.md)。
 
 ---
 
@@ -104,17 +127,17 @@ node scripts/release-check.mjs                   # 语法 + 单测 + 构建 + �
 ```
 main.js            Electron 主进程（CJS）：app:// 自定义协议、全部 IPC、路径白名单、
                    快照备份、PNG 读写、世界书扫描、全盘打捞真伪鉴定、OTA、崩溃兜底
-preload.js         contextBridge 暴露 window.electronAPI（约 30+ API）
+preload.js         contextBridge 暴露 window.electronAPI（98 个方法 / 99 个 IPC 通道）
 js/entry.js        渲染进程入口（createApp(App) + errorHandler）——注意不是 js/main.js
-js/components/     41 个 SFC（App.vue 为唯一根 + 子组件 + 弹窗）
-js/composables/    37 个模块：业务逻辑主体，App.vue setup 尾部统一注入
-   └ chat/         测卡引擎 16 个模块（useChatEngine / chatStorage / useChatPresets / chatBridge …）
+js/components/     47 个 SFC（App.vue 为唯一根 + 子组件 + 弹窗）
+js/composables/    41 个模块（顶层 24 + chat/ 17）：业务逻辑主体，App.vue setup 尾部统一注入
+   └ chat/         测卡引擎 17 个模块（useChatEngine / chatStorage / useChatPresets / chatBridge …）
 js/utils/          cardLoader.js（卡解析/规范化）、pngParser.js、searchIndex.js、tokenCache.js、
                    memoryGuard.js、cardSlim.js、tokenEstimate.js
 main/              vectorManager.js / vectorWorker.js / memoryStore.js（向量与长期记忆存储层）
 css/               tailwind.css（源）/ style.css（自定义）
 web/               vite build 产物（生产加载，gitignore）
-test/              35 个测试文件 / 403 用例（node:test，`npm test`）
+test/              44 个测试文件 / 504 用例（node:test，`npm test`）
 scripts/           压测与探针（library-dup-*、capacity-check.ps1、measure-startup.mjs、
                    release-check.mjs、_cdp-*.mjs 等）
 ```
@@ -133,7 +156,7 @@ scripts/           压测与探针（library-dup-*、capacity-check.ps1、measur
 | `cardSlim.js` | 大库正文懒加载（`slimCard` / `ensureCardFull`，>3000 张自动启用） |
 | `tokenEstimate.js` | Token 估算（超长文本防护） |
 
-**`js/composables/`（业务逻辑主体，共 37 个模块，含 `chat/` 16 个）**
+**`js/composables/`（业务逻辑主体，共 41 个模块 = 顶层 24 + `chat/` 17）**
 
 | 模块 | 职责 |
 |---|---|
@@ -149,7 +172,7 @@ scripts/           压测与探针（library-dup-*、capacity-check.ps1、measur
 | `useGraph.js` | 关系图谱（头像限流 / 连线预算 / 构建缓存） |
 | `useDedupe.js` / `useBatch.js` / `useSnapshots.js` | 查重比对 / 批量操作 / 历史快照 |
 | `useGlobalEntrySearch.js` / `usePlugins.js` / `useStatusbarPreview.js` | 全库词条搜索 / 插件工作区 / 状态栏模板预览 |
-| `chat/*`（16 个） | 测卡引擎：`useChatEngine`（编排）/ `chatStorage`（存储适配 + 响应式版本号）/ `useChatPresets` / `chatBridge` / `useChatMemory` … |
+| `chat/*`（17 个） | 测卡引擎：`useChatEngine`（编排）/ `chatStorage`（存储适配 + 响应式版本号）/ `useChatPresets` / `chatBridge` / `useChatMemory` … |
 
 > 其余模块按 `useXxx` 命名即可判断职责；新增模块沿用「App.vue 统一注入 + 四步暴露」的约定。
 
@@ -209,7 +232,7 @@ node --check <file>                            # 语法检查
 
 | 门禁 | 命令 | 通过标准 |
 |---|---|---|
-| 单测 | `npm test` | 256/256 |
+| 单测 | `npm test` | 504/504 |
 | 构建 | `npm run build:web` | 无错误 |
 | 运行时 | `npx electron . --disable-gpu --enable-logging` | 无 `[Vue 错误]`、`crash.log` 无新增 |
 | 发版自查 | `node scripts/release-check.mjs` | `✅ 无阻塞项，可进入打包` |
@@ -232,7 +255,7 @@ node --check <file>                            # 语法检查
 |---|---|---|
 | 架构 / 渲染 / 测试调试 | [`docs/bugs/BUG-架构与渲染.md`](docs/bugs/BUG-架构与渲染.md) | IPC 不能传 Proxy；弹窗必须在 `#app` 内；`shallowRef` 深层改动不触发；Vue 3.4+ computed「值不变不传播」 |
 | 数据 / 文件 / 字段口径 | [`docs/bugs/BUG-数据与文件.md`](docs/bugs/BUG-数据与文件.md) | `id` 不是路径；世界书 `entries` 可能是对象字典；内嵌与库世界书**字段口径不同**；导出必须剔除 `_` 前缀字段 |
-| 性能 / 大库 / 内存 | [`docs/bugs/BUG-性能与大库.md`](docs/bugs/BUG-性能与大库.md) | 索引并发重叠重建 → 重复卡；写盘判据看错基准 → 无限重写；`requestIdleCallback` 在后台永不回调；大库容量边界 |
+| 性能 / 大库 / 内存 | [`docs/bugs/BUG-性能与大库.md`](docs/bugs/BUG-性能与大库.md) | 索引并发重叠重建 → 重复卡；写盘判据看错基准 → 无限重写；`requestIdleCallback` 在后台永不回调；大库容量边界；**世界书两阶段秒开**（列表阶段不读文件）与**「不能为性能跳过 `isValidWorldbook` 守门员」** |
 | 发布 / 打包 / 更新 | [`docs/bugs/BUG-发布更新与打包.md`](docs/bugs/BUG-发布更新与打包.md) | `latest.yml` 缺失 = OTA 404；`gh release` 无输出=正在上传；本机 git 直连 GitHub 间歇失败需重试 |
 | 测卡工作区（对话测试） | [`docs/bugs/BUG-测卡工作区.md`](docs/bugs/BUG-测卡工作区.md) | 读存储的 computed 会永久缓存；预设 `prompt_order` 有两种形态；CDP 里 import 模块会另建实例 |
 
@@ -243,7 +266,7 @@ node --check <file>                            # 语法检查
 ## 六、给下一任 AI 的开工清单
 
 1. 读本文件（已读完）→ 按需读 `docs/bugs/` 对应领域 → 接口/实测数据细节看 `docs/技术支持/`。
-2. `git status -sb` + `git log --oneline -5`，确认基线；跑 `npm test` 确认 256/256。
+2. `git status -sb` + `git log --oneline -5`，确认基线；跑 `npm test` 确认全绿。
 3. 问清用户这一轮的目标是「修 bug / 加功能 / 发版」中的哪一类；**不要自行打包或推送**。
 4. 动手前 grep 现状；改完过 4.2 的门禁；涉及路径的操作同步迁移派生键。
 5. 若发现新缺陷：**先在 `docs/bugs/` 对应领域加一条**（带编号、版本、现象/根因/修复/验证），再写代码修复 —— 这样才不会重复踩坑。

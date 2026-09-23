@@ -51,6 +51,107 @@ export function gradeMemory(mem, thresholds = DEFAULT_THRESHOLDS) {
  * @param {number} [opts.intervalMs] 定时采样间隔（0 = 不自动定时）
  * @param {number} [opts.cooldownMs] 同档位重复动作的最小间隔（防抖）
  */
+// ═══════════════════════════════════════════════════════════════
+// 🛡️ 读前预估（§5.3「预检」，2026-09-23 补 —— 此前只有运行时水位检查）
+// ───────────────────────────────────────────────────────────────
+// 📖 为什么需要：`checkNow` 是**读了之后**才知道爆 —— 遇超大书（如 200MB 合并书）
+//    等发现时已经分配完，只剩「崩」或「勉强撑住」两种结局，**没有拒绝的机会**。
+//    PK-27 那次 OOM 是**内核直接杀进程**，应用连提示的机会都没有。
+// ✅ 预检价值：在**分配之前**用「磁盘 size」估算，超限就**优雅拒绝并说明原因**
+//    （符合 PK-26 教训「静默 = 坏了」—— 要能告诉用户为什么没做）。
+//
+// ⚠️ 三个已知的估算不确定性（评审 §3.7 指出，**必须留余量**）：
+//   ① **`usedJSHeapSize` 不含 ArrayBuffer 外部内存** —— `fs.readFile` 的 Buffer 不计入堆，
+//      故 `used` 会低估实际占用 ⇒ 按「预估值 vs 余量预算」独立判断，不能只看 `used`；
+//   ② **parse 后体积 ≠ 磁盘字节** —— 实测系数 **0.57（P95 0.89）**，但 emoji（非 BMP）会翻倍，
+//      故保守取 **2.2**（emoji 占 2 个 code unit 的余量）；
+//   ③ **`performance.memory` 只在 Chromium 可用** —— 拿不到时本函数**降级为「只看绝对预算」**，
+//      不抛错、不写死依赖。
+// ═══════════════════════════════════════════════════════════════
+
+/** 磁盘字节 → parse 后堆占用的保守系数（实测平均 0.57 / P95 0.89；取 2.2 留 emoji 与 JS 对象开销余量） */
+export const PARSE_SIZE_FACTOR = 2.2;
+
+/**
+ * 估算「读入并 parse 若干文件」后的堆占用（纯函数，便于单测）
+ * @param {Array<{size?:number}>|number[]} files 文件列表（对象取 `.size`，数字直接用）
+ * @param {number} [factor] 系数，默认 `PARSE_SIZE_FACTOR`
+ * @returns {{bytes:number, mb:number, count:number, unknown:number}} `unknown` = 缺 size 的个数
+ */
+export function estimateParseBytes(files, factor = PARSE_SIZE_FACTOR) {
+    const list = Array.isArray(files) ? files : [];
+    let sum = 0, unknown = 0;
+    for (const f of list) {
+        const s = (typeof f === 'number') ? f : (f && Number(f.size));
+        if (!Number.isFinite(s) || s <= 0) { unknown++; continue; }
+        sum += s;
+    }
+    const bytes = Math.round(sum * factor);
+    return { bytes, mb: Math.round(bytes / MB), count: list.length, unknown };
+}
+
+/**
+ * 读前预检：是否**允许**读入这批文件（纯函数，便于单测）
+ *
+ * 判定顺序（任一不过即拒）：
+ *   ① **单本超限** → 拒（单个文件就超预算，读了必爆）
+ *   ② **总预估超「可用余量 × 比例」** → 拒
+ *   ③ `readMemory()` 拿不到（非 Chromium / 未开开关）→ **降级**：改用 `assumedLimitBytes` 的绝对预算
+ *
+ * ⚠️ 本函数**只做判定，不产生副作用**（不 GC、不释放缓存）—— 由调用方决定怎么处理拒绝。
+ *
+ * @param {object} opts
+ * @param {Array<{size?:number}>|number[]} opts.files 待读文件
+ * @param {() => ({used:number,total:number,limit:number}|null)} [opts.readMemory]
+ * @param {number} [opts.budgetRatio] 允许占用的「可用余量」比例（默认 0.7，评审 §3.7 建议）
+ * @param {number} [opts.maxSingleBytes] 单本上限（默认 50MB，与 `WB_META_MAX_BYTES` 同口径）
+ * @param {number} [opts.assumedLimitBytes] 拿不到 `readMemory` 时的假定上限（默认 4192MB）
+ * @param {number} [opts.factor]
+ * @returns {{ok:boolean, reason:string|null, est:object, availMB:number, budgetMB:number,
+ *            degraded:boolean, oversized:Array<{size:number}>}}
+ */
+export function preflightRead(opts = {}) {
+    const files = opts.files || [];
+    const est = estimateParseBytes(files, opts.factor);
+    const budgetRatio = Number.isFinite(opts.budgetRatio) ? opts.budgetRatio : 0.7;
+    const maxSingle = Number.isFinite(opts.maxSingleBytes) ? opts.maxSingleBytes : 50 * MB;
+
+    // ① 单本超限（先把「读了必爆」的挑出来，便于给出可操作清单）
+    const oversized = [];
+    for (const f of files) {
+        const s = (typeof f === 'number') ? f : (f && Number(f.size));
+        if (Number.isFinite(s) && s > maxSingle) oversized.push({ size: s });
+    }
+
+    const mem = typeof opts.readMemory === 'function' ? opts.readMemory() : null;
+    const hasMem = !!(mem && Number.isFinite(mem.used) && Number.isFinite(mem.limit) && mem.limit > 0);
+    // 拿不到内存读数 → 降级：用假定上限做绝对预算（不写死依赖 performance.memory）
+    const limit = hasMem ? mem.limit : (Number.isFinite(opts.assumedLimitBytes) ? opts.assumedLimitBytes : 4192 * MB);
+    const used = hasMem ? mem.used : 0;
+    const avail = Math.max(0, limit - used);
+    const budget = Math.floor(avail * budgetRatio);
+
+    const base = {
+        est, degraded: !hasMem,
+        availMB: Math.round(avail / MB), budgetMB: Math.round(budget / MB), oversized
+    };
+    if (oversized.length > 0) return { ok: false, reason: 'single-too-large', ...base };
+    if (est.bytes > budget) return { ok: false, reason: 'batch-too-large', ...base };
+    return { ok: true, reason: null, ...base };
+}
+
+/**
+ * 创建守门员
+ * @param {object} opts
+ * @param {() => ({used:number,total:number,limit:number}|null)} opts.readMemory 读当前堆（默认取 performance.memory）
+ * @param {() => void} [opts.forceGc] 强制 GC（默认 window.gc，需 --expose-gc）
+ * @param {() => void} [opts.releaseCaches] 释放「可重算」的缓存（令牌/缩略图等）
+ * @param {(info:object) => void} [opts.onWarn] 进入 warn 档回调（只记日志）
+ * @param {(info:object) => void} [opts.onCritical] 进入 critical 档回调（提示用户 + 记录）
+ * @param {{warn:number,critical:number}} [opts.thresholds]
+ * @param {number} [opts.intervalMs] 定时采样间隔（0 = 不自动定时）
+ * @param {number} [opts.cooldownMs] 同档位重复动作的最小间隔（防抖）
+ */
 export function createMemoryGuard(opts = {}) {
     const thresholds = { ...DEFAULT_THRESHOLDS, ...(opts.thresholds || {}) };
     // ⚠️ 实测结论（2026-09-13，22,372 卡）：**Chromium 渲染进程不采纳 `--max-old-space-size`**
@@ -78,7 +179,7 @@ export function createMemoryGuard(opts = {}) {
     const intervalMs = Number.isFinite(opts.intervalMs) ? opts.intervalMs : 30000;
     const cooldownMs = Number.isFinite(opts.cooldownMs) ? opts.cooldownMs : 60000;
 
-    const stats = { samples: 0, warns: 0, criticals: 0, gcCalls: 0, releases: 0, last: null, lastLevel: 'unknown' };
+    const stats = { samples: 0, warns: 0, criticals: 0, gcCalls: 0, releases: 0, preflights: 0, preflightRejects: 0, last: null, lastLevel: 'unknown' };
     let lastActedAt = { warn: 0, critical: 0 };
     let timer = null;
 
@@ -121,7 +222,25 @@ export function createMemoryGuard(opts = {}) {
         if (timer) { clearInterval(timer); timer = null; }
     }
 
-    return { start, stop, checkNow, stats, thresholds: { ...thresholds } };
+    /**
+     * 读前预检（复用本守门员的 `readMemory`，保证与实际水位判定**同一数据源**）
+     * @param {Array<{size?:number}>|number[]} files
+     * @param {{budgetRatio?:number, maxSingleBytes?:number}} [o]
+     * @returns {ReturnType<typeof preflightRead>}
+     */
+    function preflight(files, o) {
+        const r = preflightRead({
+            files,
+            readMemory,
+            budgetRatio: (o && o.budgetRatio),
+            maxSingleBytes: (o && o.maxSingleBytes)
+        });
+        stats.preflights++;
+        if (!r.ok) stats.preflightRejects++;
+        return r;
+    }
+
+    return { start, stop, checkNow, preflight, stats, thresholds: { ...thresholds } };
 }
 
 export default createMemoryGuard;

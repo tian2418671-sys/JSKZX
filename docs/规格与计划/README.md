@@ -2,7 +2,7 @@
 
 > 本目录存放**实现规格、前置检查报告、待办计划**这类「决策与排期」文档。
 > 与其它目录的分工：`docs/bugs/` 记缺陷、`docs/技术支持/` 放代码与数据、`docs/发布/` 管发版流程，**这里记「要做什么、怎么做的约定」**。
-> 最后整理：2026-09-21
+> 最后整理：2026-09-22
 
 ---
 
@@ -25,6 +25,11 @@
 | [移动版同步-待办清单.md](移动版同步-待办清单.md) | **移动版（`JSK管理APP`）同步待办**（**独立成文**，因移动版是另一个仓库）：M1~M7 逐项取证要点（AR-39 / DF-17 / DF-18 / DF-19 / PK-18 / PK-19 / AR-40 是否同源）、同步完成后的落档规则、与桌面版文档的关系 | ⬜ 全部待评估（需先在移动版仓库取证） |
 | [查重扫描与检索-最终方案.md](查重扫描与检索-最终方案.md) | **唯一执行依据**（由原「实现规格」+「评估方案」**合并去重**而成，两份前档已删除）：① **7 处原方案偏差**（`$toast` / `parseInWorker` 等不存在、`deleteFile` 是物理删除必须用 `trashFiles`、无 O(n²) 全比对、索引早已接入、DiffModal 三形态不可替换、`keyOf` 三级回退）；② **P0 崩溃根因**（`diffText: null` + `path` 裸 `split`）与 `alignEntryLists` 定稿（**带侧标识 + 一对一配对** 三项约束）；③ **扫描 4 道闸门 + 第 5 道 `scanCache` 误杀固化**（预设侧同款）；④ **检索病根实测改写**（~~中文多字词~~ → **拉丁前缀全表回退 + 索引就绪后无短语复核**）；⑤ 分级扫描（≤5MB / 5~50MB 低并发 / >50MB 只回元数据）替代一刀切 50MB；⑥ TC-01~TC-13 验收；⑦ §九 决策记录 + **§十 Phase 1 落地记录 + §十一 Phase 2 落地记录** | ✅ **Phase 1 + 2 + 3 全部落地**（AR-39 / DF-17 / DF-18 / DF-19 / PK-18 / PK-19 已修；460 用例全绿；UI 冒烟 + 端到端 9/9、8/8） |
 | [世界书库分组与标签-实现规格.md](世界书库分组与标签-实现规格.md) | **已定稿待拍板的实现规格**（约 164 行）：`RFC-20260921-WB-TAGS-02` 落档 + **逐条源码取证修正（11 处偏差）**——指出「世界书分组早已存在」（`wbCategoryMap` + 中文哨兵 `'全部'`/`'默认'`）、**检索改错了模块**（世界书搜索在 `useWorldbooks.filteredWorldbooks`，不走索引）、`item.entries` 字段不存在（应为 `item.data.entries`）；含 SSOT / 哨兵 / 标签口径**3 个待拍板决策点**、TC-WB-01~11 验收（含存量分组迁移） | 📝 已定稿，待拍板后实施 |
+| [世界书大库-加载与查重架构方案.md](世界书大库-加载与查重架构方案.md) | **PK-27 根治方案 v2.1（🟢 S0/S0.5/S1'/S2'/S4' 已落地）**：三次 OOM 事故（PK-20 / 内容查重 / PK-27）的**共同病根**——「扫描时 parse 出的信息被丢弃，下游只能重读 34.8GB」。方案：**L0 元数据 / L1 摘要 / L2 正文** 三层分离，**扫描时顺带产出 L1**（零额外读盘）、**在主进程算**（渲染层零正文）。含 **L1 体积实测**（原估 2~4KB/本 → 实测 **67.1KB/本**；改 hash 后 **4.44KB/本**）、**落地实测**（同名查重 **70.8s → 9ms**；热缓存秒开 **333ms** + L1 **1001/1001**）、**两个落地 bug 复盘**（热缓存丢摘要 / bottom-k 预筛在极端同源库失效）、两轮评审意见逐条处理、D1~D8 决策点 | 🟢 主体已落地 |
+| [S0.5-simhash特征方案实验报告.md](S0.5-simhash特征方案实验报告.md) | **PK-27 / S0.5 实验定稿 + S1'/S2'/S4' 落地实测**：解决 v3 评审 **P0-1「参数依赖倒挂」**（S1' 落盘 simhash 但特征方案未定 → 可能全库作废）。**定稿 char 4-gram + number 双 32 位 + 采样 step=4 + 阈值 T=19**（step=1 实验值为 T=16）；实测 BigInt 版 **1387ms/本（全库 124.9 分钟）** → 优化后 **43ms/本**，据此确立 **分层落盘**（S1' 只落 keys，simhash 延后 S3'）。⚠️ 含样本坑（压力库是硬链接放大产物）+ 两个落地 bug 复盘 | ✅ 已完成 |
+| [世界书大库-加载与查重架构方案 v3.md](世界书大库-加载与查重架构方案%20v3.md) | **v2 方案的外部评审意见（第二轮）**：指出 3 个 P0 —— ① simhash **参数依赖倒挂**（S1' 落盘 S3' 才定的值）；② 「排序+相邻窗口」**算法不成立**（Jaccard 非全序）+ 漏防**高频桶爆炸**；③ **oversized 书查重死胡同**。另含 6 条实现约束（canonical 序列化 / 截断口径 / IPC TypedArray 验证 / CI 白名单制 / 体积系数口径 / 快照合并语义）、D9~D10 建议 | 📌 已逐条处理（见方案 §8 / §12） |
+| [工作记录-20260923.md](工作记录-20260923.md) | **单日完整台账**：当天修复 6 个缺陷（AR-47 / AR-48 / CT-20 / PK-28 / DF-21 / 预设查重空库）与 5 项改进的**可验证数据**；⏳ **1 项待拍板**（**DF-21 的 uid 处置 A/B/C**，含取证结论「ST uid = 数组下标」与「当前实现调序后会写出错位 uid」的实测）；📝 **6 个未执行方案**（SQLite / bottom-k 倒排 / worker 线程 / MinHash+LSH / tokenEstimate / 抬高 V8 上限）**附搁置原因，勿重复评估**；⚠️ 其他遗留（大库复测 / 冷启动真机 / 3 个待拍板规格 / 移动版同步）；6 条当天教训 | ⏳ 有 1 项待拍板，其余已落地 |
+| [后续计划-20260922-PK27架构改造收尾.md](后续计划-20260922-PK27架构改造收尾.md) | **本轮收尾与后续计划**：S0/S0.5/S1'/S2'/S3'/S4' + AR-45 **全部落地**；含**全部实测数据**（加载速度 780ms 秒开 / 234s 冷启动 / 0.8s 热启动、查重 70.8s→9ms、L1 体积 353.7MB→23.4MB）、**7 个踩过的坑**、P0~P3 后续计划、新增技术资产清单、发布检查单 | ✅ 已完成 |
 
 参考稿（不属于本目录，但被上述文档引用）：
 
@@ -50,7 +55,7 @@
 | `js/components/ChatTestSidebar.vue` | 测卡侧栏（7 分区抽屉） |
 | `js/components/EditorPanel.vue` | 角色卡编辑器（`basic/advanced/worldbook/regex/plugins/statusbar/chat/raw` 页签） |
 | `js/components/CardPluginModal.vue` + `js/utils/cardPlugins.js` + `js/composables/useCardPlugins.js` | 卡内插件页签（解析 / 编辑 / 全屏 CodeEditor 弹窗） |
-| `js/composables/chat/*` | 测卡引擎 16 个模块（`useChatEngine` / `chatStorage` / `useChatPresets` / `chatBridge` …） |
+| `js/composables/chat/*` | 测卡引擎 17 个模块（`useChatEngine` / `chatStorage` / `useChatPresets` / `chatBridge` …） |
 | `main/memoryStore.js` + `memory:*` IPC | 长期记忆通道（`memory_store.json`） |
 | `test/chatStorage.test.mjs`、`test/chatPresets.test.mjs`、`test/chatKeyMigration.test.mjs`、`test/memoryStore.test.mjs` | 单测 |
-| `scripts/chat-sidebar-test.mjs`、`scripts/chat-engine-test.mjs` | 端到端（生产 `app://` / dev + 调试句柄） |
+| `scripts/tools/chat-sidebar-test.mjs`、`scripts/tools/chat-engine-test.mjs` | 端到端（生产 `app://` / dev + 调试句柄） |

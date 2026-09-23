@@ -43,7 +43,7 @@ function parseEntriesFlexible(text) {
     return { name, entries: normalized };
 }
 
-export function useWorldbookExtras({ worldbooks, activeWorldbook, lastWorldbookDirPath, nativeAlert, addLog, confirmDialog }) {
+export function useWorldbookExtras({ worldbooks, activeWorldbook, lastWorldbookDirPath, nativeAlert, addLog, confirmDialog, wbEntryCount }) {
     // =========================================================
     // 📤 从角色卡内嵌世界书提取为独立世界书
     // =========================================================
@@ -186,7 +186,8 @@ export function useWorldbookExtras({ worldbooks, activeWorldbook, lastWorldbookD
     const restoreWbSnapshot = async (snap) => {
         const target = wbSnapshotTarget.value;
         if (!target || !snap) return;
-        const name = (target.data && target.data.name) || target.name || '未命名';
+        // ⚡ PK-26：书名优先轻量 `wbName`（秒开后 `data` 为 null）
+        const name = (target.wbName || (target.data && target.data.name)) || target.name || '未命名';
         const ok = await confirmDialog(`确定将世界书《${name}》回滚到快照「${snap.file}」吗？\n当前版本会先自动备份。`);
         if (!ok) return;
         const res = await window.electronAPI.restoreWorldbookSnapshot({ filePath: target.path, snapshotPath: snap.path });
@@ -198,6 +199,10 @@ export function useWorldbookExtras({ worldbooks, activeWorldbook, lastWorldbookD
                 const data = JSON.parse(readRes.text);
                 data.entries = Array.isArray(data.entries) ? data.entries : (data.entries && typeof data.entries === 'object' ? Object.values(data.entries) : []);
                 target.data = data;
+                // ⚡ PK-26：回滚后正文已载入 → 同步标记与轻量字段，避免 UI 仍按「懒加载」显示旧值
+                target.dataLoaded = true;
+                target.entryCount = data.entries.length;
+                if (typeof data.name === 'string' && data.name.trim()) target.wbName = data.name.trim();
             } catch (e) { /* 忽略解析/读取异常 */ }
             addLog(`🕒 已回滚世界书快照: ${snap.file}`, 'success');
             nativeAlert('已成功回滚到所选快照。', 'info');
@@ -210,12 +215,24 @@ export function useWorldbookExtras({ worldbooks, activeWorldbook, lastWorldbookD
     // =========================================================
     // 📊 世界书库统计
     // =========================================================
+    // ⚡ PK-26：秒开后 `wb.data` 为 null（懒加载）→ 旧写法读 `wb.data.entries` 会
+    //    **静默统计成 0**（用户报的「统计全是 0」）。
+    //    ⚠️ 这里**不能**按需载入正文：5000 本全读会瞬间打爆内存（PK-20 的 OOM 根因）。
+    //    ⇒ 词条数走轻量 `entryCount`（扫描阶段 2 已补齐，零读盘）；
+    //      依赖正文的 Token / 常驻 / 触发词覆盖率只统计**已载入**的书（不静默、不阻塞）。
+    const wbCountOf = (wb) => {
+        if (typeof wbEntryCount === 'function') return wbEntryCount(wb);
+        if (wb && typeof wb.entryCount === 'number') return wb.entryCount;
+        return (wb && wb.data && Array.isArray(wb.data.entries)) ? wb.data.entries.length : 0;
+    };
     const wbStats = computed(() => {
         const books = worldbooks.value || [];
-        let entryCount = 0, tokenTotal = 0, constantCount = 0, keyedCount = 0;
+        let entryCount = 0, tokenTotal = 0, constantCount = 0, keyedCount = 0, countedEntries = 0;
         books.forEach(wb => {
+            entryCount += wbCountOf(wb);
+            // 仅统计已载入正文的书（未载入时无从得知 Token / 常驻 / 触发词）
             const entries = (wb.data && Array.isArray(wb.data.entries)) ? wb.data.entries : [];
-            entryCount += entries.length;
+            countedEntries += entries.length;
             entries.forEach(e => {
                 const keyArr = Array.isArray(e.key) ? e.key : (e.key ? [e.key] : []);
                 const secArr = Array.isArray(e.keysecondary) ? e.keysecondary : [];
@@ -224,8 +241,9 @@ export function useWorldbookExtras({ worldbooks, activeWorldbook, lastWorldbookD
                 tokenTotal += estimateTokens(keyArr.concat(secArr).join(' ') + ' ' + (e.content || ''));
             });
         });
-        const keyCoverage = entryCount > 0 ? Math.round((keyedCount / entryCount) * 100) : 0;
-        return { bookCount: books.length, entryCount, tokenTotal, constantCount, keyedCount, keyCoverage };
+        // 覆盖率分母用**已载入的词条数**（而非全库词条数），否则懒加载大库会显示假「0%」
+        const keyCoverage = countedEntries > 0 ? Math.round((keyedCount / countedEntries) * 100) : 0;
+        return { bookCount: books.length, entryCount, tokenTotal, constantCount, keyedCount, keyCoverage, countedEntries };
     });
 
     return {

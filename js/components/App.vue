@@ -385,6 +385,10 @@
         <dedupe-modal
             :show="showDedupeModal"
             :groups="duplicateGroups"
+            :scanning="dedupeScanning"
+            :scan-progress="dedupeScanProgressForModal"
+            :scan-percent="dedupeScanPercent"
+            :indeterminate="dedupeScanIndeterminate"
             @close="showDedupeModal = false"
             @open-diff="openDiffDetailModal"
             @resolve-group="resolveDedupeGroup"
@@ -394,6 +398,10 @@
         <wb-dedupe-modal
             :show="showWbDedupeModal"
             :groups="wbDuplicateGroups"
+            :scanning="dedupeScanning"
+            :scan-progress="dedupeScanProgressForModal"
+            :scan-percent="dedupeScanPercent"
+            :indeterminate="dedupeScanIndeterminate"
             @close="showWbDedupeModal = false"
             @open-diff="openDiffDetailModal"
             @resolve-group="resolveWbDedupeGroup"
@@ -470,6 +478,11 @@
         <content-dedupe-modal
             :show="showContentDedupeModal"
             :groups="contentDuplicateGroups"
+            :scanning="dedupeScanning"
+            :scan-progress="dedupeScanProgressForModal"
+            :scan-percent="dedupeScanPercent"
+            :scan-label="dedupeScanLabel || '正在扫描并比对内容…'"
+            :indeterminate="dedupeScanIndeterminate"
             @close="showContentDedupeModal = false"
             @open-diff="openDiffDetailModal"
             @resolve-group="resolveContentDedupeGroup"
@@ -514,7 +527,7 @@
     <!-- ================= [ 🔀 条目级导入合并弹窗（子组件 WbImportModal） ] ================= -->
     <wb-import-modal
         :show="showWbImportModal"
-        :active-worldbook-name="(activeWorldbook && activeWorldbook.data && activeWorldbook.data.name) || '未命名'"
+        :active-worldbook-name="(activeWorldbook && (activeWorldbook.wbName || (activeWorldbook.data && activeWorldbook.data.name))) || '未命名'"
         :source-books="importableSourceBooks"
         :source-book="importSourceBook"
         :candidates="importCandidates"
@@ -545,6 +558,7 @@
         v-model:query="globalEntrySearchQuery"
         :results="globalEntrySearchResults"
         :index-count="globalEntryIndex.length"
+        :indexing="globalEntryIndexing"
         @close="closeGlobalEntrySearch"
         @jump="jumpToEntrySource"
     />
@@ -552,7 +566,7 @@
     <!-- ================= [ 🕒 世界书快照历史与回滚（子组件 WbSnapshotModal） ] ================= -->
     <wb-snapshot-modal
         :show="showWbSnapshotModal"
-        :target-name="(wbSnapshotTarget && wbSnapshotTarget.data && wbSnapshotTarget.data.name) || (wbSnapshotTarget && wbSnapshotTarget.name) || '未命名'"
+        :target-name="(wbSnapshotTarget && (wbSnapshotTarget.wbName || (wbSnapshotTarget.data && wbSnapshotTarget.data.name))) || (wbSnapshotTarget && wbSnapshotTarget.name) || '未命名'"
         :snapshots="wbSnapshotList"
         @close="closeWbSnapshotModal"
         @restore="restoreWbSnapshot"
@@ -3601,7 +3615,13 @@ export default {
 
             let synced = 0;
             for (const wb of pending) {
-                const plainData = JSON.parse(JSON.stringify(wb.data || {}));
+                // 🛡️ PK-26 防御：内存书本应总带正文；万一为 null（懒加载/读取失败），
+                //    `JSON.stringify(null || {})` 会**写出空世界书**（数据事故）→ 跳过并点名。
+                if (!wb.data || typeof wb.data !== 'object') {
+                    addLog(`⚠️ 跳过落盘：${wbDisplayName(wb) || wb.name || '未命名'} 的正文未载入（避免写出空世界书）`, 'warning');
+                    continue;
+                }
+                const plainData = JSON.parse(JSON.stringify(wb.data));
                 const safeFileName = (wb.name && wb.name.toLowerCase().endsWith('.json'))
                     ? wb.name
                     : `${(wb.name || 'worldbook').replace(/[\\/:*?"<>|]/g, '_')}.json`;
@@ -3631,7 +3651,16 @@ export default {
         const saveActiveWorldbook = async () => {
             if (!activeWorldbook.value) return;
             const wb = activeWorldbook.value;
-            addLog(`准备落盘保存世界书: ${wb.name}...`);
+            // 🛡️ PK-26：秒开后 `wb.data` 为 null（懒加载）→ 直接 JSON.stringify(null) 会存出空书
+            if (wb.dataLoaded === false && wb.path && typeof ensureWorldbookLoaded === 'function') {
+                await ensureWorldbookLoaded(wb);
+            }
+            if (!wb.data || typeof wb.data !== 'object') {
+                addLog(`❌ 保存失败: 无法读取世界书正文（${wb._loadError || '未知原因'}）`, 'error');
+                nativeAlert(`世界书保存失败：无法读取正文。\n${wb._loadError || '请重新选择世界书目录后再试。'}`, 'error');
+                return;
+            }
+            addLog(`准备落盘保存世界书: ${wbDisplayName(wb) || wb.name}...`);
 
             // 脱离 Proxy 代理进行序列化（避免 IPC "An object could not be cloned"），
             // 并剔除词条级前端内部字段（uid / _collapsed / _srcIndex / _srcUid）防污染
@@ -3665,23 +3694,41 @@ export default {
 
         // 提供独立的世界书本地导出功能（方便开发测试时脱离环境发给别人；导出前剔除前端内部字段防污染）
         // ⚠️ 这条路径是纯前端 Blob 下载，**不经过主进程清洗** —— 这里是唯一一道防线，故同样走白名单助手
-        const exportActiveWorldbook = () => {
+        const exportActiveWorldbook = async () => {
             if (!activeWorldbook.value) return;
-            const plainData = JSON.parse(JSON.stringify(activeWorldbook.value.data));
+            // 🛡️ PK-26：懒加载书 `data` 为 null → 必须先读入正文，否则导出空文件
+            const wb = activeWorldbook.value;
+            if (wb.dataLoaded === false && wb.path && typeof ensureWorldbookLoaded === 'function') {
+                await ensureWorldbookLoaded(wb);
+            }
+            if (!wb.data || typeof wb.data !== 'object') {
+                nativeAlert(`导出失败：无法读取世界书正文。\n${wb._loadError || '请重新选择世界书目录后再试。'}`, 'error');
+                return;
+            }
+            const plainData = JSON.parse(JSON.stringify(wb.data));
             for (const e of worldbookEntryList(plainData) || []) dropInternalFields(e);
             const blob = new Blob([JSON.stringify(plainData, null, 2)], { type: 'application/json' });
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = url;
-            a.download = activeWorldbook.value.name || 'worldbook_export.json';
+            a.download = wbDisplayName(wb) || wb.name || 'worldbook_export.json';
             a.click();
             URL.revokeObjectURL(url);
             addLog(`已触发本地独立导出: ${a.download}`);
         };
 
         // ✂️ 轻量级世界书拆分引擎 (基于当前搜索结果/过滤词条)
-        const exportFilteredWorldbook = () => {
+        const exportFilteredWorldbook = async () => {
             if (!activeWorldbook.value) return;
+            // 🛡️ PK-26：懒加载书 `data` 为 null → 先读入正文（否则词条列表为空，提示“没有可导出词条”）
+            const activeWb = activeWorldbook.value;
+            if (activeWb.dataLoaded === false && activeWb.path && typeof ensureWorldbookLoaded === 'function') {
+                await ensureWorldbookLoaded(activeWb);
+            }
+            if (!activeWb.data || typeof activeWb.data !== 'object') {
+                nativeAlert(`导出失败：无法读取世界书正文。\n${activeWb._loadError || '请重新选择世界书目录后再试。'}`, 'error');
+                return;
+            }
 
             const currentEntries = filteredWorldbookEntries.value;
             if (!currentEntries || currentEntries.length === 0) {
@@ -3691,7 +3738,7 @@ export default {
 
             // 组装新世界书的 JSON 结构
             const suffix = entrySearchQuery.value ? `_${entrySearchQuery.value.trim()}篇` : '_完整导出';
-            const newWbName = (activeWorldbook.value.data.name || '拆分世界书') + suffix;
+            const newWbName = (activeWb.data.name || wbDisplayName(activeWb) || '拆分世界书') + suffix;
 
             // 🧹 清洗前端内部字段（只剔词条自身的 uid/_collapsed/_srcIndex/_srcUid + 顶层库项元数据）
             // ⚠️ 不能用 `key.startsWith('_') || key === 'uid'` 递归剔 —— 会删掉第三方扩展的真实数据
@@ -3802,12 +3849,19 @@ export default {
         };
 
         // 选中源世界书后，展开其词条候选（🛡️ 兼容字典形态 entries，与库内其他入口同一清洗口径）
-        const pickCardWbImportSource = (wb) => {
+        // ⚡ PK-26：秒开后源书 `data` 为 null → 必须按需载入正文（否则候选列表空白）
+        const pickCardWbImportSource = async (wb) => {
             cardWbImportSource.value = wb;
-            let srcEntries = (wb.data && wb.data.entries) || [];
+            cardWbImportCandidates.value = [];
+            cardWbSelectedEntries.value = [];
+            if (wb && wb.dataLoaded === false && wb.path && typeof ensureWorldbookLoaded === 'function') {
+                await ensureWorldbookLoaded(wb);
+            }
+            let srcEntries = (wb && wb.data && wb.data.entries) || [];
             if (srcEntries && typeof srcEntries === 'object' && !Array.isArray(srcEntries)) {
                 srcEntries = Object.values(srcEntries);
             }
+            if (!Array.isArray(srcEntries)) srcEntries = [];
             cardWbImportCandidates.value = srcEntries.map((e, i) => ({
                 ...e,
                 _srcIndex: i,
@@ -3842,7 +3896,10 @@ export default {
 
             showCardWbImportModal.value = false;
             refreshCardData();
-            const srcName = (cardWbImportSource.value.data && cardWbImportSource.value.data.name) || cardWbImportSource.value.name;
+            // ⚡ PK-26：书名优先轻量 `wbName`（秒开后 `data` 为 null，否则提示里回退成文件名）
+            const srcName = (cardWbImportSource.value.wbName
+                || (cardWbImportSource.value.data && cardWbImportSource.value.data.name)
+                || cardWbImportSource.value.name);
             nativeAlert(`📥 已从《${srcName}》导入 ${count} 个词条到角色卡内嵌世界书。`, 'info');
             addLog(`📥 从世界书库《${srcName}》导入 ${count} 个词条`, 'success');
         };
@@ -4296,7 +4353,8 @@ export default {
 
         // 构建全量节点与连线（仅打开时执行一次；分批让出主线程，loading 转圈不冻结）
         const buildWbGraphData = async () => {
-            const entries = activeWorldbook.value.data.entries || [];
+            // 🛡️ PK-26：可选链防御（`data` 为 null 时不能直接抛 TypeError）
+            const entries = activeWorldbook.value?.data?.entries || [];
             const nodes = [];
 
             // 构建节点 —— 300+ 节点需调小球体（按内容长度微调区分大小，范围 10-22）
@@ -4515,7 +4573,8 @@ export default {
             wbChartInstance.on('click', (params) => {
                 if (params.dataType === 'node' && params.data.entryIndex !== undefined) {
                     closeWbGraphModal();
-                    const targetEntry = activeWorldbook.value.data.entries[params.data.entryIndex];
+                    // 🛡️ PK-26：可选链防御
+                    const targetEntry = activeWorldbook.value?.data?.entries?.[params.data.entryIndex];
                     if (!targetEntry) return;
                     targetEntry._collapsed = false; // 自动展开
 
@@ -4539,8 +4598,13 @@ export default {
             });
         };
 
-        const openWbGraphModal = () => {
-            if (!activeWorldbook.value || !activeWorldbook.value.data || !activeWorldbook.value.data.entries || activeWorldbook.value.data.entries.length === 0) {
+        const openWbGraphModal = async () => {
+            // 🛡️ PK-26：懒加载书 `data` 为 null → 必须先读入正文（否则提示“没有词条”/直接 TypeError）
+            const wb = activeWorldbook.value;
+            if (wb && wb.dataLoaded === false && wb.path && typeof ensureWorldbookLoaded === 'function') {
+                await ensureWorldbookLoaded(wb);
+            }
+            if (!wb || !wb.data || !Array.isArray(wb.data.entries) || wb.data.entries.length === 0) {
                 nativeAlert('当前世界书没有词条，无法生成关系图谱！', 'warning');
                 return;
             }
@@ -4602,7 +4666,7 @@ export default {
             if (!wbChartInstance) return;
             try {
                 const url = wbChartInstance.getDataURL({ pixelRatio: 2, backgroundColor: theme.value === 'light' ? '#ffffff' : '#09090b' });
-                const bookName = ((activeWorldbook.value && activeWorldbook.value.name) || 'worldbook').replace(/\.json$/i, '');
+                const bookName = (wbDisplayName(activeWorldbook.value) || (activeWorldbook.value && activeWorldbook.value.name) || 'worldbook').replace(/\.json$/i, '');
                 const a = document.createElement('a');
                 a.href = url;
                 a.download = `世界书图谱_${bookName}_${new Date().toISOString().slice(0, 10)}.png`;
@@ -4627,13 +4691,25 @@ export default {
             showWbMergeModal.value = true;
         };
 
-        const executeWorldbookMerge = () => {
+        const executeWorldbookMerge = async () => {
             if (selectedWbMergePaths.value.length < 2) {
                 nativeAlert('请至少勾选 2 本世界书进行合并！', 'warning');
                 return;
             }
 
             const targetWbs = worldbooks.value.filter(wb => selectedWbMergePaths.value.includes(wb.path));
+            // 🛑 PK-26：秒开后 `wb.data` 为 null（懒加载）→ 旧写法会**静默合并出空书**（词条全丢）。
+            //    合并必然需要正文，故逐本按需载入（silent：失败在下面统一提示，不逐本弹框）。
+            for (const wb of targetWbs) {
+                if (wb.dataLoaded === false && wb.path && typeof ensureWorldbookLoaded === 'function') {
+                    await ensureWorldbookLoaded(wb, { silent: true });
+                }
+            }
+            const unreadable = targetWbs.filter(wb => !wb.data || !Array.isArray(wb.data.entries));
+            if (unreadable.length > 0) {
+                nativeAlert(`合并已中止：有 ${unreadable.length} 本世界书的正文无法读取。\n${unreadable.slice(0, 5).map(w => wbDisplayName(w)).join('、')}\n\n请重新选择世界书目录后再试。`, 'error');
+                return;
+            }
             const mergedEntries = [];
             const seenMap = new Set(); // 指纹去重: Key + Content
 
@@ -4661,7 +4737,7 @@ export default {
             const mergeName = `合并世界书_${targetWbs.length}本`;
             const mergedWbData = {
                 name: mergeName,
-                description: `由 [${targetWbs.map(w => (w.data && w.data.name) || w.name).join(', ')}] 合并而成，包含 ${mergedEntries.length} 个词条。`,
+                description: `由 [${targetWbs.map(w => wbDisplayName(w) || w.name).join(', ')}] 合并而成，包含 ${mergedEntries.length} 个词条。`,
                 entries: mergedEntries
             };
 
@@ -4707,9 +4783,21 @@ export default {
         };
 
         // 选中源世界书后，展开其词条候选
-        const pickImportSource = (wb) => {
+        // ⚡ PK-26：秒开后源书 `data` 为 null → 旧写法候选列表**空白**（用户以为源库空了）。
+        //    这里必须按需载入正文（用户主动点选一本，弹框提示失败是合理的）。
+        const pickImportSource = async (wb) => {
             importSourceBook.value = wb;
-            importCandidates.value = ((wb.data && wb.data.entries) || []).map((e, i) => ({
+            importCandidates.value = [];
+            selectedImportEntries.value = [];
+            if (wb && wb.dataLoaded === false && wb.path && typeof ensureWorldbookLoaded === 'function') {
+                await ensureWorldbookLoaded(wb);
+            }
+            let srcEntries = (wb && wb.data && wb.data.entries) || [];
+            if (srcEntries && typeof srcEntries === 'object' && !Array.isArray(srcEntries)) {
+                srcEntries = Object.values(srcEntries);
+            }
+            if (!Array.isArray(srcEntries)) srcEntries = [];
+            importCandidates.value = srcEntries.map((e, i) => ({
                 ...e,
                 _srcIndex: i,
                 _srcUid: e.uid || ('src-' + i)
@@ -4718,14 +4806,23 @@ export default {
         };
 
         // 确认导入：深拷贝选中词条 → 清洗临时字段 → 追加到当前世界书
-        const confirmImportEntries = () => {
+        const confirmImportEntries = async () => {
             if (!importSourceBook.value) { nativeAlert('请先选择源世界书。', 'warning'); return; }
             if (selectedImportEntries.value.length === 0) {
                 nativeAlert('请至少勾选一个词条。', 'warning');
                 return;
             }
-            const targetEntries = activeWorldbook.value.data.entries;
-            if (!Array.isArray(targetEntries)) activeWorldbook.value.data.entries = [];
+            // 🛡️ PK-26：目标书正文可能未载入 → 先按需读入，否则写 `data.entries` 直接 TypeError
+            const target = activeWorldbook.value;
+            if (target && target.dataLoaded === false && target.path && typeof ensureWorldbookLoaded === 'function') {
+                await ensureWorldbookLoaded(target);
+            }
+            if (!target || !target.data || typeof target.data !== 'object') {
+                nativeAlert(`无法读取目标世界书的正文，导入已取消。\n${(target && target._loadError) || '请重新选择世界书目录后再试。'}`, 'error');
+                return;
+            }
+            if (!Array.isArray(target.data.entries)) target.data.entries = [];
+            const targetEntries = target.data.entries;
 
             let count = 0;
             importCandidates.value.forEach(c => {
@@ -4742,8 +4839,10 @@ export default {
             });
 
             showWbImportModal.value = false;
-            nativeAlert(`🎉 成功从 [${importSourceBook.value.name}] 导入 ${count} 个词条到当前世界书！`, 'info');
-            addLog(`🔀 从 ${importSourceBook.value.name} 导入 ${count} 个词条`, 'success');
+            // ⚡ PK-26：提示里的书名走 `wbDisplayName`（`name` 是文件名，`data` 可能为 null）
+            const srcBookName = wbDisplayName(importSourceBook.value) || importSourceBook.value.name;
+            nativeAlert(`🎉 成功从 [${srcBookName}] 导入 ${count} 个词条到当前世界书！`, 'info');
+            addLog(`🔀 从 ${srcBookName} 导入 ${count} 个词条`, 'success');
         };
 
         // =========================================================
@@ -5134,6 +5233,25 @@ export default {
             }
         };
 
+        // 🌍 世界书库与分组：组合式函数注入（共享状态 worldbooks/wbCategoryMap 等保留在 App.vue）
+        //    ⚠️ 顺序约束：必须在 useDedupe **之前** —— 查重前重扫要用它的 `rescanWorldbooks` /
+        //       `wbScanProgress`，若颠倒会触发 TDZ（`Cannot access 'X' before initialization`，
+        //       编译期不报、只在运行时崩，历史上 AR-06 / AR-17 两次同款）。
+        const {
+            importUrl, isImportingWb, wbContextMenu,
+            loadWorldbooks, scanWorldbookDir, importWorldbookFromUrl, renameWorldbook,
+            handleWorldbookFolderSelect, deleteWorldbook, duplicateWorldbook,
+            openWbContextMenu, closeWbContextMenu, openWbInFolder,
+            wbCategories, changeWbCategory, filteredWorldbooks,
+            wbScanProgress, isWbScanning, wbScanPercent, rescanWorldbooks,
+            reportSkipped, wbEntryCount, ensureWorldbookLoaded, selectWorldbook, releaseWorldbookBody,
+            consumeWorldbookBodies,
+            // 🧠 PK-27 / S1'：L1 摘要消费（查重只读索引，永不重读正文）
+            hasKeyIndex, compareKeyHashes, isExactSame,
+            // ⚡ 秒开：书名取法（`wb.data` 不再常驻）+ 元数据后台补齐状态
+            wbDisplayName, wbMetaFilling, wbMetaProgress,
+        } = useWorldbooks({ worldbooks, activeWorldbook, lastWorldbookDirPath, wbSearchQuery, wbFilterType, currentWbCategory, wbCategoryMap, saveWbCategoriesMap, syncWorldbooksToDisk, appMode, appPrompt, nativeAlert, confirmDialog, addLog, contextMenu, closeContextMenu });
+
         // 📊🔍 查重与差异比对：组合式函数注入（estimateCardTokens 为共享工具，保留在 App.vue）
         const {
             showDedupeModal, duplicateGroups, startDedupeScan, resolveDedupeGroup,
@@ -5141,19 +5259,46 @@ export default {
             showPresetDedupeModal, presetDuplicateGroups, startPresetDedupeScan, resolvePresetDedupeGroup,
             showContentDedupeModal, contentDuplicateGroups, startContentDedupeScan, resolveContentDedupeGroup,
             startSmartDedupe,
+            // 📊🔍 查重扫描进度（供查重弹窗消费）
+            // 🛑 AR-45 二次修复：`dedupeScanDone` / `dedupeScanTotal` 一起解构 ——
+            //    弹窗**数字**改读它们（与 `dedupeScanPercent` 同源），见下方 `dedupeScanProgressForModal`
+            dedupeScanning, dedupeScanLabel, dedupeScanPercent, dedupeScanIndeterminate,
+            dedupeScanDone, dedupeScanTotal,
             showDiffDetailModal, diffMasterItem, diffCompareItem, diffFieldResults, openDiffDetailModal
-        } = useDedupe({ library, worldbooks, activeWorldbook, cardData, presets, activePreset, appMode, estimateCardTokens, nativeAlert, confirmDialog, addLog, reset, cleanupEmptyCategories, deleteCardOverlays, showToast });
+        } = useDedupe({
+            library, worldbooks, activeWorldbook, cardData, presets, activePreset, appMode, estimateCardTokens,
+            nativeAlert, confirmDialog, addLog, reset, cleanupEmptyCategories, deleteCardOverlays, showToast,
+            // 📊🔍 查重/版本对比的扫描进度（2026-09-22 设计修正）：查重前先重扫磁盘，进度显示在查重弹窗内
+            rescanWorldbooks, wbScanProgress, isWbScanning, wbScanPercent,
+            refreshLibrary, currentFolderPath, lastWorldbookDirPath, lastPresetDirPath,
+            // 🦥 PK-20 后续：查重/比对必须读正文，而懒加载的书 data 为 null → 需按需载入
+            //    ⚠️ 它来自上面 `useWorldbooks` 的解构，故 `useDedupe` 必须在其**之后**调用（防 TDZ）
+            ensureWorldbookLoaded,
+            // ⚡ PK-26：秒开后 `wb.data` 为 null → 查重/比对必须走**轻量字段**
+            //    （否则词条数算成 0、触发词重合度恒 0%、世界书被判成角色卡）
+            wbEntryCount, wbDisplayName,
+            // ⚡ PK-26 后续：同名查重逐本读正文后必须**用后释放**（防 1000+ 本 OOM）
+            releaseWorldbookBody,
+            // 🧯 PK-27：**唯一**的「批量读正文」入口（受控并发 + 用后释放 + 进度）
+            consumeWorldbookBodies,
+            // 🧠 PK-27 / S2'：L1 摘要消费（查重只读索引）
+            hasKeyIndex, compareKeyHashes, isExactSame
+        });
 
-        // 🌍 世界书库与分组：组合式函数注入（共享状态 worldbooks/wbCategoryMap 等保留在 App.vue）
-        const {
-            importUrl, isImportingWb, wbContextMenu,
-            loadWorldbooks, scanWorldbookDir, importWorldbookFromUrl, renameWorldbook,
-            handleWorldbookFolderSelect, deleteWorldbook, duplicateWorldbook,
-            openWbContextMenu, closeWbContextMenu, openWbInFolder,
-            wbCategories, changeWbCategory, filteredWorldbooks,
-            wbScanProgress, isWbScanning, wbScanPercent,
-            reportSkipped, wbEntryCount, ensureWorldbookLoaded, selectWorldbook
-        } = useWorldbooks({ worldbooks, activeWorldbook, lastWorldbookDirPath, wbSearchQuery, wbFilterType, currentWbCategory, wbCategoryMap, saveWbCategoriesMap, syncWorldbooksToDisk, appMode, appPrompt, nativeAlert, confirmDialog, addLog, contextMenu, closeContextMenu });
+        // 📊🔍 查重弹窗的进度对象
+        // 🛑🛑 AR-45 二次修复（2026-09-23 用户二次报出「又横跳」）：
+        //    旧实现这里**透传 `wbScanProgress`**（那是「扫描」的进度对象）——
+        //    而 `wbScanProgress` 在扫描开始/结束时都会被置为 `{done:0,total:0}`
+        //    ⇒ 弹窗**数字**掉回「0 / ?」、百分比整块消失（`v-if="progress.total"`），
+        //      而**条宽**走 `dedupeScanPercent` 仍在推进 → **两者脱钩** = 用户看到的「横跳」。
+        //    ⚠️ 这与 AR-43（「宽度与数字走两条不同路径 → 只有数字坏，现象隐蔽」）是**同一类病**。
+        //    ✅ 修法：**数字也走查重自己的 ref**（`dedupeScanDone/Total`），与宽度同源同寿命。
+        const dedupeScanProgressForModal = computed(() => ({
+            phase: dedupeScanning.value ? 'scanning' : 'idle',
+            done: dedupeScanDone.value,
+            total: dedupeScanTotal.value,
+            current: (wbScanProgress && wbScanProgress.value && wbScanProgress.value.current) || ''
+        }));
 
         // 📚 世界书词条深度编辑 (Entry IDE)：组合式函数注入（activeWorldbook 等共享状态保留在 App.vue）
         const {
@@ -5165,20 +5310,26 @@ export default {
             batchToggleEnabled, batchDeleteEntries,
             batchToggleConstant, batchToggleSelective, batchDuplicateEntries,
             entryHealthReport, runEntryHealthCheck
-        } = useWorldbookEntries({ activeWorldbook, addLog, confirmDialog, nativeAlert });
+        } = useWorldbookEntries({ activeWorldbook, addLog, confirmDialog, nativeAlert, ensureWorldbookLoaded });
 
         // 🔎 全库词条搜索与反向引用：组合式函数注入
+        //    ⚡ PK-26：秒开后世界书 `data` 为 null → 索引时必须**按需载入**（否则全库词条搜索恒空）；
+        //       跳转来源也必须走 `selectWorldbook`（直接赋 `activeWorldbook` 会让编辑器拿到空书崩溃）。
         const {
-            globalEntryIndex, globalEntrySearchQuery, globalEntrySearchResults,
+            globalEntryIndex, globalEntryIndexing, globalEntrySearchQuery, globalEntrySearchResults,
             showGlobalEntrySearchModal, openGlobalEntrySearch, closeGlobalEntrySearch, jumpToEntrySource
-        } = useGlobalEntrySearch({ worldbooks, library, appMode, activeWorldbook, openFromLibrary });
+        } = useGlobalEntrySearch({
+            worldbooks, library, appMode, activeWorldbook, openFromLibrary,
+            ensureWorldbookLoaded, selectWorldbook, wbDisplayName
+        });
 
         // 📤 世界书扩展：提取/JSONL导入/批量导出/快照/统计
+        //    ⚡ PK-26：统计的词条数走轻量 `wbEntryCount`（秒开后 `data` 为 null，直读会全算成 0）
         const {
             extractWorldbookFromCard, importWbFromJsonl, exportWorldbooksBatch,
             showWbSnapshotModal, wbSnapshotList, wbSnapshotTarget, openWbSnapshots, closeWbSnapshotModal, restoreWbSnapshot, deleteWbSnapshot,
             wbStats
-        } = useWorldbookExtras({ worldbooks, activeWorldbook, lastWorldbookDirPath, nativeAlert, addLog, confirmDialog });
+        } = useWorldbookExtras({ worldbooks, activeWorldbook, lastWorldbookDirPath, nativeAlert, addLog, confirmDialog, wbEntryCount });
 
         // ⚙️ 预设管理：组合式函数注入
         const {
@@ -5542,7 +5693,7 @@ export default {
             } catch (e) { /* 忽略 */ }
         }
 
-        // 🔬 开发环境调试句柄：供 scripts/chat-engine-test.mjs 端到端断言编排管线
+        // 🔬 开发环境调试句柄：供 scripts/tools/chat-engine-test.mjs 端到端断言编排管线
         //    （buildPayload 分支 / 宏 / EJS / 世界书激活 / 分段 / swipe）。
         //    ⚠️ 生产构建不挂载（import.meta.env.PROD 为 true），不污染发布包。
         if (!import.meta.env.PROD) {
@@ -5762,8 +5913,17 @@ export default {
             // 🌍 世界书双引擎模式
             appMode, worldbooks, activeWorldbook, lastWorldbookDirPath, editorLogs, showEditorLogs, addLog,
             loadWorldbooks, scanWorldbookDir, saveActiveWorldbook, exportActiveWorldbook, exportFilteredWorldbook, saveCurrentAsset,
+            wbScanProgress, isWbScanning, wbScanPercent,
+            // 📊🔍 查重/版本对比的扫描进度（2026-09-22 设计修正）
+            //    ⚠️ 必须连 `dedupeScanProgressForModal` 一起暴露：它是 computed，
+            //       模板用的是 setup return（不是 ctx）。漏了它 → 子组件 prop 拿到 undefined
+            //       → 回落默认值 `{done:0,total:0}` → 进度条**数字恒显示「0 / ?」**（而宽度靠 percent 仍在动，
+            //       所以现象很隐蔽）。同 AR-13 / CT-14 的 `_ctx.X` 一类病。
+            dedupeScanning, dedupeScanLabel, dedupeScanPercent, dedupeScanIndeterminate, dedupeScanProgressForModal,
             // 📢 DF-18：跳过可见化 + 超大世界书懒加载（侧栏用）
             wbEntryCount, selectWorldbook, ensureWorldbookLoaded,
+            // ⚡ 秒开：书名取法（`wb.data` 不再常驻）+ 元数据后台补齐状态
+            wbDisplayName, wbMetaFilling, wbMetaProgress,
             // ⚙️ 预设管理
             presets, activePreset, lastPresetDirPath,
             presetSearchQuery, isImportingPreset, importPresetUrl,
@@ -5811,6 +5971,7 @@ export default {
             // 🔎 全库词条搜索与反向引用
             globalEntryIndex, globalEntrySearchQuery, globalEntrySearchResults,
             showGlobalEntrySearchModal, openGlobalEntrySearch, closeGlobalEntrySearch, jumpToEntrySource,
+            globalEntryIndexing,
             // 📤 世界书扩展
             extractWorldbookFromCard, importWbFromJsonl, exportWorldbooksBatch,
             showWbSnapshotModal, wbSnapshotList, wbSnapshotTarget, openWbSnapshots, closeWbSnapshotModal, restoreWbSnapshot, deleteWbSnapshot,
@@ -5837,6 +5998,11 @@ export default {
             showDedupeModal, duplicateGroups, startDedupeScan, resolveDedupeGroup,
             // 🌍 世界书库筛选与对比查重
             wbSearchQuery, wbFilterType, filteredWorldbooks,
+            // 📊🔍 查重/版本对比的扫描进度（供查重弹窗消费；**不回流侧栏**）
+            //    ⚠️ `dedupeScanProgressForModal` 必须一起暴露（模板走 setup return，不是 ctx）
+            //    🛑 AR-45 二次修复：`dedupeScanDone`/`dedupeScanTotal` 同时暴露
+            dedupeScanning, dedupeScanLabel, dedupeScanPercent, dedupeScanIndeterminate,
+            dedupeScanDone, dedupeScanTotal, dedupeScanProgressForModal,
             // 📊 T2 世界书扫描真进度条（phase/done/total/current + 百分比）
             wbScanProgress, isWbScanning, wbScanPercent,
             showWbDedupeModal, wbDuplicateGroups, startWorldbookDedupeScan, resolveWbDedupeGroup,

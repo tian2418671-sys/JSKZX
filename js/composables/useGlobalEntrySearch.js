@@ -34,33 +34,48 @@ function normalizeEntry(entry, sourceType, sourceName, sourcePath) {
     };
 }
 
-export function useGlobalEntrySearch({ worldbooks, library, appMode, activeWorldbook, openFromLibrary }) {
+export function useGlobalEntrySearch({ worldbooks, library, appMode, activeWorldbook, openFromLibrary, ensureWorldbookLoaded, selectWorldbook, wbDisplayName }) {
     // 全库词条索引（惰性计算，仅在打开弹窗/搜索时触发）
-    const globalEntryIndex = computed(() => {
-        const list = [];
-        // 独立世界书
-        (worldbooks.value || []).forEach(wb => {
-            const name = (wb.data && wb.data.name) || wb.name || '未命名世界书';
-            const entries = (wb.data && Array.isArray(wb.data.entries)) ? wb.data.entries : [];
-            entries.forEach(e => {
-                const n = normalizeEntry(e, 'worldbook', name, wb.path || '');
-                if (n) list.push(n);
+    // ⚡ PK-26：世界书正文可能未载入（秒开后 `data` 为 null）→ 必须**按需载入**才能索引到词条。
+    //    故改为 async 的 ref（由 `refreshGlobalEntryIndex()` 显式触发，避免 computed 里做副作用）。
+    const globalEntryIndex = ref([]);
+    const globalEntryIndexing = ref(false);
+    const refreshGlobalEntryIndex = async () => {
+        if (globalEntryIndexing.value) return;
+        globalEntryIndexing.value = true;
+        try {
+            const list = [];
+            // 独立世界书
+            for (const wb of (worldbooks.value || [])) {
+                const name = (typeof wbDisplayName === 'function' ? wbDisplayName(wb) : null)
+                    || (wb.data && wb.data.name) || wb.name || '未命名世界书';
+                if (wb.dataLoaded === false && wb.path && typeof ensureWorldbookLoaded === 'function') {
+                    // silent：批量场景避免逐本弹框；失败原因已由日志/`_loadError` 汇总
+                    await ensureWorldbookLoaded(wb, { silent: true });
+                }
+                const entries = (wb.data && Array.isArray(wb.data.entries)) ? wb.data.entries : [];
+                entries.forEach(e => {
+                    const n = normalizeEntry(e, 'worldbook', name, wb.path || '');
+                    if (n) list.push(n);
+                });
+            }
+            // 角色卡内嵌世界书（🛡️ extractBookEntries 兼容 entries 数组/字典/数组 book 全形态，
+            //    旧版漏索引字典形态 entries 的卡片，其内嵌词条在全库搜索中永远搜不到）
+            (library.value || []).forEach(item => {
+                const d = (item.data && item.data.data) || item.data || {};
+                const book = d.character_book || (item.data && item.data.character_book) || {};
+                const entries = extractBookEntries(book);
+                const name = d.name || item.name || '未知角色';
+                entries.forEach(e => {
+                    const n = normalizeEntry(e, 'card', name, item.path || '');
+                    if (n) list.push(n);
+                });
             });
-        });
-        // 角色卡内嵌世界书（🛡️ extractBookEntries 兼容 entries 数组/字典/数组 book 全形态，
-        //    旧版漏索引字典形态 entries 的卡片，其内嵌词条在全库搜索中永远搜不到）
-        (library.value || []).forEach(item => {
-            const d = (item.data && item.data.data) || item.data || {};
-            const book = d.character_book || (item.data && item.data.character_book) || {};
-            const entries = extractBookEntries(book);
-            const name = d.name || item.name || '未知角色';
-            entries.forEach(e => {
-                const n = normalizeEntry(e, 'card', name, item.path || '');
-                if (n) list.push(n);
-            });
-        });
-        return list;
-    });
+            globalEntryIndex.value = list;
+        } finally {
+            globalEntryIndexing.value = false;
+        }
+    };
 
     const globalEntrySearchQuery = ref('');
     const globalEntrySearchResults = computed(() => {
@@ -76,6 +91,8 @@ export function useGlobalEntrySearch({ worldbooks, library, appMode, activeWorld
     const openGlobalEntrySearch = () => {
         globalEntrySearchQuery.value = '';
         showGlobalEntrySearchModal.value = true;
+        // ⚡ PK-26：打开时异步建索引（含按需载入世界书正文）
+        refreshGlobalEntryIndex();
     };
     const closeGlobalEntrySearch = () => { showGlobalEntrySearchModal.value = false; };
 
@@ -87,7 +104,11 @@ export function useGlobalEntrySearch({ worldbooks, library, appMode, activeWorld
                 (result.sourcePath && w.path === result.sourcePath) ||
                 (!result.sourcePath && ((w.data && w.data.name) || w.name) === result.sourceName)
             );
-            if (wb) activeWorldbook.value = wb;
+            // ⚡ PK-26：走 selectWorldbook（先载入正文），否则编辑器拿到 data:null 会崩
+            if (wb) {
+                if (typeof selectWorldbook === 'function') selectWorldbook(wb);
+                else activeWorldbook.value = wb;
+            }
             appMode.value = 'worldbooks';
         } else {
             const item = library.value.find(i =>
@@ -101,7 +122,7 @@ export function useGlobalEntrySearch({ worldbooks, library, appMode, activeWorld
     };
 
     return {
-        globalEntryIndex, globalEntrySearchQuery, globalEntrySearchResults,
+        globalEntryIndex, globalEntryIndexing, refreshGlobalEntryIndex, globalEntrySearchQuery, globalEntrySearchResults,
         showGlobalEntrySearchModal, openGlobalEntrySearch, closeGlobalEntrySearch, jumpToEntrySource
     };
 }

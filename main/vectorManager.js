@@ -14,7 +14,7 @@ const { app } = require('electron');
 const crypto = require('crypto');
 
 const DEFAULT_MODEL = 'Xenova/paraphrase-multilingual-MiniLM-L12-v2';
-// 🔧 修正 3.5：默认阈值 0.65 → 0.35。实测（scripts/vector-model-test.cjs）：
+// 🔧 修正 3.5：默认阈值 0.65 → 0.35。实测（scripts/tools/vector-model-test.cjs）：
 //    「卡片长文（~800字）vs 2字短标签」在 mean pooling 下绝对相似度仅 0.18~0.57，
 //    0.65 阈值导致正例命中率 0%（向量层等于白跑，全部降级 LLM）。
 //    标签展开 + 0.35 阈值后：强相关（魔法/医疗等）能命中，误报基线实测最高 0.307，

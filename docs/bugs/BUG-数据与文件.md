@@ -80,6 +80,80 @@
   现已改为**白名单字段名 + 限定位置**（`main/cardFieldSanitizer.js`）。
   **不要**再按本条旧描述回退成前缀递归实现。
 
+### DF-21 ｜ 🔴 独立世界书的 **ST 原生 `uid` 被无条件删掉**（DF-14 的遗留待决项）
+
+> 🛑 **状态：⏳ 修复方案待拍板（A/B/C 三选一）** —— 当前代码是「保留原有 uid」，
+> 但**取证发现它引入了新问题**（调序后 uid 与下标脱钩，见文末「⚠️ 未决」）。
+> **完整方案对比与建议见 [`../规格与计划/工作记录-20260923.md`](../规格与计划/工作记录-20260923.md) §二。**
+
+- **现象**：保存独立世界书（`wb:save` / `wb:create`）后，文件里 `entries[].uid` **全部消失**。
+  SillyTavern 原生格式**本该有**该字段（数字递增 `0/1/2…`）。
+- **取证（2026-09-23，真实库）**：扫 `D:\TkDmGzq\_wb5k\s1000` 的 **804 个世界书 / 319,148 条词条**，
+  `entries[].uid` **100% 存在且 100% 是 ST 原生数字**（`0/1/2/3…`），
+  **本应用生成形态（`<时间戳>_<随机串>`）0 个**。
+- **🔬 进一步取证（推翻两个直觉，很关键）**：
+
+  | 取证项 | 结果 |
+  |---|---|
+  | uid 与**数组下标**的关系 | **完全相等**（6 文件 / 11,430 条 / **0 例外**） |
+  | 真实库 uid 是否**恒为 `0..n-1`** | **是**（40 文件 / **0 缺失 / 0 异常 / 0 空洞**） |
+  | uid 是否唯一 | 是（0 重复） |
+
+  **⇒ ST 的 `uid` 就是「文件内顺序号」**（等价于数组下标），**可以从数组顺序重建**。
+  > ⚠️ **修正一处此前的过度解读**：曾写「旧行为一直在删 ST 的真实数据」——
+  > 更准确的说法是「**偏离 ST 原生格式**」，但**不是不可恢复的数据丢失**
+  > （与 DF-14 那批第三方扩展的 `_filename` / `chatSheets.uid` 性质不同：那些不可推导）。
+- **根因**：`WB_ENTRY_INTERNAL_FIELDS` 把 `uid` 当「纯前端 v-for key」**无条件剔除**。
+  这个判断对**本应用自己生成的 uid** 成立，对 **ST 原生 uid 不成立** ——
+  但两者被同一份白名单无差别处理。
+- **为什么 5 个版本没人发现**（三个具体原因）：
+  1. **症状不可见** —— 删掉 uid 后 ST 导入时按顺序重建，**行为一致**，用户看不出问题
+     （对比 DF-14：删第三方 `_filename` 会让扩展直接坏掉，用户会报）；
+  2. **看的地方不对** —— v1.8.9 的注释「SillyTavern 原生无 uid」只验证了
+     **角色卡内嵌 `character_book`**（那里 ST 导出时确实不写 uid），
+     而**独立世界书文件**的 `entries[]` 100% 有 uid。**同一字段名，两个位置，两种真相**；
+  3. **有「看起来合理」的解释替它辩护** —— 代码注释写着「条目标识走 WeakMap，
+     故删除后功能不受影响，只是 uid 不跨保存持久化（**本就无需持久化**）」。
+     这句**听起来完全合理**，解释了「为什么删了没事」——
+     **一旦有了合理解释，就没人再验证前提（uid 到底是谁的字段）**。
+- **当前实现（⏳ 待拍板）**：按**形态**区分 ——
+  1. `main/cardFieldSanitizer.js` + `js/utils/cardFields.js` 新增
+     `APP_UID_RE = /^\d{13}_[a-z0-9]{4,10}$/`（本应用标准形态）与
+     `APP_UID_LEGACY_RE = /^\d{13}(?=[a-z0-9]{5,10}$)(?=.*[a-z])[a-z0-9]+$/`（历史形态）+ `isAppGeneratedUid()`；
+  2. `dropInternalFields` 里 **`uid` 单独处理**：**只删本应用生成形态**，
+     其余（ST 数字 / UUID / 其他）**原样保留**；
+     `_collapsed` / `_srcIndex` / `_srcUid` **仍无条件剔除**（它们只可能由本应用写入）。
+- **⚠️ 为什么不选「一律保留 uid」**：`useWorldbookEntries.ensureUid` 会给
+  **第三方导入的无 uid 词条**补一个本应用随机串 —— 那是**真正的污染**，必须能删掉。
+- **⚠️ 顺带修掉一处格式漂移**：`useWorldbooks.js` 的「克隆世界书」用
+  `Date.now() + Math.random().toString(36).substring(2,9)`（**字符串拼接、无下划线**），
+  与其余 8 处生成点格式不一致 → 统一为本应用标准形态。
+- **验证**：
+  - **真实数据**（s1000 的 60 个世界书 / **46,438 条词条**）：清洗前后含 uid 词条数
+    **46,438 → 46,438**（**100% 保留**）；
+  - `test/cardFieldSanitizer.test.mjs` **14 → 22 例**；`npm test` **550 pass / 0 fail**；
+  - **端到端**（真实 IPC `wb:save`，隔离库）：**6/6** —— `0` / `1` / `"12"` 保留、
+    本应用随机串剔除、UUID 保留、`_collapsed` 剔除。
+- **⚠️ 未决（当前实现引入的新问题，已实测）**：
+  既然 uid = 数组下标，那「保留旧 uid」就有反向风险：
+
+  | 操作 | 原始 uid | 保存后 uid | 与下标一致？ |
+  |---|---|---|---|
+  | **上移一条**（`moveEntry`，真实调序） | `[0,1,2]` | **`[2,0,1]`** | ❌ **不一致** |
+  | **删除中间一条** | `[0,1,2]` | **`[0,2]`** | ❌ **有空洞** |
+
+  ⇒ 会写出**偏离 ST 格式**（uid 与位置脱钩）的数据。
+  **推荐方案 A**：保存时**按数组下标重写 uid**（`uid = i`）—— 与 ST 完全一致、
+  调序/删除/新增后**始终自洽**、本应用临时 uid 自然被覆盖（可删掉形态正则那套复杂度）。
+  **备选 B**：恢复原状（删除所有 uid）。**不推荐 C**（维持现状）。
+- **⚠️ 教训**：**「前端内部字段」必须带**形态证据**，不能只看字段名** ——
+  `uid` 这个名字两边都在用。**但光有形态分布还不够**：本次就止步于「形态取证」，
+  没继续验证「**保留后会不会写出不一致的数据**」——犯了与 v1.8.9 同类的错
+  （**只验证了一部分就下结论**）。
+- **来源**：DF-14「遗留待决」项（2026-09-13 审计发现，2026-09-23 用户拍板处理，**方案待定**）
+
+---
+
 ### DF-14 ｜ 🔴 卡片保存路径未清洗（DF-03 覆盖不全）+ 旧清洗规则会**误删第三方真实数据**
 - **现象 A（污染）**：`App.vue` 的「从世界书库导入词条到角色卡内嵌世界书」先剔 `_`、
   紧接着又写回前端用的 `uid` 与 `_collapsed` 再 push 进卡内世界书的**活引用**；
@@ -89,7 +163,7 @@
   （PNG `chara` 块、卡片 `.json`、整合包 `worldbook.json`，以及**换卡图** `card:replaceImage`
   —— 后者会把内存里的 `uid`/`_collapsed` 一起嵌进新 PNG）。
 - **现象 B（误删，更严重）**：DF-03 的递归前缀剔除会把第三方扩展的真实数据删掉。
-  2026-09-13 用 `scripts/audit-card-underscore-fields.py` 对 11,045 张真实卡片实测：
+  2026-09-13 用 `scripts/tools/audit-card-underscore-fields.py` 对 11,045 张真实卡片实测：
 
   | 被误删的真实字段 | 命中卡片数 |
   |---|---|
@@ -111,11 +185,11 @@
   换卡图 `card:replaceImage`（清洗放在 `embedCardJSONIntoPNG()` 内部，单点覆盖全部调用方）。
   返回深拷贝，**不就地改内存活对象**（内存里的 `uid` 仍供 v-for 做 key；`_mtime` 仍供增量刷新比对）。
 - **验证**：`test/cardFieldSanitizer.test.mjs`（14 例，含反向用例：第三方 `_` / `uid` 不误删、内存活对象不被就地修改）；
-  `scripts/save-strip-real-cards.mjs`（真实卡片批量离线复跑：注入污染 → 清洗 → 第三方字段 0 丢失、其余逐字段一致）；
-  `scripts/save-strip-live-card.mjs` + `save-strip-live-worldbook.mjs`（**真实 IPC 落盘链路**）。
+  `scripts/tools/save-strip-real-cards.mjs`（真实卡片批量离线复跑：注入污染 → 清洗 → 第三方字段 0 丢失、其余逐字段一致）；
+  `scripts/tools/save-strip-live-card.mjs` + `save-strip-live-worldbook.mjs`（**真实 IPC 落盘链路**）。
   ⚠️ 换卡图路径因需原生「选图」对话框，无法脚本化，只做代码级核对（清洗点唯一）。
 - **来源**：v2.2.7 回归审计（2026-09-13）
-- **遗留待决（⬜ 本次**未改**，需用户决策）**：同一审计（`scripts/audit-preset-worldbook-underscore.py`，
+- **遗留待决（⬜ 本次**未改**，需用户决策）**：同一审计（`scripts/tools/audit-preset-worldbook-underscore.py`，
   扫 5,894 个 JSON）发现 **独立世界书的 `entries[i].uid` 是普遍存在的真实字段**
   （330 个世界书文件里，最长条目上出现 285 次）—— 这说明 DF-03 注释里
   「SillyTavern 原生无 uid」**对独立世界书并不成立**（只有角色卡**内嵌** `character_book` 的词条才没有 uid）。
@@ -129,8 +203,13 @@
   - **若要改**：把 `main/cardFieldSanitizer.js` 的 `WB_ENTRY_INTERNAL_FIELDS` 里 `uid` 去掉即可
     （渲染层 `js/utils/cardFields.js` 的同名常量要一起改 —— 有「两份实现白名单必须一致」的防漂移测试盯着；
     `App.vue` 的 `saveActiveWorldbook` / `exportActiveWorldbook` 已改为调用同一助手，**无需单独改**），
-    但**改完必须重跑** `scripts/audit-preset-worldbook-underscore.py` +
+    但**改完必须重跑** `scripts/tools/audit-preset-worldbook-underscore.py` +
     `test/cardFieldSanitizer.test.mjs`。
+  - ✅ **已解决（2026-09-23，用户拍板）** → 见 **DF-21**。
+    实际落地**不是**「把 `uid` 从白名单去掉」（那会让本应用自己的临时 uid 永久污染文件），
+    而是**按形态区分**：只删本应用生成形态（`<时间戳>_<随机串>`），ST 原生数字 uid 原样保留。
+    真实库取证（804 个世界书 / 319,148 条词条）证实 uid **100% 是 ST 原生数字**，
+    本应用随机串 0 个 —— 旧行为确实在删 ST 的真实数据。
   - 同批审计的另一面：**预设（19 个）与独立世界书里未发现任何 `_` 前缀字段** → 无观察到的受害者。
     故 `preset:save` / `preset:create` 上的同款递归规则（`main.js:2979` / `main.js:3012`）
     **本次一并未动** —— 没有证据、也不清楚预设编辑器注入了哪些 `_` 字段，盲改可能反而把 UI 垃圾留在盘上。
@@ -331,7 +410,7 @@
   渲染层 `useWorldbooks` / `usePresets` 新增 `reportSkipped`（计数 + 文件名入日志），
   侧栏新增 `wbEntryCount`（未解析时用 `entryCount`）与 `selectWorldbook`（超大书点击时 `readText` 懒加载 + 「按需」徽标）。
 - **验证**：单测 `test/scanGate.test.mjs` **13 条全绿**（分级阈值 / 旧 5MB 硬丢弃已废除 / `valid:null` 不跳过 / 缓存版本失效）；
-  **真实目录 + 真实 IPC 端到端**（`scripts/_probe-scan-gate.mjs`，**12/12 通过**）：
+  **真实目录 + 真实 IPC 端到端**（`scripts/probes/_probe-scan-gate.mjs`，**12/12 通过**）：
   造 small.json（0MB）+ big6mb.json（**6MB**）+ notawb.json → 实测 `count=2`、`bigRecognized=true`（**旧代码会被 5MB 闸门丢弃**）、
   `bigHeavy=true`、`withSize/withMtime/withEntryCount = 2/2/2`、`skipped=[notawb.json]` 且带原因、**二次扫描（走缓存）6MB 书仍在**。
 - **来源**：2026-09-21 查重链路专项排查（最终方案 §2.5）
@@ -344,7 +423,7 @@
 
 **T4 · 512KB 头部预检误杀率 → 实测 0%（无需放宽）**
 
-- 实测（`scripts/_probe-real-head-check.mjs`）：走头部预检的 **7 本**中，**6 本命中**；
+- 实测（`scripts/probes/_probe-real-head-check.mjs`）：走头部预检的 **7 本**中，**6 本命中**；
   唯一「未命中」的 `双人成行v11.0—PrismFox 正式版（数据库变量版）.json`（1.28MB）
   **顶层是 `extensions.SPreset`（酒馆预设），全文不含 `"entries"` 字段** → 属**正确拒绝**，不是误杀。
 - 36 本中全部文件的 `entries` 起始偏移均为 **0KB**（即 `entries` 都在文件最前），
@@ -354,7 +433,7 @@
 
 **T5 · `isValidWorldbook` 只看 `entries[0]` → 实测 0 例静默拒绝（无需修改）**
 
-- 实测（`scripts/_probe-real-validity.mjs`）：36 本中现行判定拒绝 **4 本**，逐一取证后
+- 实测（`scripts/probes/_probe-real-validity.mjs`）：36 本中现行判定拒绝 **4 本**，逐一取证后
   **全部是「无 `entries` 字段」的非世界书**（4 本顶层为 `color/disableSend/idIndex/injectInput/qrList`
   —— **快捷回复 QR 配置**）→ 属**正确拒绝**。
 - **没有一本**因 `entries[0]` 是 `null` / 非词条对象而被拒。字典形态（V2 老格式）**31 本全部正确转换通过**。
@@ -363,7 +442,7 @@
 
 **T6 · 分级扫描并发参数 → 常规档 32 维持；大文件档 3 → 下调为 2**
 
-- 实测（`scripts/_probe-heavy-concurrency.mjs`，真实库 6 本大书 / 49.2MB）：
+- 实测（`scripts/probes/_probe-heavy-concurrency.mjs`，真实库 6 本大书 / 49.2MB）：
 
   | 并发 | 耗时 | 堆峰值增量 |
   |---|---|---|
@@ -411,6 +490,41 @@
   消费端却用 `Array.isArray` 判，两处口径不一致就是隐患；共用 `extractBookEntries` 一类的全形态提取器可根治。
 - **来源**：2026-09-21 查重链路专项排查（最终方案 §2.4）
 
+### DF-20 ｜ 🔴 世界书懒加载**从未成功过**：把 `readText` 的返回体当字符串 parse
+- **现象**（2026-09-22 压测中暴露）：世界书大库（501 本 / 5000 本）下**疯狂弹错误框**，
+  文案为「读取世界书正文失败：`"[object Object]" is not valid JSON`」。
+- **根因**：`preload.js` 暴露的 `file:readText` 返回的是**对象** `{ success: true, text }`，
+  而 `js/composables/useWorldbooks.js` 的 `ensureWorldbookLoaded` 写成
+  `const text = await window.electronAPI.readText(wb.path); const parsed = JSON.parse(text);`
+  → 把**整个返回对象**喂给 `JSON.parse` → 抛 `"[object Object]" is not valid JSON`。
+  **该函数自 DF-18 引入以来就一直是坏的**（`JSON.parse(对象)` 必抛），
+  只是因为 PK-20 之前「懒加载」仅在 >50MB 的超大书上触发，**几乎没人踩到**；
+  PK-20 引入累计内联预算后**大量书转为懒加载**（501 本里 445 本），缺陷才集中爆发。
+- **⚠️ 一度走错的路（必须记录）**：我最初把它当成「批量场景噪音」，给 `ensureWorldbookLoaded`
+  加 `silent` 开关把弹框**盖掉**（连同 dedupe 批量扫描一起静默）。用户当场批评：
+  > 「静默模式，批量操作时不弹框，这是错误操作，不应该找出错误解决么，这是典型头疼捂嘴、脚疼捂嘴的行为」
+
+  **教训**：**报错是排查线索，掩盖它等于把可诊断的故障变成不可诊断的故障。**
+  `silent` 唯一合法的用途是「批量场景下**避免逐本弹框淹没界面**」，
+  且必须**汇总提示真因**（一次弹框 + 日志列出失败文件），不能变成「假装没发生」。
+  事实上真因被找出来后，这个缺陷**根本不需要 silent 掩盖** —— 修好就没有失败。
+- **修复**（2026-09-22）：严格校验返回体形状后再 parse，并把失败原因挂到条目上供调用方汇总：
+  ```js
+  const res = await window.electronAPI.readText(wb.path);
+  if (!res || !res.success || typeof res.text !== 'string') {
+      throw new Error((res && res.error) || '读取返回体异常');
+  }
+  const parsed = JSON.parse(res.text);
+  ```
+  失败时 `wb._loadError = e.message`（调用方可据此汇总），单本操作**照常弹框**。
+- **防再犯**：**凡是「预加载/封装过」的 API，必须核对它的真实返回形状**——
+  `readText` / `readJSON` / `saveJSON` 这类封装过的通道，返回值**不再是裸数据**，
+  但直觉上很容易当裸数据用（本项目里 `readText` 返回 `{success,text}`、`saveJSON` 返回 `{success,path}`）。
+  同时：**同类 IPC 的返回形状要统一**，避免有的返回裸值、有的返回包装对象。
+- **验证**：`scripts/probes/_probe-readtext-error.mjs`（真实启动 + 真实大库，修复后 `after: true`、`loadError: null`）；
+  5000 本压测中 `_loadError` 计数为 0。
+- **来源**：2026-09-22 世界书 5000 本极端压力测试专项
+
 ---
 
 ## 五、同类缺陷全库排查结论（哪些集合安全）
@@ -442,6 +556,6 @@
 3. **导出/落盘前**必须清洗前端内部字段 —— 但**只能用 `main/cardFieldSanitizer.js`**，
    ⚠️ **禁止**自己写「递归剔除所有 `_` 前缀键」或「递归剔所有 `uid`」：
    第三方扩展把这两类名字当真实数据用，会**删用户数据**（见本文件 **DF-14**，实测 7 类 131 处）。
-   改清洗规则前**先跑** `python scripts/audit-card-underscore-fields.py <库根>` 看真实数据里有什么。
+   改清洗规则前**先跑** `python scripts/tools/audit-card-underscore-fields.py <库根>` 看真实数据里有什么。
 4. **扫描结果永远先判 `error`**，并且**拒绝用 0 文件结果覆盖非空库**（见 [PK-02](BUG-性能与大库.md)）。
 5. **过滤临时文件**时，除自家产生的后缀，还要覆盖外部工具的 `<卡名>.<pid>.<tid>.tmp` 模式。

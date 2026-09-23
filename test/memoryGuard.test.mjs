@@ -4,10 +4,91 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createMemoryGuard, gradeMemory, DEFAULT_THRESHOLDS } from '../js/utils/memoryGuard.js';
+import { createMemoryGuard, gradeMemory, DEFAULT_THRESHOLDS, estimateParseBytes, preflightRead, PARSE_SIZE_FACTOR } from '../js/utils/memoryGuard.js';
 
 const mb = (n) => n * 1048576;
 const LIMIT = mb(6144);   // 抬高后的上限（main.js --max-old-space-size=6144）
+
+// ═══════════════════════════════════════════════════════════════
+// 🛡️ 读前预估（§5.3「预检」，2026-09-23 补）
+// ───────────────────────────────────────────────────────────────
+// 📖 病根：`checkNow` 是**读了之后**才知道爆 —— 遇超大书（如 200MB 合并书）已分配完，
+//    只剩「崩」或「勉强撑住」，**没有拒绝的机会**（PK-27 是内核直接杀进程，连提示都没有）。
+// ✅ 预检：分配前按「磁盘 size × 2.2」估算，超限就优雅拒绝并说明原因。
+// ═══════════════════════════════════════════════════════════════
+
+test('preflight: estimateParseBytes 按系数放大，缺 size 的单独计数', () => {
+    assert.equal(PARSE_SIZE_FACTOR, 2.2);
+    const r = estimateParseBytes([{ size: mb(10) }, { size: mb(20) }, { size: 0 }, {}]);
+    assert.equal(r.count, 4);
+    assert.equal(r.unknown, 2);                       // size=0 与缺 size
+    assert.equal(r.bytes, Math.round(mb(30) * 2.2));  // 只算有效两个
+    assert.equal(r.mb, Math.round(mb(30) * 2.2 / mb(1)));
+    // 也接受纯数字数组
+    assert.equal(estimateParseBytes([100, 200]).bytes, Math.round(300 * 2.2));
+    assert.equal(estimateParseBytes(null).bytes, 0);
+});
+
+test('preflight: 单本超限 → 拒（读了必爆，且给出 oversized 清单）', () => {
+    const r = preflightRead({
+        files: [{ size: mb(200) }],                    // 200MB 合并书
+        readMemory: () => ({ used: mb(1000), limit: LIMIT })
+    });
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'single-too-large');
+    assert.equal(r.oversized.length, 1);
+    assert.equal(r.oversized[0].size, mb(200));
+});
+
+test('preflight: 总量超「可用余量 × 0.7」→ 拒', () => {
+    // 上限 4096MB、已用 1000MB → 余量 3096MB、预算 2167MB
+    // 待读 2000MB × 2.2 = 4400MB > 2167MB → 拒
+    const r = preflightRead({
+        files: [{ size: mb(2000) }],
+        readMemory: () => ({ used: mb(1000), limit: mb(4096) }),
+        maxSingleBytes: mb(5000)                        // 放开单本限制，只测总量
+    });
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'batch-too-large');
+    assert.equal(r.budgetMB, Math.floor(mb(3096) * 0.7 / mb(1)));
+});
+
+test('preflight: 正常批量 → 放行（余量充足）', () => {
+    const r = preflightRead({
+        files: Array.from({ length: 100 }, () => ({ size: mb(1) })),   // 100MB × 2.2 = 220MB
+        readMemory: () => ({ used: mb(1000), limit: mb(4096) })
+    });
+    assert.equal(r.ok, true);
+    assert.equal(r.reason, null);
+    assert.equal(r.degraded, false);
+    assert.equal(r.est.mb, 220);
+});
+
+test('preflight: 拿不到 readMemory → 降级用假定上限，不抛错（不写死依赖 performance.memory）', () => {
+    const r = preflightRead({
+        files: [{ size: mb(1) }],
+        readMemory: () => null,                          // 非 Chromium / 未开开关
+        assumedLimitBytes: mb(4192)
+    });
+    assert.equal(r.ok, true);
+    assert.equal(r.degraded, true);
+    assert.equal(r.availMB, 4192);
+});
+
+test('preflight: 守门员 .preflight() 复用同一 readMemory 并计数', () => {
+    const g = createMemoryGuard({
+        readMemory: () => ({ used: mb(1000), total: mb(1200), limit: LIMIT }),
+        releaseCaches: () => {},
+        forceGc: () => {},
+        intervalMs: 0
+    });
+    const ok = g.preflight([{ size: mb(1) }]);
+    assert.equal(ok.ok, true);
+    const bad = g.preflight([{ size: mb(200) }]);      // 单本超 50MB
+    assert.equal(bad.ok, false);
+    assert.equal(g.stats.preflights, 2);
+    assert.equal(g.stats.preflightRejects, 1);
+});
 
 test('memoryGuard: gradeMemory 分档（unknown/ok/warn/critical）', () => {
     assert.equal(gradeMemory(null).level, 'unknown');

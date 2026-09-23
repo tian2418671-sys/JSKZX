@@ -13,7 +13,9 @@
     "build:web": "if exist web rmdir /s /q web & vite build",
     "start": "npm run build:web && electron .",
     "build": "npm run build:web && electron-builder -w",
-    "test": "node --test \"test/**/*.test.mjs\""
+    "test": "node --test \"test/**/*.test.mjs\"",
+    "guard:batch-read": "node scripts/check-batch-read-guard.mjs",
+    "check": "npm run guard:batch-read && npm test"
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^6.0.8",

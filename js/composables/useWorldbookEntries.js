@@ -5,9 +5,27 @@
  */
 import { ref, computed, watch } from 'vue';
 
-export function useWorldbookEntries({ activeWorldbook, addLog, confirmDialog, nativeAlert }) {
+export function useWorldbookEntries({ activeWorldbook, addLog, confirmDialog, nativeAlert, ensureWorldbookLoaded }) {
 
     const REGEN_UID = () => `${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
+
+    // 🛡️ PK-26（2026-09-22）：秒开后世界书 `data` 为 null（懒加载）。
+    //    本组合式函数的**每个写入口**都直接写 `activeWorldbook.value.data.entries`，
+    //    旧写法在 `data === null` 时抛 `TypeError: Cannot read properties of null` → 整个词条 IDE 崩溃。
+    //    ⇒ 统一入口：先按需载入正文；失败时给出可感知提示（绝不静默丢弃用户的编辑动作）。
+    const ensureActiveData = async () => {
+        const wb = activeWorldbook.value;
+        if (!wb) return false;
+        if (wb.dataLoaded === false && wb.path && typeof ensureWorldbookLoaded === 'function') {
+            await ensureWorldbookLoaded(wb);
+        }
+        if (!wb.data || typeof wb.data !== 'object') {
+            nativeAlert(`无法读取该世界书的正文，操作已取消。\n${wb._loadError || '请重新选择世界书目录后再试。'}`, 'error');
+            return false;
+        }
+        if (!Array.isArray(wb.data.entries)) wb.data.entries = [];
+        return true;
+    };
 
     // 为词条补稳定 uid（第三方导入的词条可能没有；uid 为前端临时字段，保存时已剔除，安全）
     const ensureUid = (entry) => {
@@ -19,11 +37,9 @@ export function useWorldbookEntries({ activeWorldbook, addLog, confirmDialog, na
     // =========================================================
     // 🌍 世界书词条深度编辑逻辑 (Entry IDE)
     // =========================================================
-    const addWorldbookEntry = () => {
+    const addWorldbookEntry = async () => {
         if (!activeWorldbook.value) return;
-        if (!Array.isArray(activeWorldbook.value.data.entries)) {
-            activeWorldbook.value.data.entries = [];
-        }
+        if (!await ensureActiveData()) return;
         activeWorldbook.value.data.entries.unshift({
             uid: REGEN_UID(),
             key: [],
@@ -42,6 +58,7 @@ export function useWorldbookEntries({ activeWorldbook, addLog, confirmDialog, na
 
     const deleteWorldbookEntry = async (entry) => {
         if (!activeWorldbook.value) return;
+        if (!await ensureActiveData()) return;
         const entries = activeWorldbook.value.data.entries;
         const index = entries.indexOf(entry);
         if (index === -1) return;
@@ -53,8 +70,9 @@ export function useWorldbookEntries({ activeWorldbook, addLog, confirmDialog, na
     };
 
     // 上移 / 下移（调整词条在数组中的实际顺序，排序方式为 default 时即反映在列表）
-    const moveEntry = (entry, dir) => {
+    const moveEntry = async (entry, dir) => {
         if (!activeWorldbook.value) return;
+        if (!await ensureActiveData()) return;
         const entries = activeWorldbook.value.data.entries;
         if (!Array.isArray(entries)) return;
         const from = entries.indexOf(entry);
@@ -64,8 +82,9 @@ export function useWorldbookEntries({ activeWorldbook, addLog, confirmDialog, na
         entries.splice(to, 0, entries.splice(from, 1)[0]);
     };
 
-    const duplicateWorldbookEntry = (entry) => {
+    const duplicateWorldbookEntry = async (entry) => {
         if (!activeWorldbook.value) return;
+        if (!await ensureActiveData()) return;
         const entries = activeWorldbook.value.data.entries;
         const index = entries.indexOf(entry);
         if (index === -1) return;
@@ -85,8 +104,10 @@ export function useWorldbookEntries({ activeWorldbook, addLog, confirmDialog, na
     const entrySortBy = ref('default');     // 排序：default/orderAsc/orderDesc/name/contentLen
 
     const filteredWorldbookEntries = computed(() => {
-        if (!activeWorldbook.value || !Array.isArray(activeWorldbook.value.data.entries)) return [];
-        let list = activeWorldbook.value.data.entries.filter(e => e && typeof e === 'object');
+        // 🛡️ PK-26：`data` 可能为 null（懒加载）→ 必须用可选链，否则渲染期直接抛 TypeError
+        const entries0 = activeWorldbook.value?.data?.entries;
+        if (!Array.isArray(entries0)) return [];
+        let list = entries0.filter(e => e && typeof e === 'object');
 
         const q = entrySearchQuery.value.trim().toLowerCase();
         if (q) {
@@ -207,6 +228,7 @@ export function useWorldbookEntries({ activeWorldbook, addLog, confirmDialog, na
 
     const batchDeleteEntries = async () => {
         if (!activeWorldbook.value) return;
+        if (!await ensureActiveData()) return;
         const entries = activeWorldbook.value.data.entries;
         const targets = entries.filter(e => batchSelected.value.has(ensureUid(e)));
         if (targets.length === 0) return;

@@ -41,15 +41,78 @@
 
 - `npm test` **471 / 471 通过**（41 个测试文件）；`npm run build:web` 干净；生产启动冒烟无 `[Vue 错误]`、无 `crash.log`
 - 新增 3 个 CDP 探针（均已登记 `docs/技术支持/README.md`）：
-  - `scripts/_probe-aitag-nav.mjs` —— 静态结构 12 条（分区齐全 / 控件未丢 / 入口去重）
-  - `scripts/_probe-aitag-hot.mjs` —— 动态行为 30 条（徽标联动 / 状态保持 / 分区互斥 / 进度条位置 /
+  - `scripts/probes/_probe-aitag-nav.mjs` —— 静态结构 12 条（分区齐全 / 控件未丢 / 入口去重）
+  - `scripts/probes/_probe-aitag-hot.mjs` —— 动态行为 30 条（徽标联动 / 状态保持 / 分区互斥 / 进度条位置 /
     管线全关保护 / 开合循环 ×5 / 窄窗 900×620 / 规则弹窗 / 副作用校验），在真实库 76 张上 **30/30**
-  - `scripts/_probe-aitag-run.mjs` —— 真实 API 打标端到端（隔离库 5 张真实卡副本）：
+  - `scripts/probes/_probe-aitag-run.mjs` —— 真实 API 打标端到端（隔离库 5 张真实卡副本）：
     规则命中 1 张 + LLM 4 张，标签**已落盘**（`data.tags`）；探针内含真实库路径防呆（命中即退出码 2）
 - 控件清单前后比对（HEAD vs 工作区）：`v-model` / `@click` / `@change` / `@input` / `placeholder` **零丢失**
 - 测试踩坑记录（防再犯）：窗口被遮挡时 Chromium 节流 rAF → Vue 过渡卡在
   `fade-leave-from + fade-leave-active`（缺 `fade-leave-to`），表现为「弹窗关不掉」的**假失败**；
   测试实例需加 `--disable-renderer-backgrounding --disable-backgrounding-occluded-windows --disable-background-timer-throttling`
+
+---
+
+## 🩹 未发布 · PK-27 架构改造：世界书「查重只读索引」+ 加载速度实测 + 进度条修复（2026-09-22）
+
+> 方案：[`世界书大库-加载与查重架构方案.md`](docs/规格与计划/世界书大库-加载与查重架构方案.md)（v2.1，🟢 主体已落地）
+> ｜ 实验：[`S0.5-simhash特征方案实验报告.md`](docs/规格与计划/S0.5-simhash特征方案实验报告.md)
+> ｜ 计划：[`后续计划-20260922-PK27架构改造收尾.md`](docs/规格与计划/后续计划-20260922-PK27架构改造收尾.md)
+> ｜ 数据：[`技术数据-大库压测与性能.md`](docs/技术支持/技术数据-大库压测与性能.md) §12.15
+
+### ✨ 用户可感知的变化
+- **大库查重不再崩溃**：以前 5000 本级别做查重会**整个应用消失**（渲染进程被系统杀掉）；现在稳定运行
+- **查重快了几千倍**：以前 1000 本查重要**一分多钟**（期间界面卡顿），现在**瞬间出结果**
+- **内容级查重不再「永远跑不完」**：以前极端同源大库会跑 **25 分钟以上**仍未完成；现在**十几秒**
+- **查重进度条不再乱跳**：以前会「反复横跳、时长时短、最后变成滚动的光条」；现在**平滑单调推进到 100%**
+- **世界书库加载速度已实测确认**：5000 本**秒开不到 1 秒**；首次后台索引约 4 分钟（不影响使用）；之后每次**约 0.8 秒**
+
+### 🧩 实现要点（内部）
+- **根因（架构级）**：`main.js` 扫描时 `entriesArr` 已在内存，却只写 `{mtime,size,name,entryCount}` 缓存
+  → **触发词被丢掉** → 下游查重只能**反复重读 34.8GB 正文**。
+  **三次 OOM 事故（PK-20 / 内容查重 / PK-27）同一病根**。
+- **S0 止血**：新增 `consumeWorldbookBodies()` —— **唯一**的批量读正文入口
+  （顺序消费 + 每本用完即释放 + 每 10 本让出主线程 + 逐本失败不中断）；
+  同名查重 / 内容查重**都改走它**（删掉各自的 `Promise.all` 与手写 `for` 循环）。
+- **S0.5 实验**（离线，S1' 前置）：**定稿 char 4-gram + number 双 32 位 + 采样 step=4 + 阈值 T=19**
+  （BigInt 版实测 1387ms/本 → number 版 **43ms/本**，**提速 32×**）。
+- **S1' L1 摘要**：`wb:meta` 顺带产出 **L1a 摘要**（`keyHashes` + `exactContentHash`），
+  **在主进程算**（渲染层零正文）+ 新增 **`WB_META_MAX_BYTES = 50MB` 体积守卫**（v3 评审盲区）。
+  ⚠️ 实测踩到的 bug：**热缓存下阶段 1 命中分支没带 `keyHashes`** 且 `metaPending: !hit`
+  → 阶段 2 被跳过 → **首次正常、再次全丢**；修：命中时一并返回 + `wbMeta` 子结构升版。
+- **S2' 同名查重改读 L1**：**删掉整段「读正文」**；用 `keyHashes` 双指针求 Jaccard
+  （⚠️ 截断口径：双方都截到 `min(k, 自身)`，否则系统性低估）。
+  ⚠️ 实测踩到的 bug：**「bottom-k + 倒排共现」在极端同源库下失效**（所有桶都高频 → 候选为空）
+  → 改为**组内直接全量精算**（分组已缩范围，实测 975 对 / 9ms）。
+- **S3' 内容查重改 simhash**（**解 PK-25**）：弃用 MinHash+LSH（桶内 O(bucket²)），
+  改 **simhash 位向量 + 汉明距离预筛**（整数异或 + popcount，无桶概念）。
+  ⚠️ **simhash 是位向量，绝不能与 MinHash 的 `estimateSimilarity` 混用**
+  （对 `[lo,hi]` 只返回 0 或 1 → **假阳 + 假阴同时存在**）。
+- **S4' CI 守卫**：`scripts/check-batch-read-guard.mjs`（**白名单制**，评审 §5 #10）——
+  `ensureWorldbookLoaded` 只允许出现在清单文件里，其余出现即 fail；
+  接入 `npm run guard:batch-read` + `npm run check`。
+- **AR-45 进度条**：新增 **`finishDedupeScan()`**（统一收尾）+ 阶段 1 映射 0~50% / 阶段 2 续 50~100%
+  （**所有赋值用 `Math.max` 防倒退**）+ **全程确定态** + `rescanFor*Dedupe({keepAlive})`（阶段切换不 reset）。
+
+### 🔬 验证
+- `npm test` → **504 pass / 0 fail**（471 + 15 L1 + 10 simhash + 8 进度条）
+- `npm run check`（CI 守卫 + 单测）✅ ｜ `npm run build:web` ✅ ｜ 文档链接 **248 全解析**
+- **同名查重**：s1000 **70.8s → 9ms**（**约 7900×**）；s5000 从 **OOM 被杀 → 7/7 通过**（堆 131MB）
+- **内容查重**：s5000 从 **>25 分钟未完 → simhash 全量两两 ≈ 12.5s**
+- **L1 体积实测**：原估 2~4KB/本 → **实测 67.1KB/本**（原字符串）→ 改 `Uint32Array` hash **4.44KB/本**
+  （全库 353.7MB → **23.4MB**，**15.1×**）
+- **加载速度实测（s5000 / 5401 本 / 34.8GB）**：
+  阶段 1（秒开）**~780ms**（**83% 是 `stat`，已到磁盘物理下限**）；
+  冷启动总计 **~234s**（全在**后台**，不阻塞首屏）；热启动 **~0.8s**
+- **进度条连续性**：`_probe-progress-continuity.mjs` **5/5**（横跳 0 / 倒退 0 / 光条 0 / 闪烁 0 / 到 100%）
+- 缺陷登记：**PK-27**（🔴 批量读正文整组并发致 OOM）、**AR-45**（🟡 进度条横跳）；PK-25 状态 → ✅ 已修
+
+### ⚠️ 已验证无效的优化（**不要再试**）
+| 尝试 | 实测结果 |
+|---|---|
+| 批量 `Promise.all(stat)` 后统一判定 | **更慢**（1164ms，并发开销 > 收益）→ 已回滚 |
+| 跳过指纹验证（`rescan:true`） | 与普通路径几乎相同（1550 vs 1580ms）→ **指纹验证不是瓶颈** |
+| 提高并发（T6 实验 2→12） | 仅改善 **3%**，内存 59→146MB → 瓶颈在磁盘 I/O |
 
 ---
 
@@ -112,16 +175,177 @@
   `useDedupe.js` 的 `computeTextDiffLines` 改为调用新工具（删除已成死代码的 `chunkTextForDiff`）
 - **缺陷编号**：AR-39 / AR-40 / AR-41 / DF-17 / DF-18 / DF-19 / PK-18 / PK-19
 
+---
+
+## 🩹 未发布 · 世界书 500 份压力测试专项（2026-09-22）
+
+> 用户诉求：「复制 500 份做压力测试、改写某几个文件做对比测试、再测其他功能查开发中产生的意外 BUG」
+> ｜ 数据：[`技术数据-大库压测与性能.md` §十二](docs/技术支持/技术数据-大库压测与性能.md)
+> ｜ 缺陷：AR-42（✅ 已修）/ PK-20（⬜ 待修）/ PK-21（⬜ 待修）
+
+### ✨ 用户可感知的变化
+- **查重 / 版本对比现在有真进度条了**：以前进度条出现在「打开世界书目录」的**浏览**过程（放错了地方），
+  而**真正耗时的查重 / 版本对比反而全程没有任何进度**；现在进度条出现在**查重弹窗内部**，
+  扫描时显示「正在扫描世界书库…」+ 已完成/总数 + 百分比 + **当前文件名**，平滑推到 100%
+- **查重结果保证是最新的**：查重前会**重新扫描磁盘**（以前直接用内存里可能过期的列表）
+- **浏览世界书目录仍有反馈**：不再用进度条（避免与查重进度混淆），改为在日志里显示
+  「⏳ 正在读取目录内的世界书文件…」与「扫描完成，共加载 N 本」
+
+### 🧩 实现要点（内部）
+- **AR-42（进度条位置修正，✅ 已完成）**：
+  - 新增 `js/components/DedupeScanProgress.vue`（纯展示；三配色；支持**不定态**滑动动画），
+    `WbDedupeModal` / `DedupeModal` / `ContentDedupeModal` 共用（**不复制三遍**，避免再次走样）
+  - `useWorldbooks.js` 新增 `rescanWorldbooks(dir)`；抽出 `adoptScanResult(data)` 供浏览扫描与查重重扫共用；
+    `scanWorldbookDir` 改为**日志反馈**、不再占用进度条
+  - `useDedupe.js` 新增 `dedupeScanning/dedupeScanLabel/dedupeScanPercent/dedupeScanIndeterminate` 与
+    `rescanForWorldbookDedupe` / `rescanForCardDedupe`；三个查重入口（同名 / 世界书 / 内容级）在**判空前**先重扫
+  - ⚠️ **先开弹窗再重扫**（否则扫描期间用户看不到进度条，实测踩到）；三个弹窗空态加「扫描中」分支防误报「已清理完毕」
+  - `main.js` / `preload.js`：`wb:scan` 新增 `rescan` 选项（跳过**新目录**指纹验证 —— 该验证只 `readdir` 顶层，
+    顶层全是子目录的库会被误拒；安全边界不变，仍受 `isPathAllowed` 白名单约束）
+  - `SidebarPanel.vue`：删除进度条 DOM 与三个绑定，**留注释防止再挂回来**
+  - **真实进度 vs 假进度**：世界书侧用 `wb:scan` 分批心跳（真实 `done/total`）；
+    角色卡侧 `refreshLibrary` **无进度通道** → 用**不定态**滑动条，**不编假百分比**
+- **顺带修 TDZ 崩溃（AR-06 / AR-17 同款）**：`useDedupe` 需要 `rescanWorldbooks` 但原本在 `useWorldbooks`
+  **之前**调用 → 运行时 `Cannot access 'X' before initialization`。**`vite build` 完全查不出来**，
+  已把调用顺序调正并在原处写死约束注释
+- **缺陷编号**：AR-42（✅）/ PK-20（⬜）/ PK-21（⬜）
+
+### 🔬 验证
+- `npm test` → **471 pass / 0 fail**；`npm run build:web` 无错；`get_errors` 全清
+- **真实启动冒烟**：`index-Dzjs06kb.js` 启动无 Vue 错误、无 TDZ（**首次构建 `index-CF8Hc2M0.js` 曾因 TDZ 崩**，已修）
+- `scripts/probes/_probe-dedupe-progress.mjs` → **15/15**（AR-42：浏览库侧栏无进度条 + 日志反馈；
+  查重 **71 次**进度采样、`done` 到 **100/100**、**54 次**带当前文件名、`phase` 序列 `parsing→done→idle`；
+  ★ **扫描期间弹窗内确实出现进度文案**）
+- `scripts/probes/_probe-wb-regression.mjs` → **22/28**（100 本库；失败项均为**探针假设**与真实库构成不符，非功能缺陷）
+- `scripts/probes/_probe-textdiff-real.mjs` → **15/19**（单条词条全对；揭出 PK-21 假阳性 99.15%）
+- `scripts/probes/_probe-wb-scale-sweep.mjs` → 规模梯度（50/100/200 本完成、**300 本超时**、**501 本崩溃**）
+
+### ⬜ 未修缺陷（已落档）
+- **PK-20** 🔴 世界书大库扫描：≤50MB 世界书**无瘦身**，完整 `data` 单次 IPC 内联 →
+  501 本（3.56GB）**应用退出**；证据链证明**主进程全部扫完**，瓶颈只在 IPC 回传 + 渲染层接收
+- **PK-21** 🔴 差异比对「分散改动」→ 降级策略按行号逐行比对，行数一变后面全错位 →
+  23745 行里 2 处真实改动被报成 **23540 行变更（假阳性 99.15%）**
+
+---
+
+## 🩹 未发布 · PK-21 差异比对假阳性修复（2026-09-22）
+
+> 用户要求：先修差异比对的分散改动，再修大库扫描崩溃
+> ｜ 缺陷：PK-21（✅）
+
+### ✨ 用户可感知的变化
+- **对比大世界书时不再「满屏都是改动」**：以前两本几乎相同的书对比，
+  只有几处真实改动却把**几乎整篇都标成「变更」**（实测 23745 行里 2 处改动被报成 23540 行）；
+  现在**只标出真正改动的那几行**（假阳性 99.15% → 0.01%）
+
+### 🧩 实现要点（内部）
+- `js/utils/textDiff.js`：降级策略从 `positionalOps`（**按行号逐行比对**）换成 **`anchoredOps` 锚点对齐**：
+  ① 找「两侧都恰好出现一次」的行作锚点；② **LIS 保序**（防重排错位）；③ 递归切段；
+  ④ 段 ≤ `ANCHOR_EXACT_LINES`(500) 走**精确 LCS**；⑤ 无锚点时退回「先删后增」（保守，不造假 `changed`）
+- `truncated` 语义改为「**走了降级路径**」（锚点法结果可靠，不再是「结果不可靠」）
+
+### 🔬 验证
+- `scripts/probes/_probe-textdiff-real.mjs` → **22/22**（真实 397 词条世界书拼接）
+- 分散改动：`changed` **23540 → 0**、假阳性 **99.15% → 0.01%**、放大 **11771× → 1×**、耗时 0.06s → **0.02s**
+- **⚠️ 断言不能写窄（本次踩到 3 次）**：「尾部追加」= added、「插行+删行」= added+removed（都**不是** changed）
+  → 已补一个**真正「修改已有行」**的用例专门验 changed + 行内高亮
+
+---
+
+## 🩹 未发布 · PK-20 世界书大库扫描崩溃修复（2026-09-22）
+
+> 用户指出：「扫描大库崩溃不是小问题，这是**加载算法**的问题」，要求**向内 + 向外**双路探索
+> ｜ 缺陷：PK-20（✅）
+
+### ✨ 用户可感知的变化
+- **大世界书库不再把应用搞崩**：以前 500 本量级的世界书库一打开就**整个应用退出**
+  （实测 501 本 / 3.56GB，主进程扫完但渲染层接不住）；现在**正常加载完成**（21.1s）
+- **内存占用大幅下降**：渲染堆从 OOM 降到 **324MB（上限 4192MB 的 7.7%）**
+- **未载入正文的书仍显示准确词条数**，并带「按需」徽标（点开时才读取正文），**不会谎报「0 词条」**
+
+### 🧩 实现要点（内部）
+- **向外探索（关键依据）**：对比对标的 **SillyTavern**（`public/scripts/world-info.js`，6408 行）：
+  其**列表态只有 `world_names`（纯文件名数组，不含 entries）**；正文靠 `loadWorldInfo(name)` **按需 fetch**
+  + `worldInfoCache`；编辑器**分页**（`perPageDefault = 25`）；扫描只覆盖「被激活的」书。
+  ⇒ 「**列表态不常驻正文**」是成熟实现的共识，本修复与之对齐。
+- **向内探索**：项目**已有**懒加载机制（`dataLoaded` / `ensureWorldbookLoaded` / `readText`），
+  只是阈值设在单文件 50MB → **复用即可**，前端逻辑零改动。
+- `main.js`：新增 `SCAN_INLINE_TOTAL_MAX_BYTES = 256MB`（**累计内联预算**）——
+  扫描中累计已内联的**字符量**，超预算的文件**仍做完整判定**（不放过诱饵）但**不保留正文**；
+  回传新增 `inlineMB` / `inlineSkipped`；`useWorldbooks.js` 写日志告知用户（避免静默降级）
+- `SidebarPanel.vue`：未载入正文的书显示「N 词条 + 按需」徽标
+
+### ⚠️ 实现踩坑（已写进代码注释）
+1. **不能在「读文件之前」就 return 只回元数据** → 会**绕过 `isValidWorldbook` 校验**，
+   把诱饵 JSON 也当世界书入库（**实测 36 个诱饵被误判**：501→537）；
+2. **不能用 `st.size`（磁盘字节）当预算口径** → 字节 ≠ 对象体积，会严重低估内存占用
+   → 改用 `content.length`（直接反映 JS 字符串内存）；
+3. **断言判据要跟着机制改**：`data === null` 不再等价于「未 parse」（预算转懒加载的书也是 `data:null`）
+   → 正确判据是 `entryCount === null`。
+
+### 🔬 验证
+- `scripts/probes/_probe-wb-stress-500-lib.mjs` → **24/24**（501 本：完成 21.1s、堆 324MB、
+  入库 501 / 跳过 41、进度 115 事件、二次扫描一致、搜索 1984ms、无渲染期错误）
+- `scripts/probes/_probe-wb-lib-audit.mjs` → 磁盘实测 **501 有效 / 41 跳过**（与我的记录一致）
+- `scripts/probes/_probe-wb-scan-diff.mjs` → **应用 vs 磁盘逐路径零分歧**
+- `scripts/probes/_probe-wb-verify3.mjs` → 确认压测中 3 个「失败项」均为**探针假设过期**，非真缺陷
+
+---
+
+## 🩹 未发布 · 查重进度条 UX 三问修复（2026-09-22）
+
+> 用户反馈：① 进度条数字为什么是「0 / ?」不动；② 第二次查重只看到进度条、结果却早已列出；
+> ③ 扫描 / 对比弹窗有没有卡顿点
+> ｜ 数据：[`技术数据-大库压测与性能.md` §12.8](docs/技术支持/技术数据-大库压测与性能.md)
+> ｜ 缺陷：AR-43（✅）/ AR-44（✅）/ PK-22（✅）
+
+### ✨ 用户可感知的变化
+- **查重进度条的数字会动了**：以前进度条宽度在走、但右侧数字**从头到尾都是「0 / ?」**；
+  现在正确显示「已完成 / 总数（百分比）」并随扫描推进（如 `29 / 97（30%）` → `64 / 97（66%）`）
+- **第二次查重不再显示上一次的结果**：以前弹窗一打开就渲染着**上一轮的查重结果**，
+  看起来「结果早就列出来了、只有进度条在动」（数据是旧的却看不出旧）；现在扫描期间是干净的加载态
+- **对比窗口不再卡了**：以前打开两本大世界书的对比会明显卡住一下
+  （实测 **34,232 个 DOM 节点**、单次长任务 **750ms**）；
+  现在：**词条级对齐每页 30 条**（底部「显示更多词条」）、
+  **整篇正文比对默认收起**（点「▶ 展开整篇比对」才展开，且每次只渲染 400 行、按需追加）
+  → DOM 节点降 **97%**（34,232 → 1,044），**打开耗时 900ms → 24ms**
+
+### 🧩 实现要点（内部）
+- **AR-43（数字不动）**：`dedupeScanProgressForModal`（computed）**只定义在 setup 局部、漏进 setup return**
+  → 模板拿到 `undefined` → 子组件回落默认值 `{done:0,total:0}`。
+  **宽度与数字走两条不同路径**（宽度用 `dedupeScanPercent`，已在 return 里）→ 所以只有数字坏，现象隐蔽。
+  修：补进**两处** setup return；进度组件加 `data-testid="dedupe-scan-numbers"` / `dedupe-scan-bar`
+- **AR-44（陈旧结果）**：AR-42 的修复改成「先开弹窗再重扫」，但**没清空上一轮 `groups`**。
+  修：三个查重入口扫描前 `groups = []`。**与 `scan_cache.json` 无关**（那是「mtime 未变则跳过 parse」的增量缓存）
+- **PK-22（卡顿）**：`DiffModal.vue` 三层按需渲染 ——
+  ① 整篇比对**默认折叠**（`expandedFields`）；② 长列表**分块**（整篇 400 行 / 词条内 400 行，`renderLimit`/`rowLimit`）；
+  ③ 词条卡片**分页**（30 个/页，`pairsLimit`）；`watch(show)` 每次打开复位状态防 DOM 残留
+- **缺陷编号**：AR-43（✅）/ AR-44（✅）/ PK-22（✅）
+
+### 🔬 验证
+- `npm test` → **471 pass / 0 fail**；`npm run build:web` 无错；`get_errors` 全清；`check-doc-links.mjs` 全解析
+- **真实启动冒烟**：`index-CcWjxD2c.js` 启动无 Vue 错误、无 TDZ
+- `scripts/probes/_probe-dedupe-ux.mjs` → 数字序列 `["0 / ?"]`（修前）→ **4 个取值**（修后）；
+  陈旧结果 **4~6 次**（修前）→ **0 次**（修后）
+- `scripts/probes/_probe-diff-perf.mjs` → **10/10**（DOM 34,232 → **1,044**、首屏 **900ms → 24ms**、
+  展开分块 400/23747、词条 30/398、重开后复位）
+- `scripts/probes/_probe-dedupe-progress.mjs` → **15/15**（AR-42 未回归）
+
+### 📌 测量陷阱（已写进脚本注释）
+- 用 `requestAnimationFrame` 等「渲染完成」→ **后台窗口下 rAF 不触发**，会卡到窗口激活（实测假耗时 **191333ms**）
+- 断言不要用**文案正则**猜元素（v1 把分页控件「1 / 4」误认成进度条数字）→ 用 `data-testid`
+- **DOM 节点数**是确定性指标（不受窗口可见性影响），比 longtask/lag 更适合作主判据
+
 ### 🔬 验证
 - `npm test` → **471 pass / 0 fail**（原 403 → Phase 1+2 的 445 → Phase 3 的 460 → AR-41 的 471）
 - `npm run build:web` 无错；`get_errors` 全清；`check-doc-links.mjs` 208 链接全解析
 - **真实启动冒烟**（dev 模式 + 隔离 profile + CDP）：
-  - `scripts/_probe-diff-align.mjs` → **15/15**（差异弹窗 UI 级；含旧代码条件对照 `oldCrashed === true`）
-  - `scripts/_probe-scan-gate.mjs` → **12/12**（真实目录 6MB 书 `bigRecognized=true`、`skipped` 可见、二次扫描走缓存仍在）
-  - `scripts/_probe-search-phrase.mjs` → **8/8**（真实搜索框输入「系统」，两路径均不命中「体系 传统」诱饵卡）
-  - `scripts/_probe-wb-scan-progress.mjs` → **9/9**（T2：单次 IPC 收到 10 条进度事件，旧实现 0 条；`total` 准确、`done` 单调、终态 `done===total`）
-  - `scripts/_probe-wb-sidebar-crash.mjs` → **8/8**（AR-40：点世界书库 / 反复切模式 → `aside` 存活、无 `_ctx.*` 错误）
-  - `scripts/_probe-diff-coloring.mjs` → **15/15**（AR-41：三种行底色齐备、11 处行内精确高亮、两侧行号列数量相等、无渲染期错误）
+  - `scripts/probes/_probe-diff-align.mjs` → **15/15**（差异弹窗 UI 级；含旧代码条件对照 `oldCrashed === true`）
+  - `scripts/probes/_probe-scan-gate.mjs` → **12/12**（真实目录 6MB 书 `bigRecognized=true`、`skipped` 可见、二次扫描走缓存仍在）
+  - `scripts/probes/_probe-search-phrase.mjs` → **8/8**（真实搜索框输入「系统」，两路径均不命中「体系 传统」诱饵卡）
+  - `scripts/probes/_probe-wb-scan-progress.mjs` → **9/9**（T2：单次 IPC 收到 10 条进度事件，旧实现 0 条；`total` 准确、`done` 单调、终态 `done===total`）
+  - `scripts/probes/_probe-wb-sidebar-crash.mjs` → **8/8**（AR-40：点世界书库 / 反复切模式 → `aside` 存活、无 `_ctx.*` 错误）
+  - `scripts/probes/_probe-diff-coloring.mjs` → **15/15**（AR-41：三种行底色齐备、11 处行内精确高亮、两侧行号列数量相等、无渲染期错误）
 - **测试有效性反向验证**：临时回退 `needPhraseCheck` → 用例失败（`['卡A']` → `['卡A','卡C']`）；
   临时移除 `selectWorldbook` 绑定 → `sidebarBindings.test.mjs` 失败并点名该符号
 - **真实库实测（T4~T6，`H:\01\全局世界书` 39 本 / 53.6MB）**：
@@ -132,6 +356,214 @@
   + `test/latinPrefix.test.mjs`（10，PK-19 结果一致性）+ `test/sidebarBindings.test.mjs`（5，AR-40 绑定完整性 + 3 条自检）
   + `test/textDiff.test.mjs`（11，AR-41 行对齐 + 行内高亮 + 两侧不得错位）
 - **未发布**：本轮改动已提交源码与文档，**未打包、未推送 Release**
+
+---
+
+## 🩹 未发布 · 世界书库「⚡ 秒开」+ 懒加载真因修复（2026-09-22）
+
+> 用户要求：「我要他的加载和角色卡一样进行**秒开**程序秒加载的效果」
+> ｜ 数据：[`技术数据-大库压测与性能.md` §12.10](docs/技术支持/技术数据-大库压测与性能.md)
+> ｜ 缺陷：PK-23（✅ 秒开）/ DF-20（✅ 懒加载真因）
+
+### ✨ 用户可感知的变化
+- **世界书目录现在「秒开」**：以前打开一个上千本的世界书目录要**等半分钟以上**
+  （实测 1001 本 **36 秒**，5000 本约 150 秒，期间界面一片空白）；
+  现在**几乎瞬间列出全部书名**（1001 本 **83ms**、5401 本 **237ms**），
+  词条数等细节在后台自动补齐（二次打开**不再读盘**）
+- **不再弹「读取世界书正文失败」的报错框**：以前大库下会连续弹出错误提示
+  （原因见下），现在正文按需加载正常
+- 加载**内存占用极低**（5401 本仅 **19MB**，上限 4192MB）
+
+### 🧩 实现要点（内部）
+- **DF-20 真因（🔴 世界书懒加载从未成功过）**：`file:readText` 返回的是 **`{ success, text }` 对象**，
+  而 `useWorldbooks.js` 的 `ensureWorldbookLoaded` 写成 `const text = await readText(...)` 后
+  **直接 `JSON.parse(text)`** → 抛 `"[object Object]" is not valid JSON` → **每次必失败**。
+  该函数自 DF-18 引入以来一直是坏的，只因 PK-20 之前懒加载仅 >50MB 才触发而**几乎没人踩到**；
+  PK-20 后大量书转懒加载（501 本里 445 本）才集中爆发。
+  修：严格校验返回体形状（`!res || !res.success || typeof res.text !== 'string'` → 抛错），失败原因挂 `wb._loadError`
+- **⚠️ 一度走错的路（必须记录）**：最初给 `ensureWorldbookLoaded` 加 `silent` 把弹框**盖掉**，被用户当场批评
+  「**静默模式…这是典型头疼捂嘴、脚疼捂嘴的行为**」。
+  **教训**：报错是排查线索，掩盖它等于把可诊断的故障变成不可诊断的故障；
+  `silent` 唯一合法用途是「批量场景避免**逐本弹框淹没界面**」，且必须**汇总提示真因**
+- **PK-23 秒开（两阶段）**：
+  - **阶段 1（秒开）**：`wb:scan` 新增 `opts.fastListOnly` → **只 `readdir`+`stat`**，
+    返回 `{ path, name, size, mtime, entryCount?, wbName?, dataLoaded:false, metaPending }`，**一个字节正文都不读**
+  - **阶段 2（后台补元数据）**：新增 **`wb:meta` IPC**（`preload.js` 的 `fetchWorldbookMeta` /
+    `onWbMetaProgress`）批量补 `wbName` / `entryCount`，**只返回元数据、绝不返回正文**；
+    命中 `wbMeta` 缓存（`path+mtime+size` 一致）则**跳过读盘**
+  - **持久化元数据缓存**：`scan_cache.json` 新增 `wbMeta`（`{ mtime, size, name, entryCount }`，**不存正文**）
+    → 二次打开 **0 次读盘**
+  - `useWorldbooks.js`：`scanWorldbookDir` 改为「秒开 → `adoptScanResult` → 后台补全 → `triggerRef`」；
+    新增 `wbDisplayName(wb)`（**书名优先 `wbName`，回退文件名** —— `data` 不再常驻）+ `wbMetaFilling` / `wbMetaProgress`；
+    `SidebarPanel.vue` 书名改用 `wbDisplayName(wb)`（**不能再用 `wb.data.name`**）
+- **耗时归属实测**（`scripts/probes/_probe-scan-phases.mjs`，1001 本 / 6.97GB）：
+
+  | 阶段 | 耗时 |
+  |---|---|
+  | ① 递归 `readdir` | **7ms** |
+  | ② ① + `stat` | **43ms**（累计） |
+  | ③ 读全部内容 + `JSON.parse` | **36.0s**（瓶颈 100%） |
+
+- **📖 向外探索对照（SillyTavern `src/endpoints/worldinfo.js` 的 `/list`）**：
+  它遍历目录**也读文件**，但只保留 `{ file_id, name, extensions }`、**丢弃 entries**；
+  它够快是因为**世界书数量少**（几十本），不是算法更好。
+  ⇒ 千本量级必须**更进一步：列表阶段完全不读文件**（本实现）+ 持久化元数据缓存
+
+### ⚠️ 实现踩坑（`vite build` 查不出，真实启动冒烟才抓到）
+1. `wbDisplayName` **漏进 `useWorldbooks` 的解构** → `ctx.wbDisplayName` 未定义 → **Vue 挂载失败（白屏）**
+2. `wbDisplayName` 在 `App.vue` **重复声明**（加了两处）
+
+### 🔬 验证
+- `npm test` → **471 pass / 0 fail**；`npm run build:web` 无错；`get_errors` 全清
+- **真实启动冒烟**（隔离 profile + CDP 9370）：无 Vue 错误、无 TDZ
+- `scripts/probes/_probe-instant-open.mjs` → **1001 本 10/11、5401 本 10/11**
+  （唯一失败项是探针**断言写死 5001 而磁盘实为 5401**，**非缺陷**；已改为「自己数磁盘」）
+  - 阶段 1：**83ms（1001 本）/ 237ms（5401 本）**；二次秒开 **78ms / 220ms**
+  - 元数据补全 **5401/5401**；阶段 2 **全部缓存命中（0 次读盘）**；堆 **15MB / 19MB**
+- `scripts/probes/_probe-readtext-error.mjs` → 修复后 `after: true`、`loadError: null`
+- `scripts/probes/_probe-wb-stress-5k.mjs` → **5000 本极端压测**（详见下一节）
+
+---
+
+## 🩹 未发布 · 世界书 5000 本极端压力测试（2026-09-22）
+
+> 用户要求：「上压力测试上 5000 本书开始压力测试…同时测试其他改动的和未改动的功能来确保没有其他 BUG 诞生」
+> ｜ 数据：[`技术数据-大库压测与性能.md` §12.11](docs/技术支持/技术数据-大库压测与性能.md)
+
+### 测试库
+- `D:\TkDmGzq\_wb5k\s5000` —— **5401 个 `.json` / 49.6GB**（硬链接自 500 份压测库多轮放大）
+
+### 实测结果（**修复 PK-24 之前**的构建，本次压测正是它揭出了 PK-24）
+
+| 组 | 项 | 实测 |
+|---|---|---|
+| 磁盘对账 | `.json` / 有效 / 诱饵 | **5401 / 5001 / 400** |
+| **A. ⚡ 秒开** | 阶段 1（`fastListOnly`） | **231ms** |
+| | ⚠️ 秒开后列表 | **5401**（**含 400 个诱饵** —— 即 PK-24 现象） |
+| | 元数据补全 | 5401/5401（诱饵也拿到了书名/词条数） |
+| | 秒开后堆 | **23MB / 4192MB（0.5%）** |
+| **B. 完整扫描** | 耗时 | **155.8s**，入库 **5001** / 跳过 **400**（与磁盘零分歧） |
+| | 分级 | 已内联 **57** / 懒加载 **4944**，词条合计 **3,493,197** |
+| | 内联预算 | 已用 **264MB**，转懒加载 **4944** 本 |
+| | 进度条 | **1119 条事件**，`total=5401` 准确、`done` 单调、终态 `done===total` |
+| | 完整扫描后堆 | **273MB / 4192MB（6.5%）** |
+| **C. 渲染层** | 列表 / 搜索「改写」/ 筛选 | 5401 本；搜索 **1983ms** 命中 **800**；筛选 **1011ms** |
+| | 侧栏存活 | `aside=1`（AR-40 未复发）✅ |
+| **D1. 同名查重** | 结果 | **25 组**（前 3 组各 200 本） |
+| **D2. 差异比对** | 弹窗 | 渲染 **58ms**，DOM **1044**，默认折叠 ✅，词条分页 `30 / 398` |
+| **E. 渲染期错误** | 错误 / OOM / TDZ | **0** |
+
+> 修复 PK-24 后的验证见 `_probe-wb-valid-gate.mjs`（**9/9**）：首次最终入库 **1001 = 磁盘有效数**、
+> 剔除 **80 = 磁盘无效数**、零漏收；二次阶段 1 **精准列出 1001**（诱饵从不出现）且 **47ms**。
+
+### ⚠️ 探针教训
+- **断言不要写死数量**：磁盘实为 5401，探针按「5001」断言会误报 → 已改为**自己数磁盘**
+  （`diskJson` / `diskValid` / `diskDecoy`）
+
+### 🛡️ 压测揭出的回归（PK-24，✅ 已修）
+
+- **现象**：同一目录下 **秒开列出的数量 ≠ 完整扫描的有效数量** ——
+  `s5000` 阶段 1 列出 **5401** 本，完整扫描只认 **5001** 本有效（**400 个诱饵混进世界书列表**），
+  用户会看到角色卡 JSON / 酒馆预设 JSON / 大表格 / 损坏 JSON 出现在世界书库里
+- **根因**：`fastListOnly` 分支**只按 `.json` 后缀列出、不做 `isValidWorldbook` 校验**
+  —— 正是 DF-18 记录过的「**绕过 `isValidWorldbook`**」同款坑，只是换了个形式
+  （不 `return`，而是**根本不校验**）。更隐蔽的是 `wb:meta` 也不校验 → 诱饵还拿到了书名与词条数
+- **修复关键洞察**：`scan_cache.json` 的 **`worldbook` 缓存里已经存了 `{ mtime, valid }`**（完整扫描时写入）
+  ⇒ **不读文件也能知道有效性**：
+  - **阶段 1**：`valid===false` 且 mtime 未变 → **直接剔除**（计入 `skipped`）；
+    `valid===true` 才使用 `wbMeta` 缓存（**0 次读盘**）；未判定 → 暂收录并标 `metaPending`
+  - **阶段 2（`wb:meta`）**：读文件时**顺带跑 `isValidWorldbook`** 并回写 `worldbook` 缓存，
+    返回体加 `valid`；**无效文件不写 `wbMeta`**（不产生假书名/假词条数）
+  - **渲染层**：阶段 2 后把 `valid===false` 的条目**从 `worldbooks` 移除**（含清 `activeWorldbook`）+ 日志报告
+- **行为权衡（有意设计）**：
+
+  | 场景 | 行为 |
+  |---|---|
+  | **首次打开**（无缓存） | 秒开先列出全部 `.json`（可能含诱饵）→ 阶段 2 后台**剔除**（约 1~2s 后消失） |
+  | **二次打开**（有缓存） | 阶段 1 **精准列出**，诱饵**从不出现**，且 **0 次读盘** |
+
+  ⇒ 严格优于修复前（修复前首次打开要 **151s** 白屏）。**「先快后准」比「先准后慢」体验好得多。**
+- **教训**：**任何「为了性能跳过某一步」的优化，必须先确认那一步不是「正确性关卡」**。
+  若确实不能跳过，就**找一个不读文件的替代信号**（本次用的是**缓存里的既有判定**）。
+- **验证**：`scripts/probes/_probe-wb-valid-gate.mjs`（**9/9**，需**全新 profile** 才能测「首次」路径）：
+  首次最终入库 **1001 = 磁盘有效数**、剔除 **80 = 磁盘无效数**、零漏收；
+  二次阶段 1 **精准列出 1001**（诱饵从不出现）且 **47ms**；无渲染期错误
+
+### 🐌 压测揭出的性能边界（PK-25，⬜ 未修，已落档）
+
+- **现象**：内容级查重在 **5401 本 / 49.6GB** 库上**运行超过 25 分钟仍未完成**（CPU 持续满载，未死锁）
+- **根因**：MinHash(96) + LSH(8 bands × 12 rows) 只做了**候选预过滤**，**桶内仍是朴素两两比较**（$O(\text{bucket}^2)$）。
+  LSH 的设计假设是「**桶小、桶多**」，而本次压力库是**硬链接多轮放大**的产物 —— 5401 本**几乎全部同源**，
+  大量项落进**同一批桶**（每桶数百~上千项）→ $5401^2/2 \approx 1.46\times10^7$ 对，
+  单对还要跑 96 次整数比较的 `estimateSimilarity` → **亿级运算**
+- **定性**：这是**压力库的构造特性**，**不是真实用户场景**（真实库「5000 本几乎完全相同」不成立）。
+  但用户确实可能有一条「**批量复制后改名**」的历史库，所以仍值得留一条护栏
+- **修复方向（待评估）**：① 桶内按签名前缀**二次分桶**；② 桶内**上限 + 抽样**（超限提示）；
+  ③ 分片 `yield` 保证界面不卡（当前已不卡，仅耗时）；④ 进度条改显示「**已比对 X / Y 对**」而非只显示项数
+
+---
+
+## 🩹 未发布 · 秒开回归第二处：世界书「列表态」字段缺失的消费者全面清理（PK-26，2026-09-22）
+
+> 用户实测报出（原话）：「**对比功能崩溃了，进度条崩了，导出乱串，发现 0 组疑似重复，依旧从 0 开始依旧是 0**」
+> ｜ 缺陷：PK-26（🔴 已修）｜ 详述：[`BUG-性能与大库.md` PK-26](docs/bugs/BUG-性能与大库.md)
+
+### ✨ 用户可感知的变化
+- **查重结果不再反向**：以前大库下同名查重会显示「触发词重合度 **0%（0 条）**」，
+  用户据此会**误删掉正确的书**；现在给出真实重合度
+- **世界书筛选恢复正常**：「1-15 条 / 15+ 条 / 空书」以前在大库下**恒为 0 本**，现在准确
+- **复制 / 合并 / 导出世界书不再产出空书**：以前大库下复制出的副本、合并结果、导出文件可能**词条全丢**
+- **世界书词条编辑不再崩溃**：以前点「➕ 新增词条」等操作会直接抛错、整个编辑器失效
+- **世界书库统计不再全为 0**（词条总数）；**全库词条搜索不再恒空**
+- **世界书改名、图标、图谱**在大库下行为一致
+
+### 🧩 实现要点（内部）
+- **根因（一个，四处症状）**：PK-23 秒开把列表态 `wb.data` 从「总是有」改成「可能没有」
+  （`dataLoaded:false` + `data:null`），**但消费端没跟着改** —— 全项目约 40 处仍直接读 `wb.data.entries` / `wb.data.name`。
+  **静默算出 0 比崩溃更坏**：用户看到「重合度 0%」会误删正确的书
+- **修复（两轮）**：
+  1. **源头补齐**：秒开阶段 1/2 给出轻量替代字段 `entryCount` / `wbName`；
+     消费点统一改为「**优先轻量字段，需要正文时才 `ensureWorldbookLoaded`**」
+  2. **穷举清理**：`grep` 全库 `wb.data` 逐处过筛，补掉第一轮漏掉的 **10 类**消费点 ——
+     全库词条搜索调用点未跟上新签名（恒空）、库统计（全 0）、筛选器（恒 0）、复制/合并/导出（**空书**）、
+     词条 IDE 写入口（**TypeError 崩溃**）、导入候选（空白）、差异比对图标、改名不生效、图谱与保存
+- **⚠️ 教训（与 PK-24 是同一条）**：**改「列表态数据结构」时必须把所有读它的消费者一起改。**
+  且「**按症状修永远不够**」—— 第一轮只改了用户报出的症状对应的几处，第二轮 `grep` 才发现还有 10 类漏网；
+  凡「按需 / 懒加载」改造，**必须先 `grep` 出全部消费者再逐个决定**（改读轻量字段 / 显式懒加载 / 明确降级提示）
+- **⚠️ 第三轮：修「第一轮修复本身引入的新风险」**（实测探针暴露）——
+  同名查重逐本载入 1001 本正文时：① 逐本 `addLog` + 逐本 `triggerRef` → **千次侧栏重渲染**；
+  ② 载入后**从不释放** → 6.97GB 常驻，**重演 PK-20 的 OOM**。
+  修：新增 `{ batch: true }` 批量模式（不逐本刷日志 / 不逐本重渲染，读完统一刷新一次）
+  + 新增 `releaseWorldbookBody()`（用后释放，仅释放扫描期已判 `heavy` 的书）。
+  > **同一份代码库里同一个坑被踩了两次**：内容级查重早有「用后释放」，同名查重没有。
+  > ⇒ 凡「按需载入正文」的批量流程，**必须同时有对应的释放动作**，否则等于把懒加载又改回常驻。
+- **统计口径的取舍（有意设计）**：世界书库统计**不能**对全部书按需载入（5000 本全读会重演 PK-20 的 OOM）——
+  词条总数走轻量 `entryCount`；Token / 常驻 / 触发词覆盖率只统计**已载入**的书，
+  覆盖率分母改用**已载入词条数**（否则懒加载大库会显示假「0%」）
+
+### 🔬 验证
+- `npm test` → **471 pass / 0 fail**；`npm run build:web` 通过；`get_errors` 全清
+- **真实启动冒烟**（隔离 profile + CDP 9370）：无渲染期错误、无 TDZ
+- `scripts/probes/_probe-instant-regression.mjs`（s1000 / **1001 本**）：
+  - 修复前：`_entryCount` 大量为 0、重合度 **0%**（反向结论）
+  - 修复后：秒开态 `hasEntryCount` / `hasWbName` = **1001 / 1001**，
+    `wbEntryCount()` 返回真实值（**397 / 1905 / 1905**），同名查重 **25 组**且 `_entryCount` 全为 **1905**、
+    `_diffInfo` 为「⚠️ 词条内容完全重合」（**不再是反向的 0%**）；差异比对正确走世界书分支（不再误报「设定完全一致」）
+- `scripts/probes/_probe-wb-stress-5k.mjs`（s5000 / **5401 个 .json = 有效 5001 + 诱饵 400**）：
+  - ⚡ 阶段 1 **326ms**、元数据 **5001/5001**、秒开后堆 **19MB（0.5%）**
+  - 完整扫描 **173.2s**、入库 **5001** / 跳过 **400**（零分歧）、扫描后堆 **345MB（8.2%）**
+  - **★ 筛选「15+条」→ 命中 5001**（修复前恒为 **0**，即用户报的「依旧从 0 开始依旧是 0」）
+  - 搜索「改写」**1976ms** / 命中 **800**；侧栏存活；渲染期错误 **0**
+- `scripts/probes/_probe-pk26-release.mjs`（s1000 / **1001 本**，专项验证「用后释放」）：
+  - 同名查重 **70.8s / 25 组**；已载入本数 **0 → 峰值 40 → 终值 1**（**证明逐本载入后确实释放，未累积**）
+  - 堆（GC 后）**36MB → 40MB（+4MB）**；词条数抽样 **397 / 1905 / 1905**（真实值）；渲染期错误 **0**
+  - ⚠️ 判据踩坑：最初写「查重后 `heavy && dataLoaded` 必须为 0」→ **恒失败 1 本**（扫描器按内联预算主动载入，属 PK-20 既有设计）；
+    正确判据是看 **「峰值 → 终值」的回落**，而非「终值必须为 0」
+
+---
+
+> **v2.2.12 专项（2026-09-19）**：角色卡「插件」页签（卡内酒馆助手脚本可视化编辑）
+> + CT-19 卡内面板全局库缺失修复 + Python 一键检查工具。规格：`docs/规格与计划/角色卡插件页签-实现规格.md`。
 
 ---
 
@@ -212,7 +644,7 @@
   世界书 / 预设 / 插件三个库补齐翻页条（此前仅角色卡库有分页）；切换每页数量时页码自动收回防空白页；
   翻页条统一样式为**单行紧凑、固定侧栏底部**（小箭头按钮，不再浮在卡片上/不再占两行）
 - 文案修正：推荐模板「来源」不再显示开发机样本库路径（改中性描述）
-- 新增端到端脚本 `scripts/auto-group-test.mjs`（隔离库真实移动/回滚；`--prep` / `--cleanup`）
+- 新增端到端脚本 `scripts/tools/auto-group-test.mjs`（隔离库真实移动/回滚；`--prep` / `--cleanup`）
 
 ### 🔬 验证
 - `npm test` → **402 pass / 0 fail**（35 个文件；本次新增 5 个文件 / 51 例：自动分组 20 + 模板 5 + 空组收集 6 + LLM 12 + 打标反馈 8）
@@ -483,9 +915,9 @@
 - 覆盖：语法（Node/Python/JSON）、单测、构建、文档相对链接、文档脚本登记、版本号一致性、
   **对外文件禁词（只扫 RELEASE_NOTES 最新段）**、仓库卫生（缓存/临时文件）、探针脚本语法、preload 暴露面
 - 用法：`--fast / --only / --skip / --changed / --strict / --json / --list / --new / --ascii`；退出码 0/1/2
-- **卡内插件端到端**：`scripts/card-plugins-test.mjs`（黑盒 DOM：页签存在 / 面板渲染 / 徽标与条目数一致 /
+- **卡内插件端到端**：`scripts/tools/card-plugins-test.mjs`（黑盒 DOM：页签存在 / 面板渲染 / 徽标与条目数一致 /
   展开内嵌编辑器 / ⛶ 全屏放大与 Esc / 只读分组 / 无渲染层报错；可选 `TEST_ADD=1` 验「空容器卡一键新建」，仅改内存不落盘）
-- **卡内插件离线探针**：`scripts/_probe-card-plugins.mjs "<库根>" [--perf]` —— 容器形态统计（路径 × 卡数 × 样例 + 脚本字段组合）
+- **卡内插件离线探针**：`scripts/probes/_probe-card-plugins.mjs "<库根>" [--perf]` —— 容器形态统计（路径 × 卡数 × 样例 + 脚本字段组合）
   与解析开销（实测 76 张库：主流形态 14 / 键值对数组 11 / 旧版 4；最重卡 0.010ms、均值 0.003ms）
 
 ### 📄 文档
@@ -559,7 +991,7 @@
 ### 🧾 本次版本动作
 - `package.json` / `package-lock.json`：`2.2.10` → `2.2.11`
 - 文档三件套 + `docs/bugs/`（CT-17/18）+ 规格（`桌面版测卡记忆v4.1-实现规格.md`）
-- 新增热测试脚本 `scripts/_heat-v41.mjs` / `_heat-v41-ui.mjs`
+- 新增热测试脚本 `scripts/tools/_heat-v41.mjs` / `_heat-v41-ui.mjs`
 
 ---
 
@@ -711,7 +1143,7 @@
 ### 🔬 验证
 - `npm test` → **177 / 177 通过**（新增 `test/searchIndex.test.mjs` 6 项：重叠重建去重、旧对象残留、内容完整性、重复 add 幂等、结果唯一化、idle 不回调仍能推进；修复前 3 红）。
 - `npm run build:web` → 构建成功。
-- 大库端到端（`scripts/library-dup-search-refresh.mjs`）：**A~F 全阶段库层与列表层 `dupPaths = 0`**，连点刷新 6 次后库仍稳定 11,186 张（修复前会变 0），全程无崩溃。
+- 大库端到端（`scripts/tools/library-dup-search-refresh.mjs`）：**A~F 全阶段库层与列表层 `dupPaths = 0`**，连点刷新 6 次后库仍稳定 11,186 张（修复前会变 0），全程无崩溃。
 
 ---
 
@@ -726,7 +1158,7 @@
 ### 🟡 修复 6：正则/状态栏脚本「添加后必须切 Tab 才看到」「删除没有任何提示」
 - **根因**：`addRegexScript` / `deleteRegexScript` 原地改 `extensions.regex_scripts` 数组却**没有 `triggerRef(cardData)`**（同文件的 `syncRegexScriptField`、批量克隆/删除都有这个调用）→ `cardData` 是 `shallowRef`，深层变更不触发视图 → 列表不刷新，切 Tab 时子树重挂载才显示；删除既无二次确认、也无操作日志，点了像没反应。
 - **修复**：两处补 `refreshCardData()` + 操作日志；删除改为 `confirmDialog`（原生「确认操作」对话框，文案点明脚本名、是否状态栏模板、需保存卡片才写回文件）+ 删除后立即刷新列表。
-- **实测**（dev + CDP，`scripts/_probe-regex-ui.mjs`，21 条脚本的卡）：点 ➕ 后**未切任何 Tab** 列表立即 21 → 22；点 🗑️ 弹出原生确认框 → **取消**不删（仍 22）→ **确定**立即删除并刷新（21）。
+- **实测**（dev + CDP，`scripts/probes/_probe-regex-ui.mjs`，21 条脚本的卡）：点 ➕ 后**未切任何 Tab** 列表立即 21 → 22；点 🗑️ 弹出原生确认框 → **取消**不删（仍 22）→ **确定**立即删除并刷新（21）。
 
 ### 🔬 验证
 - `npm test` → 177 / 177 通过；`npm run build:web` → 构建成功。
@@ -781,7 +1213,7 @@
 ### 🔬 验证
 - `npm test` → **178 / 178** 通过（5.2s，进程正常退出）；`npm run build:web` → `built in 2.07s`。
 - 大库加载 **16.0s**（修复前 36.9~85.3s 取决于缓存形态），11,186 张全部到位、跳过文件汇总正确。
-- `scripts/library-dup-search-refresh.mjs`：全程 `dup(lib)=0 / dup(list)=0`，库稳定 11,186 张，连点刷新 ×6 无崩溃（堆峰值 3.3GB）。
+- `scripts/tools/library-dup-search-refresh.mjs`：全程 `dup(lib)=0 / dup(list)=0`，库稳定 11,186 张，连点刷新 ×6 无崩溃（堆峰值 3.3GB）。
 
 ---
 
@@ -845,7 +1277,7 @@
 - 新增 `migrateChatKeys` 并挂到 3 处路径变化点（`moveCardToGroup` / `renameCurrentCategory` / `replaceCardImage`）。
 
 ### 🧰 压测工具链（新增）
-- `scripts/capacity-check.ps1`：造副本 → 隔离 profile → 启动 → 采样 → 刷新压测 → 汇总 → 清理；
+- `scripts/tools/capacity-check.ps1`：造副本 → 隔离 profile → 启动 → 采样 → 刷新压测 → 汇总 → 清理；
   支持 `-ReplicaDir`（复用副本，免 20GB 复制）/`-Hold`（保留现场供后续探针）/`-Keep`。
 - 探针：`_cdp-mem.mjs`（堆/索引/守门员，`--refresh`/`--gc`）、`_heap-audit.mjs`（堆构成按字段拆）、
   `_cdp-text.mjs`（应用自身进度/压缩状态）。
@@ -1099,9 +1531,9 @@
 - 🔴 **事故记录**：解耦修复中一次 `replace_string_in_file` 发生错位——`App.vue` ctx 行 `currentCustomPushTarget` 被拆成 `curren autoTagOnImport,tCustomPushTarget` 导致 Vite 编译崩溃（`Unexpected token`）。已修复（该行恢复为 `currentCustomPushTarget, autoTagOnImport,`）。⚠️ 教训：多字段单行 ctx 追加字段时，必须用**行首独立锚点 + 整行替换**，勿用模糊子串。
 - ⚠️ 测试教训：`makeMock` 新增 mock 参数后必须同时暴露到 **return 对象**；`cardCrud.test.mjs` 用 V2 结构（`data.data.tags`），断言勿写 `card.data.tags`
 
-### 🐛 dev 启动终端中文乱码（`scripts/dev-run.ps1` 新增）
+### 🐛 dev 启动终端中文乱码（`scripts/tools/dev-run.ps1` 新增）
 - **根因**：Windows PowerShell 终端代码页默认 GBK(936)，Electron/Node/Chromium 输出 UTF-8 → 中文日志与系统错误消息乱码（`閫氬父姣忎釜濂楁帴瀛楀湴鍧€` 等）；libpng/WSALookup 无害噪音夹杂
-- **修复**：新增 `scripts/dev-run.ps1` 一键启动脚本，启动前 `chcp 65001` + `[Console]::OutputEncoding=UTF8` 双保险切 UTF-8，实测 dev 启动日志中文全部正常显示
+- **修复**：新增 `scripts/tools/dev-run.ps1` 一键启动脚本，启动前 `chcp 65001` + `[Console]::OutputEncoding=UTF8` 双保险切 UTF-8，实测 dev 启动日志中文全部正常显示
 - ⚠️ 注意：该乱码仅影响**开发终端显示**，与应用界面/打包版无关（界面 HTML 恒 UTF-8 charset）
 
 ### 🧪 测试
@@ -1173,7 +1605,7 @@
 ### 🛠️ 内置 18 大分类自定义（改名 / 删除(隐藏) / 恢复）
 - `tagCategories.js` / `TagCategoryModal.vue`：内置大分类开放改名、删除（=隐藏，非物理删）、一键恢复默认
 - `useConfigPersistence.js`：内置分类定制持久化（`app_config.json`），重启不丢
-- 新增独立 Electron CDP 端到端脚本 `scripts/builtin-cat-test.mjs`（改名/删除/恢复/清理全链路）
+- 新增独立 Electron CDP 端到端脚本 `scripts/tools/builtin-cat-test.mjs`（改名/删除/恢复/清理全链路）
 
 ### 🔧 效果页沙箱预览渲染修复（`Unexpected token ':'` 根因消除）
 - **路径分隔符匹配 bug**（`pluginScanner.js`）：`manifest.js` 声明正斜杠 `dist/index.js`，而 `collectExtensionFiles` 生成反斜杠路径，`endsWith` 失配 → bundle 读不到、回退相对路径。统一 `/` 归一后再比较
@@ -1258,7 +1690,7 @@
 - 字号滑块改「草稿值 + 松手提交」：拖动只更新滑块+数字，松手才写全局 `appSettings` → 不再每帧触发 `--ui-fs/--workspace-fs` 全页面 reflow + localStorage 写入
 
 ### 🧪 测试基建
-- `package.json` test 脚本限定 `test/**/*.test.mjs`（`node --test` 默认会把 `scripts/live-vector-test.cjs` Electron 脚本误收集）
+- `package.json` test 脚本限定 `test/**/*.test.mjs`（`node --test` 默认会把 `scripts/tools/live-vector-test.cjs` Electron 脚本误收集）
 - `cardCrud.test.mjs` 优先级链①断言更新：subFolder 卡分类取文件夹名，但标签恢复 overlay（匹配修复后新行为）
 
 ---

@@ -1,7 +1,7 @@
 # CT · BUG 记录 — 测卡工作区（对话测试）
 
 > 领域：角色卡「聊天测试」侧栏与引擎（7 分区、预设装配、世界书注入、EJS/MVU 变量、长期记忆）。
-> 桌面版实现在 `js/components/ChatTestSidebar.vue` + `js/composables/chat/*`（16 个模块）；
+> 桌面版实现在 `js/components/ChatTestSidebar.vue` + `js/composables/chat/*`（17 个模块）；
 > 移动版为 `JSK管理APP`（Android/Capacitor）；本文件里 CT-04 ~ CT-08 即来自 **v1.10.21 移动版专项实测**（变量树 / 预设条目 / 本地导入）。
 > 规格文档：[`../规格与计划/桌面版测卡工作区-实现规格.md`](../规格与计划/桌面版测卡工作区-实现规格.md)、[`../规格与计划/移动版测卡引擎-移植前置检查报告.md`](../规格与计划/移动版测卡引擎-移植前置检查报告.md)
 > 总索引见 [`README.md`](README.md)。
@@ -279,6 +279,37 @@
   —— 这次就是「修了主路径、漏了回退分支」。
 - **来源**：本轮插件页签回归测试时发现（2026-09-19）
 
+### CT-20 ｜ 🟡 测卡区**不识别外链界面（loader）** → `$('body').load('URL')` 的卡面板完全不显示
+
+- **现象**：卡里用外链界面（`<script>$('body').load('https://…')</script>` 或 `<iframe src="https://…">`）
+  的模板，在**测卡区完全不显示**（连空白面板都没有）；但**同一张卡**在**卡编辑器预览面板**里
+  却能正常显示外链界面。
+- **根因（只验证不猜）**：两处**分类器口径不一致** ——
+  · 卡编辑器预览：`useStatusbarPreview.classifyTemplate` **早就有** `loader` 分类（5 类之一），
+    `EditorPanel.vue` 也有 `<iframe :src="tpl.loaderUrl">` 渲染分支；
+  · **测卡区**：`useChatRender.segmentMessage` 只产出 `text` / `html` 两类，
+    `htmlNeedsIframe()` 也只看 `<style>/<script>/<html>` —— **完全没有 loader 概念** ⇒
+    loader 内容要么被判成 `html`（进 srcdoc，远程 URL 不会被加载）、要么留在文本段（当纯文本渲染）。
+  > 与 CT-19 同族（**同一能力在两处实现，只补了一处**），但这次是「能力缺口」而非「分支遗漏」。
+- **修复（3 处，口径与 `useStatusbarPreview` 对齐）**：
+  1. `useChatRender.js` 新增 `loaderUrlOf(text)` —— 与预览面板**同口径**的宽松匹配
+     （`$('body').load('URL')` 单双引号/空格/换行/无 `<body>` 包裹，以及 `<iframe src>` / `<script src>` 直链）；
+     ⚠️ **只认 `http(s)://` 绝对地址**（拒绝 `app://` / `file://` / `javascript:` / 相对路径，
+     防卡内容诱导加载内部协议）；
+  2. `segmentMessage` / `pushTextSegments` / `promoteHtmlSegments` 三处产出 **`loader` 段**
+     （`{type:'loader', url, content}`）；优先级：loader > html > text；
+  3. `ChatPanelSeg.vue` 新增 `loader` 分支：`<iframe :src="seg.url" sandbox="allow-scripts allow-popups"
+     referrerpolicy="no-referrer">`（**直接 src 加载远程 URL**，不带 srcdoc；与预览面板同口径）。
+- **验证**：
+  - `test/chatRender.test.mjs` 新增 **8 例**（`$().load` / `<iframe src>` / 围栏内 loader /
+    宽松匹配 3 种写法 / **非 http(s) 协议全部拒绝** 4 种 / 普通 HTML 不误判 / `promoteHtmlSegments` 升级 /
+    纯文本不升级）→ `npm test` **542 pass / 0 fail**；
+  - `npm run build:web` ✅；真实启动冒烟无 `[Vue 错误]`。
+- **防再犯**：**同一个能力不要在两处各实现一套** —— 这次「卡编辑器有、测卡区没有」正是
+  CT-19 教训（「多分支生成同一类文档」）的**升级版**：不只是分支遗漏，而是**整个能力缺失**。
+  发现两处都有类似逻辑时，应**先 grep 有没有现成实现可对齐**（本次直接对齐了 `useStatusbarPreview` 的正则）。
+- **来源**：2026-09-23 遗留任务盘点（规格 §五「尚未完成（三期）」标 ⬜ 的 CT-04）
+
 ---
 
 ## 四、本领域改动前的自检清单
@@ -286,7 +317,7 @@
 2. 读 **localStorage / IPC 存储**的 `computed` → 必须有响应式依赖（`void xxxVersion.value`），否则永久缓存（[CT-02]）。
 3. **写回预设**时，`prompt_order` 与 `prompt.enabled` **两处都要写**（[CT-09]）。
 4. 新增任何「按卡片 path 派生」的键 → 必须在移动/重命名路径上迁移（[CT-10]）。
-5. 引擎改动后跑：`npm test` + `scripts/chat-sidebar-test.mjs`（生产 `app://`）+ `scripts/chat-engine-test.mjs`（dev + 调试句柄）。
+5. 引擎改动后跑：`npm test` + `scripts/tools/chat-sidebar-test.mjs`（生产 `app://`）+ `scripts/tools/chat-engine-test.mjs`（dev + 调试句柄）。
 6. 端到端测试**驱动真实 UI**，不要自己 import 引擎模块（[CT-03]）。
 7. 改动**卡内 HTML 面板（状态栏/界面型段）**或 `buildHtmlSrcdoc` → 对照 [CT-13]：
    ① 文档必须走 `app://` 内存路由（不然生产 CSP 会拦内联脚本）；

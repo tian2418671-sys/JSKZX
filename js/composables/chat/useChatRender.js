@@ -6,10 +6,17 @@
  *   - 文本段 → 现有 renderChatHtml（Markdown 子集 + DOMPurify 清洗）
  *   - HTML 段（```html 围栏 / <style>/<script> 完整模板）→ sandbox iframe（srcdoc，
  *     禁同源权限，对齐方案 configureSecure 的安全语义；项目已有 statusSrcdoc 先例）
+ *   - 🌐 **外链段（loader）**：`$('body').load('URL')` / `<iframe src="URL">` 直链界面 →
+ *     直接 `iframe src=URL`（sandbox，不带 srcdoc）
  *   - 分段优先级：完整 HTML 文档模板 > ```html 围栏 > 普通文本
  *
  * 流式挂起检测（方案第 6 节 splitPending）：未闭合围栏/标签在流式期间不渲染，
  * 避免半截面板闪烁（本端非流式 API，保留该函数供后续接入）。
+ *
+ * 🔧 CT-04（2026-09-23）：补 **loader 段**。此前只处理 `html` 段（`htmlNeedsIframe`），
+ *    卡里用 `$('body').load('URL')` 的界面在**测卡区完全不显示** ——
+ *    而卡编辑器预览面板（`useStatusbarPreview.classifyTemplate`）**早就有**该能力，
+ *    两边口径不一致。现对齐：分类器口径与 `useStatusbarPreview` 保持一致（宽松匹配）。
  */
 
 /** ```html 围栏（语言标记可省略；大小写不敏感） */
@@ -17,6 +24,25 @@ const HTML_FENCE_RE = /```html\s*\n?([\s\S]*?)```/gi;
 // 🚀 裸 ``` 围栏(无语言标记):酒馆部分卡的模板(如 JS-Slash-Runner 状态栏)输出
 //    "```\n<head><script type=module>..." —— 内容像 HTML 时按面板渲染
 const BARE_FENCE_RE = /```\s*\n?([\s\S]*?)```/gi;
+
+/**
+ * 🌐 外链界面（loader）URL 提取 —— 与 `useStatusbarPreview.classifyTemplate` 的 loader 分支**同口径**
+ *   · `$('body').load('URL')`（宽松：单双引号 / 空格 / 换行 / 不要求 <body> 包裹）
+ *   · `<iframe src="URL">` / `<script src="URL">` 直链
+ *   ⚠️ 只认 `http(s)://` 绝对地址（防 `app://` 等内部协议被卡内容诱导加载）
+ * @param {string} text
+ * @returns {string|null} URL 或 null
+ */
+export function loaderUrlOf(text) {
+    const t = String(text || '');
+    const load = t.match(/\$\(\s*['"]body['"]\s*\)\s*\.\s*load\s*\(\s*['"]([^'"]+)['"]/i);
+    if (load && /^https?:\/\//i.test(load[1].trim())) return load[1].trim();
+    const iframe = t.match(/<iframe[^>]+src\s*=\s*['"]([^'"]+)['"][^>]*>/i);
+    if (iframe && /^https?:\/\//i.test(iframe[1].trim())) return iframe[1].trim();
+    const script = t.match(/<script[^>]+src\s*=\s*['"]([^'"]+)['"][^>]*>/i);
+    if (script && /^https?:\/\//i.test(script[1].trim())) return script[1].trim();
+    return null;
+}
 
 /** 段类型：text=文本段 html=面板段 */
 
@@ -57,7 +83,9 @@ export function segmentMessage(text) {
         const before = src.slice(last, m.index);
         pushTextSegments(out, before);
         const html = (m[1] || '').trim();
-        if (html) out.push({ type: 'html', content: html });
+        if (html) out.push(loaderUrlOf(html)
+            ? { type: 'loader', url: loaderUrlOf(html), content: html }
+            : { type: 'html', content: html });
         last = m.index + m[0].length;
     }
     pushTextSegments(out, src.slice(last));
@@ -65,7 +93,7 @@ export function segmentMessage(text) {
     return out;
 }
 
-/** 文本内容 → 追加 text/html 段(裸围栏内像 HTML 则升级为 html 段) */
+/** 文本内容 → 追加 text/html/loader 段（裸围栏内像 HTML 则升级；loader 优先） */
 function pushTextSegments(out, raw) {
     if (!raw) return;
     let last = 0;
@@ -73,17 +101,27 @@ function pushTextSegments(out, raw) {
     let m;
     while ((m = BARE_FENCE_RE.exec(raw)) !== null) {
         const before = raw.slice(last, m.index).trim();
-        if (before) out.push({ type: 'text', content: before });
+        if (before) pushPlain(out, before);
         const inner = (m[1] || '').trim();
         if (inner) {
-            out.push(fenceLooksLikeHtml(inner)
+            const lu = loaderUrlOf(inner);
+            if (lu) out.push({ type: 'loader', url: lu, content: inner });
+            else out.push(fenceLooksLikeHtml(inner)
                 ? { type: 'html', content: inner }
                 : { type: 'text', content: '```\n' + inner + '\n```' });
         }
         last = m.index + m[0].length;
     }
     const tail = raw.slice(last).trim();
-    if (tail) out.push({ type: 'text', content: tail });
+    if (tail) pushPlain(out, tail);
+}
+
+/** 非围栏文本：整体是 loader 则出 loader 段，否则出文本段 */
+function pushPlain(out, text) {
+    if (!text) return;
+    const lu = loaderUrlOf(text);
+    if (lu) { out.push({ type: 'loader', url: lu, content: text }); return; }
+    out.push({ type: 'text', content: text });
 }
 
 /**
@@ -212,8 +250,12 @@ function injectIntoHead(doc, snippet) {
  */
 export function promoteHtmlSegments(segments) {
     return (segments || []).map((seg) => {
-        if (seg && seg.type === 'text' && htmlNeedsIframe(seg.content)) {
-            return { type: 'html', content: seg.content };
+        if (!seg) return seg;
+        // 🌐 CT-04：文本段里藏着外链界面（正则替换产出的 loader，无围栏）→ 升级为 loader 段
+        if (seg.type === 'text') {
+            const lu = loaderUrlOf(seg.content);
+            if (lu) return { type: 'loader', url: lu, content: seg.content };
+            if (htmlNeedsIframe(seg.content)) return { type: 'html', content: seg.content };
         }
         return seg;
     });

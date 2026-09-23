@@ -42,25 +42,12 @@
             </button>
         </div>
 
-        <!-- 📊 T2 真进度条：**放在模式切换之外**，任何视图下扫描都能看到 ——
-             启动自动恢复世界书库时 appMode 可能还是 characters，挂在世界书视图内会让
-             「启动即扫描」这段完全看不到进度（点了没反应 = 判定坏了，对照 AR-38）。
-             平滑前推至 100% 后由 composable 的 finally 复位。 -->
-        <div v-if="isWbScanning" class="px-3 py-2 border-b border-zinc-800 bg-zinc-900 shrink-0 z-30">
-            <div class="flex items-center justify-between mb-1.5">
-                <span class="text-[11px] font-bold text-emerald-400">📊 正在扫描世界书目录…</span>
-                <span class="text-[11px] font-mono text-zinc-400">
-                    {{ wbScanProgress.done }} / {{ wbScanProgress.total || '?' }}
-                    <span v-if="wbScanProgress.total" class="text-emerald-400">（{{ wbScanPercent }}%）</span>
-                </span>
-            </div>
-            <div class="h-1.5 w-full bg-zinc-800 rounded-full overflow-hidden">
-                <div class="h-full bg-gradient-to-r from-emerald-600 to-emerald-400 transition-all duration-200 ease-out"
-                     :style="{ width: wbScanPercent + '%' }"></div>
-            </div>
-            <div v-if="wbScanProgress.current" class="mt-1 text-[10px] text-zinc-500 truncate"
-                 :title="wbScanProgress.current">📄 {{ wbScanProgress.current }}</div>
-        </div>
+        <!-- ⛔ 已移除：世界书扫描进度条（2026-09-22 设计修正）
+             用户指出：进度**不是「浏览/加载世界书库」的体现**，而是「**查重 / 版本对比**」流程的体现
+             （规格 TC-07：「上百本世界书查重：有进度指示 + 当前项名」；最终方案 §185：「进度应挂到扫描阶段」）。
+             ⇒ 进度条已移入**查重弹窗内部**（WbDedupeModal / DedupeModal / ContentDedupeModal）；
+               浏览库改用日志反馈（`scanWorldbookDir` 里的 addLog）。
+             此处刻意留注释：历史上这里挂错过一次，别再挂回来。 -->
 
         <!-- ============ 角色卡模式 ============ -->
         <template v-if="appMode === 'characters'">
@@ -498,10 +485,14 @@
                      :class="activeWorldbook && activeWorldbook.path === wb.path ? 'bg-amber-600/20 border-amber-500/50' : 'bg-zinc-800/50 border-zinc-700/50 hover:bg-zinc-700'"
                      class="p-3 rounded-lg border cursor-pointer transition flex flex-col gap-1.5">
                     <div class="flex justify-between items-center gap-1">
-                        <span class="text-xs font-bold text-zinc-200 truncate">{{ (wb.data && wb.data.name) || wb.name }}</span>
+                        <span class="text-xs font-bold text-zinc-200 truncate">{{ wbDisplayName(wb) }}</span>
                         <div class="flex items-center gap-1 shrink-0">
+                            <!-- 🧠 PK-20：未载入正文的书**仍显示准确词条数**（扫描时已 parse，零额外成本），
+                                 另加「按需」徽标说明正文尚未读入（点开时才读，避免大库内存溢出）。 -->
                             <span class="text-[10px] px-1.5 py-0.5 rounded font-mono bg-zinc-800 text-zinc-400 border border-zinc-700 whitespace-nowrap">{{ wbEntryCount(wb) }} 词条</span>
-                            <span v-if="wb.heavy && wb.dataLoaded === false" class="text-[10px] px-1.5 py-0.5 rounded font-mono bg-amber-900/40 text-amber-300 border border-amber-600/40 whitespace-nowrap" title="超大世界书（正文按需加载）">按需</span>
+                            <span v-if="wb.heavy && wb.dataLoaded === false"
+                                  class="text-[10px] px-1.5 py-0.5 rounded font-mono bg-amber-900/40 text-amber-300 border border-amber-600/40 whitespace-nowrap"
+                                  title="正文未载入（点开时才读取，避免大库内存溢出）">按需</span>
 
                             <!-- ⚙️ 操作按钮折叠/展开 -->
                             <button @click.stop="wb._showActions = !wb._showActions"
@@ -1026,10 +1017,8 @@ export default {
             pluginPage, pluginTotalPages, pluginPageSlice, changePluginPage,
             wbFilterType: ctx.wbFilterType,
             filteredWorldbooks: ctx.filteredWorldbooks,
-            // 📊 T2 世界书扫描真进度条
-            wbScanProgress: ctx.wbScanProgress,
-            isWbScanning: ctx.isWbScanning,
-            wbScanPercent: ctx.wbScanPercent,
+            // ⛔ 已移除 wbScanProgress / isWbScanning / wbScanPercent 绑定：
+            //    进度条已移入查重弹窗（2026-09-22 设计修正），侧栏不再显示扫描进度。
             openWbMergeModal: ctx.openWbMergeModal,
             openGlobalEntrySearch: ctx.openGlobalEntrySearch,
             importWbFromJsonl: ctx.importWbFromJsonl,
@@ -1046,9 +1035,11 @@ export default {
             // 🛡️ AR-40：`wbEntryCount` / `selectWorldbook` 被世界书列表模板调用
             //    （`{{ wbEntryCount(wb) }} 词条`、`@click="selectWorldbook(wb)"`），
             //    漏绑定 → 渲染期 `_ctx.X is not a function` → **整个侧边栏被卸载消失**。
+            // ⚡ 秒开：`wbDisplayName` 同理必须绑定（书名不再能直接从 `wb.data.name` 取）。
             //    它们只被世界书分支用到，故其他三个模式一直正常、极易漏测
             //    （详见 docs/bugs/BUG-架构与渲染.md AR-40）。
             wbEntryCount: ctx.wbEntryCount,
+            wbDisplayName: ctx.wbDisplayName,
             selectWorldbook: ctx.selectWorldbook,
             openWbContextMenu: ctx.openWbContextMenu,
             openWbInFolder: ctx.openWbInFolder,

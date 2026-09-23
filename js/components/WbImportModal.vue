@@ -20,7 +20,7 @@
                             @click="$emit('pick-source', wb)"
                             :class="sourceBook && sourceBook.path === wb.path ? 'bg-emerald-600 text-white border-emerald-500' : 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700 border-zinc-700'"
                             class="px-2.5 py-1 rounded border text-xs font-bold transition shrink-0">
-                        {{ (wb.data && wb.data.name) || wb.name }} <span class="opacity-60">({{ (wb.data && wb.data.entries) ? wb.data.entries.length : 0 }})</span>
+                        {{ wbNameOf(wb) }} <span class="opacity-60">({{ wbCountOf(wb) }})</span>
                     </button>
                 </div>
             </div>
@@ -69,6 +69,16 @@ export default {
                 ? [...this.selectedEntries, uid]
                 : this.selectedEntries.filter(u => u !== uid);
             this.$emit('update:selectedEntries', next);
+        },
+        // ⚡ PK-26：秒开后 `wb.data` 为 null（懒加载）→ 书名/词条数必须走**轻量字段**，
+        //    否则列表里所有源世界书都显示「0 词条」（用户会以为源库空了）。
+        wbNameOf(wb) {
+            return (wb && (wb.wbName || (wb.data && wb.data.name) || wb.name)) || '未命名';
+        },
+        wbCountOf(wb) {
+            if (!wb) return 0;
+            if (typeof wb.entryCount === 'number') return wb.entryCount;
+            return (wb.data && Array.isArray(wb.data.entries)) ? wb.data.entries.length : 0;
         }
     }
 };
