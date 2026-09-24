@@ -39,6 +39,20 @@
                 </div>
             </div>
 
+            <!-- 🛑 DF-25：**真正不可保存**格式的常驻横幅（打开就看得见，不等保存才发现）——
+                 ⚠️ WebP 已不在其中（保存时会自动升级为 PNG，与 SillyTavern 行为一致）；
+                 此处只在「格式确实无法写入」时出现（如 JPEG），避免用户白改内容。 -->
+            <div v-if="!activeCardSavable && activeCardUnsavableReason"
+                 class="px-3 py-1.5 bg-amber-500/10 border-b border-amber-500/30 shrink-0 flex items-start gap-2">
+                <span class="text-amber-400 text-sm leading-5 shrink-0">⚠️</span>
+                <div class="text-[11px] text-amber-300/95 leading-5 min-w-0">
+                    <span class="font-bold">此卡片无法保存内容</span>（{{ activeCardUnsavableReason }}）——
+                    描述 / 人格 / 场景 / 开场白等**编辑不会写入文件**。
+                    <span class="text-amber-400/80">标签与分类不受影响（另有配置兜底）。</span>
+                    如需让编辑生效，请用「⚙️ 菜单 → 🖼️ 换卡图」把它转为标准 PNG 卡。
+                </div>
+            </div>
+
             <!-- 分组与标签工具栏（合并紧凑版） -->
             <div class="px-3 py-1.5 border-b border-zinc-800 bg-zinc-900 flex flex-wrap gap-x-3 gap-y-1 items-center shrink-0">
                 <div class="flex items-center gap-1.5 shrink-0">
@@ -2151,6 +2165,9 @@ export default {
             openImageModal: ctx.openImageModal,
             safeData: ctx.safeData,
             updateName: ctx.updateName,
+            // 🛑 DF-25：不可保存格式的常驻横幅
+            activeCardSavable: ctx.activeCardSavable,
+            activeCardUnsavableReason: ctx.activeCardUnsavableReason,
             cardTokenStats: ctx.cardTokenStats,
             translateCardContent: ctx.translateCardContent,
             isTranslating: ctx.isTranslating,

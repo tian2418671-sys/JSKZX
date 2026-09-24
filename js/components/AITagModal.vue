@@ -99,6 +99,15 @@
                                 <span class="text-indigo-700/70 ml-2">（①关闭后「导入时自动打标」同样不生效）</span>
                             </template>
                         </div>
+                        <!-- 🧠 R1+R2：仅 LLM 层启动时，分角色结构 + 结构化截取生效（在此明确告知 + 直达编辑入口） -->
+                        <div v-if="llmOnlyActive" class="mt-1.5 text-[10px] leading-relaxed bg-emerald-50 border border-emerald-200 rounded px-2 py-1 text-emerald-800 flex items-center gap-1.5 flex-wrap">
+                            <span>🧠 <b>仅 LLM 层启动</b> → 已启用「提示词分角色（System / Assistant / User / 预填充）+ <code>&lt;tags&gt;</code> 结构化截取」</span>
+                            <span class="px-1.5 rounded border"
+                                  :class="activeCotPrompt.trim() ? 'bg-emerald-100 border-emerald-300' : 'bg-gray-100 border-gray-300 text-gray-600'">
+                                {{ activeCotPrompt.trim() ? '🔗 思维链：' + ((activePromptPreset && activePromptPreset.cotMode === 'custom') ? '自定义' : '默认版') : '🔗 思维链：关闭' }}
+                            </span>
+                            <button @click="activeSection = 'prompts'" class="ml-auto shrink-0 underline hover:text-emerald-950">去分段编辑 →</button>
+                        </div>
                     </div>
 
                     <!-- 🧩🏷️ 1. 候选标签池 -->
@@ -280,8 +289,90 @@
                                         </div>
                                     </div>
                                     <div v-if="preset.expanded" class="mt-2.5 pt-2 border-t border-gray-200">
-                                        <label class="block text-[10px] text-gray-500 mb-1">System Prompt 详细内容设定：</label>
-                                        <textarea v-model="preset.content" @input="$emit('save-system-prompts')" :disabled="isAITagging" rows="3" class="w-full bg-white border border-gray-300 rounded p-2 text-gray-700 font-mono text-xs focus:border-indigo-500 focus:outline-none resize-y shadow-sm" placeholder="在此输入给 AI 的系统级微调指令..."></textarea>
+                                        <!-- 🧠 R1+R2 分角色结构：仅「只有 LLM 层启动」时生效 -->
+                                        <div class="flex items-center justify-between mb-1.5">
+                                            <label class="text-[10px] text-gray-500">提示词分角色设定（System / Assistant / User / 预填充）：</label>
+                                            <span class="text-[9px] px-1.5 py-0.5 rounded border"
+                                                  :class="llmOnlyActive ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-gray-100 text-gray-500 border-gray-200'"
+                                                  :title="llmOnlyActive ? '当前组合 = 只有 LLM 层 → 分角色结构已生效' : '只有 ①规则关 + ②向量关 + ③LLM开 时才生效'">
+                                                {{ llmOnlyActive ? '🟢 分角色结构已生效' : '⚪ 未生效（非「仅 LLM」组合）' }}
+                                            </span>
+                                        </div>
+                                        <div class="flex items-center gap-1 mb-1.5">
+                                            <button v-for="t in [{k:'system',i:'🧠',n:'System'},{k:'assistant',i:'💬',n:'Assistant'},{k:'user',i:'👤',n:'User'},{k:'prefill',i:'⚡',n:'预填充'},{k:'cot',i:'🔗',n:'思维链'}]" :key="t.k"
+                                                    @click="presetEditorTab = t.k" :disabled="isAITagging"
+                                                    class="px-2 py-0.5 rounded text-[10px] font-medium border transition flex items-center gap-1"
+                                                    :class="presetEditorTab === t.k ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-600 border-gray-300 hover:border-indigo-400'">
+                                                <span>{{ t.i }}</span><span>{{ t.n }}</span>
+                                                <span v-if="t.k === 'cot' ? presetCotText(preset).trim() : presetField(preset, t.k).trim()" class="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
+                                            </button>
+                                            <span class="ml-auto text-[9px] text-gray-400">{{ presetHasRoles(preset) ? '走预设三段' : '副字段留空 → 走程序默认' }}</span>
+                                        </div>
+
+                                        <!-- 🧠 System：角色与规则（主提示词） -->
+                                        <div v-show="presetEditorTab === 'system'">
+                                            <textarea :value="presetField(preset, 'system')" @input="setPresetField(preset, 'system', $event.target.value)" :disabled="isAITagging" rows="5"
+                                                      class="w-full bg-white border border-gray-300 rounded p-2 text-gray-700 font-mono text-xs focus:border-indigo-500 focus:outline-none resize-y shadow-sm"
+                                                      placeholder="给 AI 的角色设定与打标规则（如：你是资深角色卡标签分析助手…）"></textarea>
+                                            <p class="text-[9px] text-gray-500 mt-0.5">🧠 <b>System</b>：角色 + 任务规则。开启破限时，破限词会自动追加在本段<b>最末尾</b>（注意力权重最高）。</p>
+                                        </div>
+                                        <!-- 💬 Assistant：示例推理 / 格式示范（few-shot） -->
+                                        <div v-show="presetEditorTab === 'assistant'">
+                                            <textarea :value="presetField(preset, 'assistant')" @input="setPresetField(preset, 'assistant', $event.target.value)" :disabled="isAITagging" rows="5"
+                                                      class="w-full bg-white border border-gray-300 rounded p-2 text-gray-700 font-mono text-xs focus:border-indigo-500 focus:outline-none resize-y shadow-sm"
+                                                      placeholder="（可选）示例输出，示范 AI 该怎么思考与输出，如：&#10;<tags>[&quot;奇幻&quot;,&quot;骑士&quot;]</tags>"></textarea>
+                                            <p class="text-[9px] text-gray-500 mt-0.5">💬 <b>Assistant</b>：few-shot 示范（示例推理 / 期望输出格式）。会作为「助手已说过的内容」插在对话中，引导模型模仿。</p>                                        </div>
+                                        <!-- 👤 User：本次任务指令（留空则用程序自动生成的任务） -->
+                                        <div v-show="presetEditorTab === 'user'">
+                                            <textarea :value="presetField(preset, 'user')" @input="setPresetField(preset, 'user', $event.target.value)" :disabled="isAITagging" rows="5"
+                                                      class="w-full bg-white border border-gray-300 rounded p-2 text-gray-700 font-mono text-xs focus:border-indigo-500 focus:outline-none resize-y shadow-sm"
+                                                      placeholder="（留空 = 用程序自动生成的卡片任务指令；填写则覆盖）"></textarea>
+                                            <p class="text-[9px] text-gray-500 mt-0.5">👤 <b>User</b>：本次任务指令。留空时使用程序自动拼装的「当前卡片内容 + 输出要求」，一般无需填写。</p>
+                                        </div>
+                                        <!-- ⚡ 预填充：强制模型从指定开头续写 -->
+                                        <div v-show="presetEditorTab === 'prefill'">
+                                            <textarea :value="presetField(preset, 'prefill')" @input="setPresetField(preset, 'prefill', $event.target.value)" :disabled="isAITagging" rows="2"
+                                                      class="w-full bg-white border border-gray-300 rounded p-2 text-gray-700 font-mono text-xs focus:border-indigo-500 focus:outline-none resize-y shadow-sm"
+                                                      placeholder="默认：<tags>["></textarea>
+                                            <p class="text-[9px] text-gray-500 mt-0.5">⚡ <b>预填充</b>：强制模型从这个开头往下写（默认 <code class="text-indigo-600">&lt;tags&gt;[</code>），能大幅提高「结构化输出」遵守率。留空则用默认值。</p>
+                                        </div>
+
+                                        <!-- 🧠 思维链（CoT）+ 破限：默认版 / 自定义 / 关闭 -->
+                                        <div v-show="presetEditorTab === 'cot'">
+                                            <div class="flex items-center gap-1 mb-1.5 flex-wrap">
+                                                <button v-for="m in [{k:'default',i:'🟢',n:'默认版'},{k:'custom',i:'✏️',n:'自定义'},{k:'off',i:'⚪',n:'关闭'}]" :key="m.k"
+                                                        @click="setCotMode(preset, m.k)" :disabled="isAITagging"
+                                                        class="px-2 py-0.5 rounded text-[10px] font-medium border transition flex items-center gap-1"
+                                                        :class="((preset.cotMode || 'default') === m.k) ? 'bg-emerald-600 text-white border-emerald-600' : 'bg-white text-gray-600 border-gray-300 hover:border-emerald-400'">
+                                                    <span>{{ m.i }}</span><span>{{ m.n }}</span>
+                                                </button>
+                                                <span class="ml-auto text-[9px] text-gray-400">当前将注入 {{ presetCotText(preset).length }} 字</span>
+                                            </div>
+
+                                            <!-- 默认版：只读展示（开箱即用，不需编辑） -->
+                                            <div v-if="(preset.cotMode || 'default') === 'default'">
+                                                <textarea :value="defaultCotPrompt" readonly rows="6"
+                                                          class="w-full bg-emerald-50/60 border border-emerald-200 rounded p-2 text-emerald-900 font-mono text-[10px] focus:outline-none resize-y shadow-inner custom-scrollbar"></textarea>
+                                                <p class="text-[9px] text-gray-500 mt-0.5">🟢 <b>默认版</b>（内置只读）：已融合「思维链引导 + 破限」—— 先让模型在心里过一遍题材/身份/关键词，同时声明这是虚构文本特征归纳、不受内容审查影响。需修改请切到「✏️ 自定义」。</p>
+                                            </div>
+
+                                            <!-- 自定义：可编辑 -->
+                                            <div v-else-if="preset.cotMode === 'custom'">
+                                                <textarea :value="presetField(preset, 'cot')" @input="setPresetField(preset, 'cot', $event.target.value)" :disabled="isAITagging" rows="6"
+                                                          class="w-full bg-white border border-emerald-300 rounded p-2 text-gray-700 font-mono text-[10px] focus:border-emerald-500 focus:outline-none resize-y shadow-sm custom-scrollbar"
+                                                          placeholder="在此写你自己的思维链 / 破限提示词..."></textarea>
+                                                <p class="text-[9px] text-gray-500 mt-0.5">✏️ <b>自定义</b>：留空则自动回退到内置默认版（不会静默失效）。</p>
+                                            </div>
+
+                                            <!-- 关闭 -->
+                                            <div v-else class="text-[10px] text-gray-500 bg-gray-50 border border-gray-200 rounded p-2">
+                                                ⚪ <b>已关闭</b>：不注入思维链段。模型仍会被要求用 <code class="text-indigo-600">&lt;tags&gt;</code> 包裹结果。
+                                            </div>
+
+                                            <p class="text-[9px] text-emerald-700 mt-1.5">📌 该段以 <b>assistant 角色</b>插在 <b>user 之后</b>（Anthropic 协议要求第一条非 system 消息必须是 user，放前面会报错）；被中转站拒绝时会<b>自动逐级降级重试</b>。</p>
+                                        </div>
+
+                                        <p class="text-[9px] text-amber-600 mt-1.5">⚠️ 以上 5 段<b>仅在「①规则关 + ②向量关 + ③LLM 开」</b>（只有 LLM 层启动）时启用；其他组合仍沿用原有单段系统提示词。</p>
                                     </div>
                                 </div>
                             </div>
@@ -311,6 +402,19 @@
                                 <label class="block text-[11px] text-gray-600 mb-1">API Key</label>
                                 <input :value="apiKey" @input="$emit('update:apiKey', $event.target.value)" type="password" placeholder="sk-... 或留空" class="w-full bg-white border border-gray-300 rounded px-2.5 py-1 text-xs text-gray-800 focus:border-indigo-500 focus:outline-none">
                             </div>
+                        </div>
+
+                        <!-- 🔌 测试连通性：一条最小请求验证 Endpoint / Key / Model 三要素（避免跑一半才发现连不上） -->
+                        <div class="flex items-center gap-2 mb-2.5">
+                            <button @click="$emit('test-connection')" :disabled="isTestingConn || isAITagging"
+                                    class="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-500 disabled:bg-gray-300 disabled:text-gray-500 text-white text-[11px] font-medium rounded shadow flex items-center gap-1 transition shrink-0"
+                                    title="发送一条最小请求（hi）验证 Endpoint / Key / Model 是否真的可用">
+                                <span v-if="isTestingConn" class="animate-spin">🌀</span>
+                                <span v-else>🔌</span> 测试连通性
+                            </button>
+                            <span v-if="connTestStatus" class="text-[10px] leading-tight"
+                                  :class="connTestStatus.includes('❌') ? 'text-rose-600' : (connTestStatus.includes('✅') ? 'text-emerald-600' : 'text-gray-500')">{{ connTestStatus }}</span>
+                            <span v-else class="text-[10px] text-gray-400">打标前建议先测一下 —— 批量打标中途才发现连不上会白等很久</span>
                         </div>
                         <div>
                             <label class="text-[11px] text-gray-600 mb-1 flex justify-between items-center">
@@ -349,6 +453,8 @@
 
 <script>
 import { groupTagsByCategory } from '../utils/tagCategories.js';
+// 🧠 内置默认思维链提示词（只读展示用；与引擎 resolveCotPrompt 的默认值同源，避免两处文案漂移）
+import { DEFAULT_COT_PROMPT } from '../utils/llmPromptRoles.js';
 
 export default {
     name: 'AITagModal',
@@ -365,6 +471,15 @@ export default {
         jailbreakPresets: { type: Array, default: () => [] },
         systemPromptPresets: { type: Array, default: () => [] },
         activeSystemPromptId: { type: String, default: '' },
+        // 🧠 R1+R2（2026-09-24）：是否「只有 LLM 层启动」（决定分角色结构 + 结构化截取是否生效）
+        llmOnlyActive: { type: Boolean, default: false },
+        // 当前生效的预设（已归一化：system/assistant/user/prefill/cot；旧 content 自动迁到 system）
+        activePromptPreset: { type: Object, default: null },
+        // 🧠 思维链：当前预设实际会注入的 CoT 提示词（'' = 已关闭）
+        activeCotPrompt: { type: String, default: '' },
+        // 🔌 连通性测试
+        isTestingConn: { type: Boolean, default: false },
+        connTestStatus: { type: String, default: '' },
         apiEndpoint: { type: String, default: '' },
         apiKey: { type: String, default: '' },
         apiModel: { type: String, default: '' },
@@ -399,7 +514,9 @@ export default {
         // 📝 自动打标规则表管理
         'open-auto-tag-rules',
         // 🆕 P1：三层开关（(layer, enabled)，与 App.vue 的 setFunnelLayer 签名一致）
-        'set-funnel-layer'
+        'set-funnel-layer',
+        // 🔌 测试 API 连通性（用户 2026-09-24 要求）
+        'test-connection'
     ],
     // 🏷️ [标签大分类] 系统标签池按大分类分组（人物关系/角色设定/外貌身材...），候选标签更好找
     computed: {
@@ -422,12 +539,51 @@ export default {
         return {
             collapsedTagGroups: {},
             // 🧭 左导航当前分区（纯 UI 状态；不涉及任何业务逻辑）
-            activeSection: 'pipeline'
+            activeSection: 'pipeline',
+            // 🧠 R1+R2：预设编辑器的小页签（system / assistant / user / prefill / cot）
+            presetEditorTab: 'system',
+            // 🧠 内置默认思维链提示词（只读展示用；与 js/utils/llmPromptRoles.js 的 DEFAULT_COT_PROMPT 一致）
+            defaultCotPrompt: DEFAULT_COT_PROMPT
         };
     },
     methods: {
         toggleTagGroup(key) {
             this.collapsedTagGroups[key] = !this.collapsedTagGroups[key];
+        },
+        // 🧠 R1+R2：读取某个预设的分段值（旧预设只有 content → 归一化到 system，兼容不迁移数据）
+        presetField(preset, field) {
+            if (!preset) return '';
+            if (field === 'system') return preset.system ?? preset.content ?? '';
+            return preset[field] ?? '';
+        },
+        // 🧠 R1+R2：写入某个预设的分段值（同时同步旧 content，保持向后兼容）
+        setPresetField(preset, field, value) {
+            if (!preset) return;
+            preset[field] = value;
+            if (field === 'system') preset.content = value; // 旧字段镜像，旧逻辑仍能读到
+            this.$emit('save-system-prompts');
+        },
+        // 🧠 思维链：切换模式（default / custom / off）
+        setCotMode(preset, mode) {
+            if (!preset) return;
+            preset.cotMode = mode;
+            // 首次切到「自定义」且尚未写过内容时，用内置默认版预填，方便改
+            if (mode === 'custom' && !String(preset.cot || '').trim()) {
+                preset.cot = this.defaultCotPrompt;
+            }
+            this.$emit('save-system-prompts');
+        },
+        // 🧠 该预设实际会注入的思维链文本（'' = 关闭）
+        presetCotText(preset) {
+            const mode = (preset && preset.cotMode) || 'default';
+            if (mode === 'off') return '';
+            if (mode === 'custom') return String((preset && preset.cot) || '').trim() ? preset.cot : this.defaultCotPrompt;
+            return this.defaultCotPrompt;
+        },
+        // 🧠 R1+R2：该预设是否填了副字段（决定「走预设三段」还是「走程序默认」）
+        presetHasRoles(preset) {
+            if (!preset) return false;
+            return ['assistant', 'user', 'prefill'].some(k => String(preset[k] ?? '').trim() !== '');
         },
         // 🧭 左导航分区定义（分组标题 + 条目），模板据此渲染
         navGroups() {

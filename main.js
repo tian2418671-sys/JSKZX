@@ -17,6 +17,9 @@ const { pathToFileURL } = require('url');
 const crypto = require('crypto'); // 📸 快照内容去重（SHA-256）
 const { StringDecoder } = require('string_decoder'); // 🌊 P1-2 流式解析：防 UTF-8 多字节被 chunk 边界切断
 const { createMemoryStore } = require('./main/memoryStore.js'); // 🧠 长期记忆存储（测卡二期）
+// 📇 DF-22：角色卡**文件格式能力表**（唯一权威定义）—— 扫描白名单 / 导入 accept / 保存支持
+//    都从它派生，根除「同一件事三处各写一份」导致的口径漂移。
+const { isScannable, isSavable, isImageExt, IMPORT_ACCEPT, SCANNABLE_EXTS } = require('./main/cardFormats.js');
 
 // 📸 换卡图：非 PNG 新图转 PNG（可选依赖；未安装/加载失败时 PNG→PNG 换图仍可用）
 let sharp = null;
@@ -110,7 +113,7 @@ try {
 // 实现与完整来龙去脉见 main/cardFieldSanitizer.js（含 11,045 张真实卡片的审计结论：
 // 为什么**不能**递归剔除所有 `_` 前缀键 —— 第三方扩展里有 7 类、131 处真实数据是 `_` 开头）。
 // 这里只做引入；卡片保存（PNG chara / JSON）、世界书保存、整合包导出共用同一套清洗规则。
-const { stripInternalFields } = require('./main/cardFieldSanitizer.js');
+const { stripInternalFields, restoreEntriesDict } = require('./main/cardFieldSanitizer.js');
 
 
 // ================= [ 📸 历史快照配置与节流阀（可在设置面板动态更新） ] =================
@@ -1421,10 +1424,12 @@ async function scanDirectoryForCards(dirPath, event, progressState = { count: 0 
                 const fullPath = path.join(dirPath, file.name);
                 const ext = path.extname(file.name).toLowerCase();
                 // 白名单：PNG / WebP / JSON 角色卡全部放行
-                if (ext !== '.png' && ext !== '.webp' && ext !== '.json') return [];
+                // 📇 DF-22：改走**共享格式表**（`main/cardFormats.js`）——
+                //    旧实现这里写死一份白名单，与导入对话框的 `accept` 各写一份 ⇒ 会漂移。
+                if (!isScannable(ext)) return [];
 
                 // 体积拦截：仅当开关开启时，过滤过小的图片（PNG/WebP；JSON 不限制，卡片 JSON 可能本来就小）
-                if (useSizeFilter && (ext === '.png' || ext === '.webp')) {
+                if (useSizeFilter && isImageExt(ext)) {
                     try {
                         const stats = await fs.promises.stat(fullPath);
                         if (stats.size < MIN_CARD_FILE_SIZE) return []; // 小于 40KB 直接抛弃
@@ -2837,8 +2842,57 @@ app.whenReady().then(() => {
           } else {
             return { success: false, error: "无法写入 PNG 结构。" };
           }
+        } else if (ext === '.webp') {
+          // ═══════════════════════════════════════════════════════════
+          // 🛑 DF-25 真修复（2026-09-24）：WebP 卡**升级为 PNG** 后写入
+          // ───────────────────────────────────────────────────────────
+          // 📖 旧行为：直接返回「webp 无法回写数据」⇒ 用户改完内容**存不上**且（修复前）无提示。
+          // 🔑 **为什么「转 PNG」是正确的、而不是权宜之计**：
+          //    **SillyTavern 自己就是这么做的** —— `character-card-parser.js` 的 `write()`
+          //    把卡数据写进 **PNG tEXt 块**，且 `characters.js` 的 `writeCharacterData()`
+          //    输出路径**硬编码 `${outputFile}.png`** ⇒ 酒馆保存任何卡都会产出 PNG。
+          //    ⇒ 本项目与之对齐：**WebP 卡保存时升级为同名 .png**（原图无损转码，内容完整保留）。
+          // ⚠️ 与 `card:replaceImage` 的 webp/json 升级路径**同款**：先快照备份 → 原子写 → 删旧文件。
+          // ⚠️ 转换需要 `sharp`（可选依赖）—— 缺失时给出**可操作的**提示，不静默。
+          // ═══════════════════════════════════════════════════════════
+          if (!sharp) {
+            return {
+              success: false,
+              error: 'WebP 卡片需要转换为 PNG 才能保存内容，但缺少图片转换组件。'
+                + '请在项目目录执行 `npm install sharp` 后重启应用。'
+            };
+          }
+          const srcBuf = await fs.promises.readFile(filePath);
+          const pngBuf = await sharp(srcBuf).png().toBuffer();
+          // 内嵌卡数据（PNG 化后再写 chara/ccv3 块）
+          const outBuf = embedCardJSONIntoPNG(pngBuf, updatedJson);
+          if (!outBuf) return { success: false, error: 'WebP 转换后无法写入角色卡数据。' };
+          // 写前校验：结构合法 + 内嵌数据可回读（避免产出坏卡）
+          const report = validateCardPNG(outBuf);
+          if (!report.ok) return { success: false, error: '转换校验失败：' + report.errors.join('；') };
+
+          const targetPath = filePath.slice(0, -ext.length) + '.png';
+          // 与 replaceImage 同款：先备份原文件（升级路径也必须有回退手段）
+          await processCardSnapshot(filePath, true);
+          tmpPath = `${targetPath}.${process.pid}.${++saveTmpSeq}.tmp`;
+          try {
+            await fs.promises.writeFile(tmpPath, outBuf);
+            await fs.promises.rename(tmpPath, targetPath);
+          } catch (writeErr) {
+            await fs.promises.unlink(tmpPath).catch(() => { });
+            tmpPath = null;   // 已清理，避免外层重复 unlink
+            throw writeErr;
+          }
+          // 删除旧 webp，避免刷新时误扫成两张卡（DF-08 同款顾虑）
+          try { await fs.promises.unlink(filePath); } catch (e) { /* 忽略 */ }
+          const st = await fs.promises.stat(targetPath);
+          // ⚠️ 必须回传 `newPath`：渲染层要据此把库条目的 path 换掉（否则下次保存又指向已删的 .webp）
+          return {
+            success: true, mtime: st.mtimeMs, size: st.size,
+            newPath: targetPath, oldPath: filePath, converted: true
+          };
         }
-        return { success: false, error: `暂不支持 ${ext || ''} 格式的在线保存（仅支持 .json / .png 卡片，webp 无法回写数据）` };
+        return { success: false, error: `暂不支持 ${ext || ''} 格式的在线保存（仅支持 .json / .png / .webp）` };
       } catch (e) {
         // 🔧 残留 tmp 清理（rename 失败时遗留 .tmp 不污染库目录扫描）
         if (tmpPath) await fs.promises.unlink(tmpPath).catch(() => { });
@@ -3460,8 +3514,12 @@ app.whenReady().then(() => {
       if (!isPathAllowed(filePath)) return forbidden();
       if (!fs.existsSync(filePath)) return { success: false, error: '原文件不存在，无法保存。' };
 
-      // 1. 数据清洗 (剔除 _collapsed 等临时 UI 字段 + 前端临时 uid，保证落盘 JSON 100% 符合酒馆原生规范)
-      const cleanData = stripInternalFields(data);
+      // 1. 数据清洗（剔除 _collapsed 等临时 UI 字段 + 前端临时 uid，保证落盘 JSON 100% 符合酒馆原生规范）
+      // 🆔 DF-21（2026-09-24 真修复）：再把 `entries` **数组还原为 ST 原生字典**（键 = uid）。
+      //    背景：本应用载入时把 ST 的字典转成数组（`Object.values`），保存时若原样写回数组，
+      //    产出的文件就**偏离 ST 原生格式**（实测真实库 26 本源文件 **100% 是字典**，
+      //    经「载入→保存」后 **100% 变数组**）。详见 `restoreEntriesDict` 的取证。
+      const cleanData = restoreEntriesDict(stripInternalFields(data));
 
       const fileContent = JSON.stringify(cleanData, null, 4);
 
@@ -3595,7 +3653,8 @@ app.whenReady().then(() => {
       if (!isPathAllowed(filePath)) return forbidden();
       if (fs.existsSync(filePath)) return { success: false, error: '目标文件已存在，请换一个文件名。' };
       await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
-      const cleanData = stripInternalFields(data);
+      // 🆔 DF-21：新建同样还原 ST 原生字典形态（键 = uid），与 wb:save 同口径
+      const cleanData = restoreEntriesDict(stripInternalFields(data));
       await fs.promises.writeFile(filePath, JSON.stringify(cleanData, null, 4), 'utf-8');
       return { success: true };
     } catch (err) {
@@ -4926,8 +4985,9 @@ async function walkLibraryDir(dirPath, relPath, files, categories, visitedDirs, 
       await walkLibraryDir(absPath, subRel, files, categories, visitedDirs, statQueue);
     } else if (f.isFile()) {
       const ext = path.extname(f.name).toLowerCase();
-      if (ext !== '.png' && ext !== '.webp' && ext !== '.json') continue;
-      const isImage = ext === '.png' || ext === '.webp';
+      // 📇 DF-22：改走**共享格式表**（与上面扫描路径同源，不得各写一份）
+      if (!isScannable(ext)) continue;
+      const isImage = isImageExt(ext);
       // 🚀 v1.8.6 性能优化：PNG 内嵌 JSON 提取改为「延迟并发批量」——
       //    旧版在此逐张串行 open/read(1MB)/parse，1 万张卡 = 1 万次串行磁盘 IO，
       //    扫描耗时数分钟。现仅标记 _needsEmbed，由 scanAndSaveFolder 在遍历完成后

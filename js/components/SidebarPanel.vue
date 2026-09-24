@@ -389,9 +389,31 @@
                     </button>
                     <button v-for="cat in wbCategories" :key="cat"
                             @click="currentWbCategory = cat"
+                            @contextmenu.prevent="openWbGroupMenu($event, cat)"
+                            :title="'左键筛选；右键可重命名 / 解散该分组'"
                             :class="currentWbCategory === cat ? 'bg-emerald-600 text-white shadow-md shadow-emerald-900/50' : 'bg-zinc-800/80 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700'"
                             class="px-2.5 py-1 rounded-full text-[11px] font-bold whitespace-nowrap transition duration-200 border border-zinc-700/50 shrink-0">
                         📁 {{ cat }}
+                    </button>
+                </div>
+
+                <!-- 🏷️ 行4：标签筛选（A2，2026-09-24）—— 与分组是**AND** 复合条件 -->
+                <!-- 为什么必须有：标签能跨分组找书（「所有带『高武』的书」），
+                     分组做不到（一本书只能在一个分组里）。 -->
+                <div v-if="wbAllTags.length" class="flex items-center gap-1 overflow-x-auto custom-scrollbar">
+                    <span class="text-[10px] text-zinc-500 shrink-0">🏷️</span>
+                    <button v-for="t in wbAllTags.slice(0, 12)" :key="t.tag"
+                            @click="toggleWbTagFilter(t.tag)"
+                            :title="`${t.count} 本带此标签（点击筛选；再点取消）`"
+                            :class="isWbTagActive(t.tag) ? 'bg-sky-600 text-white shadow-md shadow-sky-900/50' : 'bg-zinc-800/80 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700'"
+                            class="px-2 py-0.5 rounded-full text-[10px] font-bold whitespace-nowrap transition duration-200 border border-zinc-700/50 shrink-0">
+                        {{ t.tag }}<span class="opacity-70 ml-0.5">{{ t.count }}</span>
+                    </button>
+                    <button v-if="currentWbTags.length"
+                            @click="currentWbTags = []"
+                            class="px-2 py-0.5 rounded-full text-[10px] text-zinc-400 hover:text-white border border-dashed border-zinc-600 shrink-0"
+                            title="清除标签筛选">
+                        ✕ 清除
                     </button>
                 </div>
 
@@ -869,7 +891,60 @@ export default {
             }
         };
 
+        // ═══════════════════════════════════════════════════════════
+        // 🏷️ A2（2026-09-24）：世界书**标签筛选**与**分组生命周期**的 UI 交互
+        // ───────────────────────────────────────────────────────────
+        // 📌 判定逻辑全在 `js/utils/wbGroupsTags.js` 纯函数里（有单测），此处只做交互。
+        // ═══════════════════════════════════════════════════════════
+
+        /** 该标签是否已选中（用于高亮） */
+        const isWbTagActive = (tag) => Array.isArray(ctx.currentWbTags.value) && ctx.currentWbTags.value.includes(tag);
+
+        /** 切换标签筛选（多选，语义是 AND —— 与分组是复合条件） */
+        const toggleWbTagFilter = (tag) => {
+            const cur = Array.isArray(ctx.currentWbTags.value) ? ctx.currentWbTags.value : [];
+            ctx.currentWbTags.value = cur.includes(tag) ? cur.filter(t => t !== tag) : [...cur, tag];
+        };
+
+        /**
+         * 右键分组 → 执行分组级操作（重命名 / 解散）
+         * ⚠️ 不用 `window.prompt` / `window.confirm`（Electron 中静默失败，见 AR-02）——
+         *    具体输入与确认走 ctx 注入的 `appPrompt` / `confirmDialog`。
+         * ⚠️ 「默认」组不给操作（它是未分组的归属地，解散它没有意义）。
+         * ⚠️ 交互取舍：项目没有通用右键菜单组件可用于「世界书分组」这种**非条目**目标
+         *    （`WbContextMenu` 的 props 是 `wb` 对象），故用「弹一个选择框」的方式，
+         *    与项目既有的 `OptionSelectModal` 风格一致，避免为两个动作新建组件。
+         */
+        const openWbGroupMenu = async (event, cat) => {
+            if (event && typeof event.preventDefault === 'function') event.preventDefault();
+            if (cat === '默认') {
+                ctx.showToast?.('「默认」是未分组的归属地，不能重命名或解散。', 'info', 4000);
+                return;
+            }
+            const memberCount = ctx.worldbooks.value.filter(w => {
+                const c = (w.category && String(w.category).trim()) || '';
+                const key = w.path || w.name || '';
+                const mapped = (key && ctx.wbCategoryMap.value[key] && String(ctx.wbCategoryMap.value[key]).trim()) || '';
+                return (c || mapped || '默认') === cat;
+            }).length;
+            const action = await ctx.appPrompt(
+                `分组「${cat}」（${memberCount} 本）\n\n请输入操作：\n`
+                + `  rename 或 重命名 → 给整组改名\n`
+                + `  delete 或 解散   → 组内全部移回「默认」（不会删书）\n\n`
+                + `（留空取消）`,
+                ''
+            );
+            if (action === null) return;
+            const a = String(action).trim().toLowerCase();
+            if (a === 'rename' || a === '重命名') {
+                await ctx.renameWbGroup(cat);
+            } else if (a === 'delete' || a === '解散' || a === 'del') {
+                await ctx.deleteWbGroup(cat);
+            }
+        };
+
         return {
+            isWbTagActive, toggleWbTagFilter, openWbGroupMenu,
             showAdvancedFilters,
             hasActiveFilters,
             showWbAdvanced,
@@ -1007,6 +1082,13 @@ export default {
             syncWorldbooksToDisk: ctx.syncWorldbooksToDisk,
             currentWbCategory: ctx.currentWbCategory,
             wbCategories: ctx.wbCategories,
+            // 🏷️ A2（2026-09-24）：世界书标签 —— 渲染 + 切换 + 分组生命周期
+            currentWbTags: ctx.currentWbTags,
+            wbAllTags: ctx.wbAllTags,
+            getWbTags: ctx.getWbTags,
+            toggleWbTagOn: ctx.toggleWbTagOn,
+            renameWbGroup: ctx.renameWbGroup,
+            deleteWbGroup: ctx.deleteWbGroup,
             wbSearchQuery: ctx.wbSearchQuery,
             // 📄 每页显示数量（全库共享选择器）+ 世界书/预设/插件三库分页
             itemsPerPage: ctx.itemsPerPage,

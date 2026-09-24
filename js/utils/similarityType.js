@@ -155,3 +155,43 @@ export function classifySimilarity({ keysSim, contentSim, exactSame, lenA, lenB 
     const meta = SIM_TYPE_META[type];
     return { type, label: meta.label, tone: meta.tone, advice: meta.advice, penalty, score };
 }
+
+/**
+ * 📊 组内排序：按综合分降序重排「非基准项」（2026-09-24，世界书查重方案「第 2 步」补完）
+ *
+ * ═══════════════════════════════════════════════════════════════
+ * ⚠️ 为什么必须是**纯函数**（而不是在 `useDedupe.js` 里内联 sort）
+ * ───────────────────────────────────────────────────────────────
+ * 排序规则有三条回退层级 + 一个「不能动 master」的硬约束，内联写容易错且**无法单测**。
+ * 抽出来后：`useDedupe.js` 只负责「摘 master → 调本函数 → 拼回」，逻辑可测。
+ *
+ * ═══════════════════════════════════════════════════════════════
+ * 🔑 排序键（三级回退，保证顺序**稳定可复现**）
+ * ───────────────────────────────────────────────────────────────
+ * | 级 | 键 | 方向 |
+ * |---|---|---|
+ * | 1 | `_score`（长度惩罚后的综合分） | 降序 |
+ * | 2 | `_simPct`（内容重合度 %） | 降序 |
+ * | 3 | `textLen`（内容长度） | 降序 |
+ *
+ * `_score === null`（两侧都无数据，无法判定）→ 当作 `-1` 排到最后。
+ *
+ * ⚠️ **不得修改入参数组**（返回新数组）—— 调用方拿的是 Vue 响应式对象，
+ *    就地 sort 会触发不必要的渲染；返回新数组语义更清晰。
+ *
+ * @param {Array<object>} items 非基准项（每项含 `_score` / `_simPct` / `textLen`）
+ * @returns {Array<object>} 新数组（已排序）
+ */
+export function sortByCompositeScore(items) {
+    const arr = Array.isArray(items) ? items.slice() : [];
+    const num = (v) => (typeof v === 'number' && Number.isFinite(v)) ? v : -1;
+    return arr.sort((a, b) => {
+        const sa = num(a && a._score);
+        const sb = num(b && b._score);
+        if (sb !== sa) return sb - sa;
+        const pa = num(a && a._simPct);
+        const pb = num(b && b._simPct);
+        if (pb !== pa) return pb - pa;
+        return num(b && b.textLen) - num(a && a.textLen);
+    });
+}

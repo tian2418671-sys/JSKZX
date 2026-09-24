@@ -6,11 +6,12 @@
  *   · 长度惩罚公式（0.7 + 0.3 × min/max）
  *   · **降级路径**：缺 keys 索引 / 缺内容指纹时不能臆断（返回保守类型，不崩）
  *   · ⚠️ **关键契约**：判定**只产出标签**，不得影响「是否同组」
+ *   · 📊 **综合分排序**（2026-09-24「第 2 步」补完）：三级回退 / null 排最后 / 不改入参
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    classifySimilarity, lengthPenalty, SIM_TYPE, SIM_TYPE_META,
+    classifySimilarity, lengthPenalty, sortByCompositeScore, SIM_TYPE, SIM_TYPE_META,
     KEYS_HIGH, KEYS_LOW, CONTENT_HIGH, CONTENT_LOW
 } from '../js/utils/similarityType.js';
 
@@ -173,4 +174,61 @@ test('★ 边界：阈值本身必须自洽（LOW < HIGH，且分档不重叠）
     assert.ok(CONTENT_LOW < CONTENT_HIGH, `CONTENT_LOW(${CONTENT_LOW}) 必须小于 CONTENT_HIGH(${CONTENT_HIGH})`);
     // 内容高阈值必须与查重复核闸门（0.85）同口径 —— 否则「同组」与「类型」会自相矛盾
     assert.equal(CONTENT_HIGH, 0.85, 'CONTENT_HIGH 必须等于查重复核闸门 0.85（口径统一）');
+});
+
+// ══════════════════════════════════════════════════════════════
+// 📊 综合分排序（2026-09-24「第 2 步」补完）
+// ══════════════════════════════════════════════════════════════
+test('排序：按 _score 降序（最相似的排最前）', () => {
+    const items = [
+        { name: 'c', _score: 0.4 },
+        { name: 'a', _score: 0.95 },
+        { name: 'b', _score: 0.7 }
+    ];
+    const out = sortByCompositeScore(items);
+    assert.deepEqual(out.map(x => x.name), ['a', 'b', 'c']);
+});
+
+test('排序：_score 相同时回退 _simPct，再回退 textLen（三级回退，顺序稳定）', () => {
+    const items = [
+        { name: 'x', _score: 0.8, _simPct: 50, textLen: 9999 },
+        { name: 'y', _score: 0.8, _simPct: 90, textLen: 10 },
+        { name: 'z', _score: 0.8, _simPct: 90, textLen: 500 }
+    ];
+    const out = sortByCompositeScore(items);
+    assert.deepEqual(out.map(x => x.name), ['z', 'y', 'x'],
+        '先比 _simPct（90 > 50），同分再比 textLen（500 > 10）');
+});
+
+test('排序：_score 为 null / undefined / NaN → 排最后（不能编一个数）', () => {
+    const items = [
+        { name: 'null', _score: null },
+        { name: 'good', _score: 0.3 },
+        { name: 'undef' },
+        { name: 'nan', _score: NaN }
+    ];
+    const out = sortByCompositeScore(items);
+    assert.equal(out[0].name, 'good', '有分数的必须排最前');
+    assert.deepEqual(out.slice(1).map(x => x.name).sort(), ['nan', 'null', 'undef'], '无分数的全排后面');
+});
+
+test('★ 契约：排序**不修改入参数组**（返回新数组）', () => {
+    const items = [{ _score: 0.1 }, { _score: 0.9 }];
+    const before = items.map(x => x._score);
+    const out = sortByCompositeScore(items);
+    assert.notEqual(out, items, '必须返回新数组');
+    assert.deepEqual(items.map(x => x._score), before, '入参数组不得被就地排序');
+});
+
+test('排序：空数组 / 非数组 → 安全返回空数组', () => {
+    assert.deepEqual(sortByCompositeScore([]), []);
+    assert.deepEqual(sortByCompositeScore(null), []);
+    assert.deepEqual(sortByCompositeScore(undefined), []);
+    assert.deepEqual(sortByCompositeScore('x'), []);
+});
+
+test('排序：单元素 / 全同分 → 保持可用（不抛错）', () => {
+    assert.equal(sortByCompositeScore([{ _score: 0.5 }]).length, 1);
+    const same = sortByCompositeScore([{ name: 'a', _score: 0.5 }, { name: 'b', _score: 0.5 }]);
+    assert.equal(same.length, 2);
 });

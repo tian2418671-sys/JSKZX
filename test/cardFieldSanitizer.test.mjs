@@ -292,3 +292,117 @@ test('卡片没有 character_book 时不报错', () => {
   const out = stripInternalFields({ name: 'n', description: 'd' });
   assert.deepEqual(out, { name: 'n', description: 'd' });
 });
+
+// ══════════════════════════════════════════════════════════════
+// 🆔 DF-21（2026-09-24 真修复）：独立世界书保存时**还原 ST 原生字典形态**
+// ══════════════════════════════════════════════════════════════
+// 📖 要防的缺陷：本应用载入时把 ST 的**字典**转成**数组**（`Object.values`），
+//    保存时原样写回数组 ⇒ 产出的文件**偏离 ST 原生格式**。
+//    实测（真实库 26 本 / 23,816 条）：源文件 **100% 是字典**，经「载入→保存」后 **100% 变数组**。
+// 🔬 ST 源码定论（`public/scripts/world-info.js`）：`entries` 是**对象字典、键 = uid**；
+//    `getFreeWorldEntryUid` 分配**最小空闲整数**；删除会**腾出 uid 供复用**；
+//    复制走 `createWorldInfoEntry` ⇒ **新 uid**；保存**从不按下标重写**。
+//    ⇒ **uid 是「词条身份」，不是「数组下标」**（真实库 `炎孕-副本01.json` 的 uid 有空洞：
+//      0..1904 之后跳到 5737 / 6239 / 10567 / 13331）。
+const { restoreEntriesDict, nextFreeUid } = require('../main/cardFieldSanitizer.js');
+
+test('🆔 restoreEntriesDict：数组 → 字典，**保留原 uid（含空洞）**，不按下标重写', () => {
+  const data = {
+    name: '书',
+    entries: [
+      { uid: 0, key: ['a'], content: 'c0' },
+      { uid: 1, key: ['b'], content: 'c1' },
+      { uid: 5737, key: ['c'], content: 'c5737' },   // ← 真实库的空洞（删除过词条）
+      { uid: 13331, key: ['d'], content: 'c13331' },
+    ],
+  };
+  restoreEntriesDict(data);
+  assert.ok(!Array.isArray(data.entries), '必须是字典（ST 原生形态）');
+  assert.deepEqual(Object.keys(data.entries), ['0', '1', '5737', '13331'],
+    '字典键必须等于原 uid（**保留空洞**）—— 按下标重写会毁掉 ST 的 uid 身份语义');
+  assert.equal(data.entries['5737'].uid, 5737, '词条对象内的 uid 也要保留（ST 键与对象内都有）');
+  assert.equal(data.entries['5737'].content, 'c5737', '内容不能丢');
+});
+
+test('🆔 restoreEntriesDict：缺失 / 本应用临时串 uid → 按 ST 语义分配**最小空闲整数**', () => {
+  const data = {
+    entries: [
+      { uid: 0, content: 'c0' },
+      { content: '无 uid' },                        // ← 缺失
+      { uid: '1758600000000_ab12cd', content: '本应用临时串' },  // ← 前端 v-for key
+      { uid: 2, content: 'c2' },
+    ],
+  };
+  restoreEntriesDict(data);
+  const keys = Object.keys(data.entries).map(Number).sort((a, b) => a - b);
+  assert.deepEqual(keys, [0, 1, 2, 3], '应补齐为 1（最小空闲）与 3');
+  assert.equal(data.entries['1'].content, '无 uid', '缺失 uid 的词条内容必须保留');
+  assert.equal(data.entries['3'].content, '本应用临时串', '本应用临时串的词条内容必须保留');
+  // 分配出的 uid 必须是**数字**（不能把临时串落盘）
+  for (const k of Object.keys(data.entries)) {
+    assert.equal(typeof data.entries[k].uid, 'number', `键 ${k} 的 uid 必须是数字`);
+  }
+});
+
+test('🆔 restoreEntriesDict：**数字 uid 优先保真**（临时串不得抢走靠后的真实 uid）', () => {
+  // 🔑 两轮处理的意义：若单轮即时分配，「临时串」会先占掉 1，
+  //    而后面那条真实 `uid: 1` 就被迫改成 3 —— **真实身份被抢走**。
+  const data = {
+    entries: [
+      { uid: '1758600000000_zzzzzz', content: '临时串（应让路）' },
+      { uid: 1, content: '真实身份 uid=1' },
+    ],
+  };
+  restoreEntriesDict(data);
+  assert.equal(data.entries['1'].content, '真实身份 uid=1', '真实数字 uid 必须保住自己的键');
+  assert.equal(data.entries['0'].content, '临时串（应让路）', '临时串应拿到最小空闲 0');
+});
+
+test('🆔 restoreEntriesDict：已是字典 → 原样不动（幂等）', () => {
+  const data = { entries: { '0': { uid: 0, content: 'a' }, '5': { uid: 5, content: 'b' } } };
+  const before = JSON.stringify(data);
+  restoreEntriesDict(data);
+  assert.equal(JSON.stringify(data), before, '已是字典时不得改动（幂等）');
+});
+
+test('🆔 restoreEntriesDict：无 entries / 非对象 → 不崩、不动', () => {
+  for (const bad of [null, undefined, 42, 'str', [], { name: '无 entries' }]) {
+    const out = restoreEntriesDict(bad);
+    assert.equal(out, bad, '非法输入必须原样返回');
+  }
+});
+
+test('🆔 nextFreeUid：返回最小可用非负整数（与 ST 的 getFreeWorldEntryUid 同语义）', () => {
+  assert.equal(nextFreeUid(new Set()), 0);
+  assert.equal(nextFreeUid(new Set([0, 1, 2])), 3);
+  assert.equal(nextFreeUid(new Set([0, 2])), 1, '必须填空洞（复用被删的 uid）');
+  assert.equal(nextFreeUid(new Set([0, 1, 5737])), 2);
+});
+
+test('🆔 restoreEntriesDict：uid 重复时**不覆盖**（后来的重新分配，前一个内容不丢）', () => {
+  const data = {
+    entries: [
+      { uid: 7, content: '先来' },
+      { uid: 7, content: '后来（撞键）' },
+    ],
+  };
+  restoreEntriesDict(data);
+  const vals = Object.values(data.entries).map(e => e.content).sort();
+  assert.deepEqual(vals, ['先来', '后来（撞键）'], '两条内容都必须保留（撞键时重新分配而非覆盖）');
+  assert.equal(Object.keys(data.entries).length, 2, '字典必须有 2 个键');
+});
+
+test('🆔 契约：`restoreEntriesDict` **只**作用于独立世界书（内嵌 character_book 仍是数组）', () => {
+  // 角色卡内嵌 character_book.entries 是**数组**（V2/V3 规范），调用方**不得**对它调用本函数。
+  // 本用例锁死「函数本身的行为边界」：它只看顶层 `entries`，不会碰 `character_book`。
+  const card = {
+    name: '卡',
+    character_book: { entries: [{ keys: ['a'], content: 'c' }] },   // 内嵌：数组
+    data: { character_book: { entries: [{ keys: ['b'], content: 'd' }] } },
+  };
+  restoreEntriesDict(card);
+  assert.ok(Array.isArray(card.character_book.entries), '内嵌 character_book.entries 必须保持数组');
+  assert.ok(Array.isArray(card.data.character_book.entries), 'data 下的内嵌也保持数组');
+  assert.ok(!card.entries, '顶层本无 entries → 不得凭空创建');
+});
+

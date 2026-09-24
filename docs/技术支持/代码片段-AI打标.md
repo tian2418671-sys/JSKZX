@@ -19,6 +19,7 @@
 | 2 | 规则式自动打标 + 后台落盘 | `js/composables/useCardCrud.js` L119-234 | 组合式函数内 | 导入入库伴生的自动分类/贴标签，及低并发后台写盘 |
 | 3 | AI 智能打标引擎 `useAITools` | `js/composables/useAITools.js` 全文 | 组合式函数 | 调用大模型批量打标（含破限/系统提示词/候选池） |
 | 4 | AI 打标弹窗组件 `AITagModal` | `js/components/AITagModal.vue` 全文 | Vue SFC | 打标配置 UI（候选池/规则/破限/预设/API/进度） |
+| 5 | **提示词分角色 + 结构化输出 + 思维链**（R1+R2+CoT） | `js/utils/llmPromptRoles.js`（**新建，2026-09-24**） | 纯函数 | 仅「只有 LLM 层启动」时启用：预设五段（system/assistant/user/预填充/思维链）+ `<tags>` 三层降级截取 + 思考块剥离 |
 
 ---
 
@@ -896,6 +897,101 @@ export default {
 
 ---
 
+## 模块五：提示词分角色 + 结构化输出 + 思维链（`js/utils/llmPromptRoles.js`，2026-09-24 新增）
+
+> 完整源码见 `js/utils/llmPromptRoles.js`（纯函数，零 Vue / 零 Electron 依赖，可 `node --test` 直测）。
+> 单测：`test/llmPromptRoles.test.mjs`（**70 条**）。方案与落地记录：`docs/规格与计划/AI打标-提示词分角色与结构化输出方案.md` §九。
+
+**启用条件（唯一入口）**：`isLlmOnlyPlan(plan)` = **①规则关 且 ②向量关 且 ③LLM 开** —— 其他组合保持原链路不变。
+
+**消息结构（最终版）**：
+
+```text
+[ system ]    主提示词 + 破限词（破限必须在末尾 —— 注意力权重最高）
+[ user   ]    预设 user 段 或 程序默认（卡片内容 + 输出要求）
+[ assistant ] 预设 assistant 段（few-shot 示例，可选）
+[ assistant ] 🧠 思维链提示词（默认版 / 自定义；cotMode='off' 时无）
+[ assistant ] ⚡ 预填充（默认 `<tags>[`，放最后 —— 紧邻输出位置）
+```
+
+> ⚠️ **所有 `assistant` 消息必须排在 `user` 之后** —— **Anthropic 协议的硬要求**：
+> `main.js` 的 `chat:send` 挑出 `system` 后原样透传 messages，而 Anthropic 要求
+> **第一条非 system 消息必须是 `user`**。把思维链放在 `user` 之前会直接报错。
+
+```js
+// ① 启用条件
+export function isLlmOnlyPlan(plan) {
+    const p = plan || {};
+    return p.rule === false && p.vector === false && p.llm === true;
+}
+
+// ② 思维链三档模式（preset.cotMode）
+export const COT_MODE_DEFAULT = 'default';  // 内置默认版（默认值）
+export const COT_MODE_OFF = 'off';
+export const COT_MODE_CUSTOM = 'custom';
+
+export function resolveCotPrompt(preset) {
+    const p = normalizePromptPreset(preset);
+    if (p.cotMode === COT_MODE_OFF) return '';
+    if (p.cotMode === COT_MODE_CUSTOM) return p.cot.trim() ? p.cot : DEFAULT_COT_PROMPT; // 留空回退默认，不静默失效
+    return DEFAULT_COT_PROMPT;
+}
+
+// ③ 消息组装（system 主+破限 → user → assistant 示例 → assistant 思维链 → assistant 预填充）
+export function buildLlmMessages({ preset, jailbreak, defaultUser, usePrefill = true, useCot = true } = {}) {
+    const p = normalizePromptPreset(preset);
+    const msgs = [];
+    let sys = p.system || '';
+    const jb = String(jailbreak || '').trim();
+    if (jb) sys = sys ? `${sys}\n\n${jb}` : jb;   // 破限必须在 system 末尾（注意力权重最高）
+    if (sys.trim()) msgs.push({ role: 'system', content: sys });
+    const userContent = p.user.trim() ? p.user : String(defaultUser || '');
+    if (userContent.trim()) msgs.push({ role: 'user', content: userContent });  // ⚠️ 必须早于所有 assistant
+    if (p.assistant.trim()) msgs.push({ role: 'assistant', content: p.assistant });
+    if (useCot) {
+        const cot = resolveCotPrompt(preset);
+        if (cot.trim()) msgs.push({ role: 'assistant', content: cot });
+    }
+    if (usePrefill && p.prefill.trim()) msgs.push({ role: 'assistant', content: p.prefill }); // 必须在最后
+    return msgs;
+}
+
+// ④ 🧹 剥思考块（解析前先剥；剥完失败则回退原文）
+export function stripThinkingBlocks(text) {
+    let out = String(text == null ? '' : text);
+    for (const name of THINK_BLOCK_NAMES) {
+        out = out.replace(new RegExp(`<\\s*${name}\\s*>[\\s\\S]*?<\\s*/\\s*${name}\\s*>`, 'gi'), '');  // <thinking>…</thinking>
+        out = out.replace(new RegExp(`【\\s*${name}\\s*】[\\s\\S]*?【\\s*/\\s*${name}\\s*】`, 'g'), '');    // 【思考】…【/思考】
+    }
+    return out.trim();
+}
+
+// ⑤ 三层降级截取（先剥思考块 → 失败回退原文）
+export function parseStructuredTags(rawReply) {
+    const original = String(rawReply == null ? '' : rawReply).trim();
+    if (!original) return { tags: [], layer: 3, ok: false, reason: '回复为空' };
+    const stripped = stripThinkingBlocks(original);
+    if (stripped && stripped !== original) {
+        const r = parseFromCleanText(stripped);
+        if (r.ok) return r;          // 🛡️ 剥完失败则回退原文（防误剥真结果）
+    }
+    return parseFromCleanText(original);
+}
+```
+
+**⚠️ 四个关键设计点**（都是踩过坑才定的）：
+
+| 设计点 | 为什么 |
+| --- | --- |
+| **取「最后一个」有效包裹，而非第一个** | 思考型模型常在思维链里先写「示例：`<tags>["示例"]</tags>`」，取第一个会**把示例当结果**（与 R1 要修的思维链污染同类） |
+| **层②也从后往前 + 严格 `JSON.parse` 判定** | 思维链里的 `[1]` / `[示例]` 会被自动跳过（非数组 / 非法 JSON）；只有合法数组才采纳 |
+| **层② 贪婪兜底 + `flat(Infinity)`** | 处理嵌套数组 `["a",["b"]]` —— 非贪婪会截断成非法 JSON；展平后仍是字符串标签 |
+| **剥思考块必须有回退** | 模型可能把真结果写在思考块里；剥过头会丢真结果 ⇒ 剥完失败必须回退原文再解析 |
+
+**UI 双写兼容**（`AITagModal.vue` `setPresetField`）：写新字段 `system` 时**同步镜像旧 `content`**，旧逻辑 / 降级回旧版本仍能读到。
+
+---
+
 ## 调用关系速览
 
 ```
@@ -907,6 +1003,19 @@ App.vue（顶层状态 + 注入）
   │                         └─ autoTagRules（模块一）
   │                         └─ flushDeferredAutoTagSaves()（低并发后台落盘）
   └─ <AITagModal .../>（模块四，弹窗 UI，emits 回传）
+
+仅「只有 LLM 层启动」时的分角色支线（模块五）：
+  useAITools.startAITagging()
+    ├─ isLlmOnlyPlan(plan)                     （①关 ②关 ③开 → 启用）
+    ├─ buildLlmMessages({preset, jailbreak, defaultUser, usePrefill, useCot})
+    │     └─ resolveCotPrompt(preset)          （思维链：默认版 / 自定义 / 关闭）
+    ├─ callAIWithRetry(payload)                （🛡️ 降级阶梯：全量 → 去预填充 → 去预填充+去思维链）
+    └─ parseStructuredTags(extractReplyContent(result))
+          └─ stripThinkingBlocks()             （🧹 先剥思考块；剥完失败则回退原文）
+
+API 连通性（与打标共用同一通道）：
+  useAITools.testApiConnection()
+    └─ window.electronAPI.sendChatMessage(ep, {messages:[{role:'user',content:'hi'}], max_tokens:8}, key, type)
 ```
 
 ---

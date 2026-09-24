@@ -1,6 +1,9 @@
 /**
  * 卡片加载与数据规范化工具
- * 支持 V1/V2/V3 规范以及 PNG / WebP / JPEG / JSON 格式。
+ * 支持 V1/V2/V3 规范以及 PNG / WebP / JSON 格式。
+ * ⚠️ DF-22：**不再声明支持 JPEG** —— 虽然 `deepScanForJSON` 技术上能从中提取数据，
+ *    但 `main.js` 的 `file:saveCard` 只支持 `.json`/`.png` ⇒ JPEG 卡的
+ *    「标签/分类/编辑」**无法写回文件**（静默丢失）。格式能力以 `main/cardFormats.json` 为准。
  */
 import { parsePNGChunk, deepScanForJSON } from './pngParser.js';
 
@@ -237,7 +240,8 @@ export const autoTagRules = compileAutoTagRules(null);
 
 /**
  * 读取并解析角色卡文件
- * @param {File} file 用户选择的文件（.json / .png / .webp / .jpeg / .jpg）
+ * @param {File} file 用户选择的文件（.json / .png / .webp）
+ *   ⚠️ DF-22：`.jpg`/`.jpeg` 已从导入对话框移除（**不可写回保存**，见 `main/cardFormats.json`）
  * @returns {Promise<{data: object, imgUrl: string|null, file: File}>} 解析结果
  * @throws {Error} 抛出带错误码（message）的错误，用于上层提示：
  *   - 'NO_CARD_DATA'：未能提取到有效的角色卡数据

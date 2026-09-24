@@ -132,6 +132,11 @@
             :jailbreak-presets="jailbreakPresets"
             :system-prompt-presets="systemPromptPresets"
             :active-system-prompt-id="activeSystemPromptId"
+            :llm-only-active="llmOnlyActive"
+            :active-prompt-preset="activePromptPreset"
+            :active-cot-prompt="activeCotPrompt"
+            :is-testing-conn="isTestingConn"
+            :conn-test-status="connTestStatus"
             :api-endpoint="apiEndpoint"
             :api-key="apiKey"
             :api-model="apiModel"
@@ -164,6 +169,7 @@
             @save-system-prompts="saveSystemPromptsToStorage"
             @delete-system-prompt-preset="deleteSystemPromptPreset"
             @fetch-available-models="fetchAvailableModels"
+            @test-connection="testApiConnection"
             @update:apiEndpoint="apiEndpoint = $event"
             @update:apiKey="apiKey = $event"
             @update:apiModel="apiModel = $event"
@@ -648,6 +654,11 @@ import PluginWorkspace from './PluginWorkspace.vue'; // 🧩 插件工作区（�
 import SnapshotModal from './SnapshotModal.vue'; // 📸 历史快照列表与一键恢复弹窗
 import PushModal from './PushModal.vue'; // 🚀 推送目标选择与执行对话框
 import { processFile, extractBookEntries, compileAutoTagRules, defaultAutoTagRules, normalizeCardData } from '../utils/cardLoader.js';
+// 📇 DF-22：角色卡**文件格式能力表**（唯一权威定义，`main/cardFormats.json`）
+//    ⚠️ 直接 import **JSON**（不是 `.js`）—— `cardFormats.js` 是 CJS（给 `main.js` 用），
+//    渲染层读 CJS 需要 Vite 转换，读 JSON 则是原生支持 ⇒ 两边共用**同一份数据**且零转换风险。
+import cardFormats from '../../main/cardFormats.json';
+import { isPathSavable, unsavableReason } from '../utils/cardFormats.js'; // 📇 DF-25：渲染层格式表（判「此卡能否写回」）
 import { DEFAULT_TAG_FUNNEL, normalizeTagFunnel, normalizeDisabledRules, resolveFunnelPlan, formatFunnelBadge, isFunnelEmpty } from '../utils/tagFunnel.js'; // 🏷️ P1：打标三层开关默认值/归一化/层决策（纯函数）；P2 起状态短标签也在此派生（供注册表命令的 badge 用）
 import { normalizeGroupProfiles, normalizeAutoGroupLastRun } from '../utils/autoGroup.js'; // 🗂️ 自动分组：分组档案/移动日志归一化（判定纯函数在同文件；执行器在 useAutoGroup）
 import { createCommandRegistry, evaluateWhen } from '../utils/commandRegistry.js'; // 🎛️ P2：命令注册表 + when 求值（菜单/命令面板/快捷键的唯一真相源）
@@ -2426,6 +2437,10 @@ export default {
                                 if (cfg.ui.wbCategoryMap && typeof cfg.ui.wbCategoryMap === 'object') {
                                     wbCategoryMap.value = { ...wbCategoryMap.value, ...cfg.ui.wbCategoryMap };
                                 }
+                                // 🏷️ A2：世界书标签映射（与分组同源恢复）
+                                if (cfg.ui.wbTagMap && typeof cfg.ui.wbTagMap === 'object') {
+                                    wbTagMap.value = { ...wbTagMap.value, ...cfg.ui.wbTagMap };
+                                }
                                 // 🛠️ 自定义大分类（分类列表 + 手动标签归属）
                                 if (Array.isArray(cfg.ui.customTagCategories)) {
                                     customTagCategories.value = cfg.ui.customTagCategories
@@ -3482,6 +3497,29 @@ export default {
             return JSON.parse(JSON.stringify(cardData.value));
         };
 
+        // ═══════════════════════════════════════════════════════════
+        // 🛑 DF-25（2026-09-24）：**不可保存格式的显式告知**（方案 ③：去掉静默）
+        // ───────────────────────────────────────────────────────────
+        // 📖 病根：`file:saveCard` 只支持 `.json`/`.png`（WebP 无法回写）⇒
+        //    打开 WebP 卡改完内容点保存，**文件根本不会变**，而旧实现**不提示**。
+        //    ⚠️ 注意范围：**标签/分类不丢**（有 `cardOverlays` 覆盖层兜底），
+        //       **丢的是内容编辑**（描述/人格/场景/开场白/内嵌世界书…）。
+        // ✅ 修法：编辑器顶部**常驻横幅**（打开就看得见，不等保存才发现）+ 保存时**准确原因**。
+        // ═══════════════════════════════════════════════════════════
+        /** 当前打开卡片的文件路径（无路径 = 未落盘，另论） */
+        const activeCardPath = computed(() => {
+            if (!cardData.value) return '';
+            const item = library.value.find(i => i.data === cardData.value);
+            return (item && item.path) || '';
+        });
+        /** 当前卡片是否**可写回**（false ⇒ 内容编辑不会持久化） */
+        const activeCardSavable = computed(() => {
+            const p = activeCardPath.value;
+            return !p || isPathSavable(p);   // 无路径（未落盘）不在此提示范围
+        });
+        /** 不可保存时的**原因文案**（空串 = 可保存） */
+        const activeCardUnsavableReason = computed(() => unsavableReason(activeCardPath.value));
+
         // 覆盖保存当前卡片到本地原文件（经 saveCard IPC）
         const saveToLocalDisk = async () => {
             if (!cardData.value) return;
@@ -3490,6 +3528,33 @@ export default {
             try {
                 const res = await window.electronAPI.saveCard(libItem.path, getPlainCardData());
                 if (res.success) {
+                    // 🖼️ DF-25：WebP 卡会被**升级为 PNG**（与 SillyTavern 自身行为一致）——
+                    //    ⚠️ 磁盘文件已换名 ⇒ 必须同步 `libItem.path` 与**所有按 path 派生的键**
+                    //    （覆盖层 `cardOverlays` / 导入时间 `cardImportTimes` / 聊天键），
+                    //    否则下次保存指向已删的 .webp、且标签会因 path 变化而「看起来丢了」。
+                    if (res.converted && res.newPath && res.newPath !== libItem.path) {
+                        const oldPath = libItem.path;
+                        const oldKey = (oldPath || libItem.name || '').toString();
+                        libItem.path = res.newPath;
+                        libItem.fileName = String(res.newPath).split(/[\\/]/).pop();
+                        libItem.avatar = 'local-file://img/?path=' + encodeURIComponent(res.newPath);
+                        const newKey = (res.newPath || libItem.name || '').toString();
+                        // 迁移覆盖层键（分类/标签都存这里）
+                        if (appConfig.value.cardOverlays[oldKey] && oldKey !== newKey) {
+                            appConfig.value.cardOverlays[newKey] = appConfig.value.cardOverlays[oldKey];
+                            delete appConfig.value.cardOverlays[oldKey];
+                        }
+                        // 迁移导入时间键（「导入时间」排序数据源）
+                        if (cardImportTimes.value && cardImportTimes.value[oldKey] !== undefined && oldKey !== newKey) {
+                            cardImportTimes.value[newKey] = cardImportTimes.value[oldKey];
+                            delete cardImportTimes.value[oldKey];
+                        }
+                        // 迁移聊天键（会话/变量树，见 CT-10 的整键迁移契约）
+                        if (typeof migrateChatKeys === 'function') {
+                            try { migrateChatKeys(oldPath, res.newPath); } catch (e) { /* 忽略 */ }
+                        }
+                        showToast('✅ 该卡片原为 WebP 格式（无法写入内容），已自动升级为 PNG 并保存成功。', 'success', 7000);
+                    }
                     // 🦾 回写新 mtime/size：保存会改变磁盘上的修改时间与文件体积，
                     //    不回写则「修改时间/大小」排序继续用扫描时的旧值，
                     //    用户改完卡切排序列表纹丝不动（观感=排序失效）
@@ -3508,7 +3573,19 @@ export default {
                     triggerRef(library);
                     showToast('角色卡保存成功！', 'success');
                 }
-                else nativeAlert(`保存失败: ${res.error}`, 'error');
+                else {
+                    // 🛑 DF-25：保存失败**必须给出准确原因**（旧实现笼统「保存失败」）。
+                    //    ⚠️ WebP 已能保存（会自动升级为 PNG）⇒ 走到这里只剩「真不可保存」或真故障。
+                    const why = unsavableReason(libItem.path);
+                    if (why) {
+                        nativeAlert(`⚠️ 此卡片无法保存内容：${why}。\n\n`
+                            + `· 标签与分类仍会正常保留（有独立配置兜底）\n`
+                            + `· 但描述/人格/场景/开场白等**内容编辑不会写入文件**\n\n`
+                            + `如需让编辑生效，可用「🖼️ 换卡图」把它转为标准 PNG 卡。`, 'warning');
+                    } else {
+                        nativeAlert(`保存失败: ${res.error}`, 'error');
+                    }
+                }
             } catch (e) { nativeAlert(`发生错误: ${e.message}`, 'error'); }
         };
 
@@ -4294,14 +4371,28 @@ export default {
         // 📁 世界书库：分组功能（Set 动态搜集 + localStorage 持久化）
         // =========================================================
         const currentWbCategory = ref('全部'); // 当前选中的分组
+        // 🏷️ A2（2026-09-24）：当前选中的**标签**筛选（多选 AND）—— 与分组同为视图态
+        const currentWbTags = ref([]);
 
         // 分组持久化映射：key(path||name) -> 分类名（重扫/重启后自动恢复）
         const loadWbCategoriesMap = () => {
             try { return JSON.parse(localStorage.getItem('jsTavern_wbCategories') || '{}'); } catch (e) { return {}; }
         };
+        // 🏷️ A2：世界书**标签**映射（key = path||name → string[]）—— 与分组同为配置层。
+        //    📌 已拍板：独立世界书标签**留在系统配置**（不写进世界书文件）——
+        //       零风险（不动用户文件、不产快照、不碰第三方格式），代价是换机不随书走。
+        const loadWbTagMap = () => {
+            try {
+                const raw = JSON.parse(localStorage.getItem('jsTavern_wbTags') || '{}');
+                return (raw && typeof raw === 'object' && !Array.isArray(raw)) ? raw : {};
+            } catch (e) { return {}; }
+        };
+        const wbTagMap = ref(loadWbTagMap());
         const wbCategoryMap = ref(loadWbCategoriesMap());
         const saveWbCategoriesMap = () => {
             try { localStorage.setItem('jsTavern_wbCategories', JSON.stringify(wbCategoryMap.value)); } catch (e) { /* 忽略 */ }
+            // 🏷️ A2：标签与分组**同一次调用**一起落盘（二者共用这个持久化出口，避免两处各写一遍）
+            try { localStorage.setItem('jsTavern_wbTags', JSON.stringify(wbTagMap.value)); } catch (e) { /* 忽略 */ }
         };
 
         // ================= [ UI 状态统一收口到 app_config.json ] =================
@@ -4310,7 +4401,7 @@ export default {
         // 与此处建立集中 watch：所有相关 ref 已声明完毕（最后一个为 wbCategoryMap），
         // 回调里的 syncConfigToDisk 已内置 isRestoringConfig guard，恢复期触发的写盘会被自动拦截，无需 immediate。
         watch(
-            [theme, appSettings, sanitizeImportedTags, autoTagOnImport, snapshotConfig, sidebarWidth, viewMode, isCompactMode, sortBy, systemPromptPresets, lastWorldbookDirPath, lastPresetDirPath, wbCategoryMap, cardImportTimes],
+            [theme, appSettings, sanitizeImportedTags, autoTagOnImport, snapshotConfig, sidebarWidth, viewMode, isCompactMode, sortBy, systemPromptPresets, lastWorldbookDirPath, lastPresetDirPath, wbCategoryMap, wbTagMap, cardImportTimes],
             // 🚀 v1.8.5 性能修复：改走 500ms 防抖落盘。旧版直接调 syncConfigToDisk（全量
             //    序列化 appSettings/cardOverlays/wbCategoryMap + 加密 IPC + 同步写盘），
             //    连续 UI 微调（拖侧栏宽度/切主题等）每次都全量写盘，千卡库 overlays 体积
@@ -4966,7 +5057,7 @@ export default {
             apiEndpoint, apiKey, apiModel, apiType,
             theme, appSettings, sanitizeImportedTags, autoTagOnImport, snapshotConfig, localCategoryMap,
             sidebarWidth, viewMode, isCompactMode, sortBy,
-            systemPromptPresets, lastWorldbookDirPath, lastPresetDirPath, wbCategoryMap,
+            systemPromptPresets, lastWorldbookDirPath, lastPresetDirPath, wbCategoryMap, wbTagMap,
             cardImportTimes,
             // 🧵 预设缝合中心：常用条目库（随 ui 段一起落盘）
             presetStitchSnippets
@@ -5041,6 +5132,8 @@ export default {
             autoTagOnImport: importAutoTagEnabled,
             autoTagRules: compiledAutoTagRules,
             isDragging, dragCounter, importFileInput,
+            // 📇 DF-22：导入对话框的 `accept` **由格式表派生**（与磁盘扫描白名单同源，不得手写）
+            importAccept: cardFormats.IMPORT_ACCEPT,
             // 横切服务
             nativeAlert, showToast, appPrompt, safeData,
             // 配置中枢
@@ -5250,7 +5343,11 @@ export default {
             hasKeyIndex, compareKeyHashes, isExactSame,
             // ⚡ 秒开：书名取法（`wb.data` 不再常驻）+ 元数据后台补齐状态
             wbDisplayName, wbMetaFilling, wbMetaProgress,
-        } = useWorldbooks({ worldbooks, activeWorldbook, lastWorldbookDirPath, wbSearchQuery, wbFilterType, currentWbCategory, wbCategoryMap, saveWbCategoriesMap, syncWorldbooksToDisk, appMode, appPrompt, nativeAlert, confirmDialog, addLog, contextMenu, closeContextMenu });
+            // 🏷️ A2（2026-09-24）：世界书标签 + 分组生命周期
+            //    ⚠️ 必须在这里解构（AR-13 同型坑：ctx 里引用了但没解构 → 模板拿到 undefined）
+            getWbTags, setWbTags, toggleWbTagOn, addWbTagsBatch, wbAllTags,
+            renameWbGroup, deleteWbGroup,
+        } = useWorldbooks({ worldbooks, activeWorldbook, lastWorldbookDirPath, wbSearchQuery, wbFilterType, currentWbCategory, wbCategoryMap, wbTagMap, currentWbTags, saveWbCategoriesMap, syncWorldbooksToDisk, appMode, appPrompt, nativeAlert, confirmDialog, addLog, contextMenu, closeContextMenu });
 
         // 📊🔍 查重与差异比对：组合式函数注入（estimateCardTokens 为共享工具，保留在 App.vue）
         const {
@@ -5406,6 +5503,10 @@ export default {
             addAICandidateTag, addAICandidateTagManual, removeAICandidateTag,
             activeSystemPromptId, addSystemPromptPreset, deleteSystemPromptPreset,
             saveSystemPromptsToStorage, getCurrentSystemPromptContent, buildTaggingSystemPrompt,
+            // 🧠 R1+R2（2026-09-24）：仅 LLM 层时的分角色结构 + 结构化截取（UI 徽标用）
+            llmOnlyActive, activePromptPreset,
+            // 🧠 思维链（默认版/自定义/关闭）+ 🔌 连通性测试
+            activeCotPrompt, isTestingConn, connTestStatus, testApiConnection,
             useJailbreak, jailbreakPrompt, jailbreakPresets,
             isTranslating, translateCardContent, isRefactoring, refactorCardFormat,
             // 🧠 本地向量引擎（三层漏斗第二层）
@@ -5569,7 +5670,60 @@ export default {
                             selectedIds.value = cards.map(c => c.id);
                             await startAITagging();
                             return true;
-                        }
+                        },
+                        // 🧠 R1+R2+CoT（2026-09-24）：分角色结构 / 思维链 / 连通性测试的 e2e 访问口
+                        //    ⚠️ 必须走 __jskDiag —— 探针自己 import() 会拿到另一个模块实例，读数全错
+                        open: () => { openAITagModal(); return true; },
+                        setLayers: (rule, vector, llm) => {
+                            setFunnelLayer('rule', !!rule);
+                            setFunnelLayer('vector', !!vector);
+                            setFunnelLayer('llm', !!llm);
+                            return { rule: tagFunnel.value.rule, vector: tagFunnel.value.vector, llm: tagFunnel.value.llm };
+                        },
+                        llmOnly: () => !!(llmOnlyActive && llmOnlyActive.value),
+                        // 预设摘要（可序列化；不传 Proxy，避免 returnByValue 炸）
+                        presets: () => systemPromptPresets.value.map(p => ({
+                            id: p.id, name: p.name, expanded: p.expanded,
+                            hasSystem: !!String(p.system || p.content || '').trim(),
+                            hasAssistant: !!String(p.assistant || '').trim(),
+                            hasUser: !!String(p.user || '').trim(),
+                            hasPrefill: !!String(p.prefill || '').trim(),
+                            cotMode: p.cotMode || 'default',
+                            cotLen: String(p.cot || '').length
+                        })),
+                        // 当前生效预设实际会注入的思维链文本（供 e2e 断言默认/自定义/关闭三档）
+                        cot: () => ({
+                            mode: (activePromptPreset.value && activePromptPreset.value.cotMode) || 'default',
+                            len: activeCotPrompt.value.length,
+                            text: activeCotPrompt.value.slice(0, 60)
+                        }),
+                        // 展开/收起预设（e2e 需要展开后才能看到五个小页签）
+                        expandPreset: (i) => {
+                            const p = systemPromptPresets.value[Number(i) || 0];
+                            if (!p) return false;
+                            p.expanded = true;
+                            return true;
+                        },
+                        // 🔌 连通性测试（silent 避免弹 toast 干扰 e2e）
+                        testConn: (silent) => testApiConnection({ silent: silent !== false }),
+                        connState: () => ({ testing: isTestingConn.value, status: connTestStatus.value })
+                    },
+                    // 🧠 测卡侧栏（`ChatTestSidebar.vue`）—— 记忆库查看/编辑的 e2e 访问口
+                    //    ⚠️ 与上面的 `aiTag` 是**两个不同组件**：AI 打标弹窗里**没有**记忆库，
+                    //       记忆库在测卡 Tab 的侧栏里（踩过：探针误把 aiTag.open() 当测卡侧栏）。
+                    //    ⚠️ 侧栏只在「有卡打开 + 测卡 Tab」时渲染（`EditorPanel` 的 `v-if`），
+                    //       故必须先 `openCard()`；侧栏自身 `visible` 在 `EditorPanel` 里，App 层拿不到。
+                    chat: {
+                        // 打开库中第 n 张卡（默认第 1 张）—— 测卡侧栏的前置条件
+                        openCard: async (n) => {
+                            const item = library.value[Math.max(0, (Number(n) || 1) - 1)];
+                            if (!item) return false;
+                            await openFromLibrary(item);
+                            return true;
+                        },
+                        open: () => { openChatTab(); return true; },
+                        tab: () => currentTab.value,
+                        cardName: () => (cardData.value && cardData.value.name) || ''
                     },
                     // 🖱️ 选中前 N 张卡（dev/e2e 用：验证批量悬浮条/批量操作 UI）
                     select: (n) => {
@@ -5759,11 +5913,15 @@ export default {
             showExperimentalMenu, pushToTavern, showPushModal, currentOpenCardItem, currentPushTargetName, currentPushTargetHint, customPushTargets, currentCustomPushTarget, autoTagOnImport,
             useSillyTavernPushTarget, useCustomPushTarget, setCurrentCustomPushTarget, addCustomPushTarget, renameCurrentCustomPushTarget, removeCurrentCustomPushTarget,
             viewOptions, importFileInput, handleImportFiles, importCards, downloadCardFromUrl, selectAllCards, selectInvertCards, cleanGlobalTagsPrompt, sanitizeImportedTags,
+            // 📇 DF-22：导入 accept（供 HeaderBar 的隐藏 file input 绑定）
+            importAccept: cardFormats.IMPORT_ACCEPT,
             openBakFolder, openTrashFolder, openGlobalTrash, openChatTab,
             isScanningDisk, diskScanProgress, useSizeFilter, runDiskScan, showDiskScanModal,
             currentFolderPath, handleScanImported, refreshLibrary,
             isDragging, dragCounter, handleDragEnter, handleDragLeave, cardData, imgUrl, tabs, currentTab, currentTabInfo,
             safeData, specVersion, worldbookEntries, getEntryUid, getRegexUid, regexScripts, formattedJson, rawJsonDraft, applyRawJson, refreshCardData,
+            // 🛑 DF-25：编辑器横幅（不可保存格式的常驻提示）
+            activeCardSavable, activeCardUnsavableReason,
             addRegexScript, deleteRegexScript, syncRegexScriptField,
             // ☑️ 卡内正则栏批量操作
             regexBatchMode, regexBatchSelected, toggleRegexBatchMode, toggleRegexBatchSelect, isRegexSelected,
@@ -5827,6 +5985,10 @@ export default {
             // 🤖 AI 分类弹窗复用：模型解析 + 响应文本提取
             resolveApiModel, extractReplyContent,
             systemPromptPresets, activeSystemPromptId, addSystemPromptPreset, deleteSystemPromptPreset, saveSystemPromptsToStorage, getCurrentSystemPromptContent, buildTaggingSystemPrompt,
+            // 🧠 R1+R2：仅 LLM 层时的分角色结构 + 结构化截取（AITagModal 显示「已启用」徽标）
+            llmOnlyActive, activePromptPreset,
+            // 🧠 思维链 + 🔌 连通性测试（AITagModal 用）
+            activeCotPrompt, isTestingConn, connTestStatus, testApiConnection,
             // 🚨 破限 (Jailbreak) 状态（对抗模型拒答/道德审查；localStorage 持久化）
             useJailbreak, jailbreakPrompt, jailbreakPresets,
             // 🏷️ 自动打标规则表（v2.1 可配置）+ P1 三层漏斗开关 / 内置规则关闭清单
@@ -5903,6 +6065,8 @@ export default {
             showImageModal, previewImageUrl, openImageModal,
             showGlobalAssetModal, globalAssetTab, globalAllWorldbooks, globalAllRegexScripts,
             renderHTML, renderSafeHTML, cleanMarkdownFences, deleteCard, updateName, saveToLocalDisk, exportPackage,
+            // 🛑 DF-25：不可保存格式的告知（编辑器横幅 + 保存失败准确原因）
+            activeCardPath, activeCardSavable, activeCardUnsavableReason,
             activeCardTags, addSingleTag, removeSingleTag,
             tagModalVisible, tagInput, tagModalTitle,
             confirmSingleTag, closeSingleTagModal,
@@ -5958,6 +6122,10 @@ export default {
             wbContextMenu, openWbContextMenu, closeWbContextMenu, openWbInFolder,
             // 📁 世界书分组
             currentWbCategory, wbCategories, changeWbCategory,
+            // 🏷️ A2（2026-09-24）：世界书标签 + 分组生命周期（显式重命名 / 解散）
+            currentWbTags, wbTagMap,
+            getWbTags, setWbTags, toggleWbTagOn, addWbTagsBatch, wbAllTags,
+            renameWbGroup, deleteWbGroup,
             // 💾 统一 IPC 落盘
             syncWorldbooksToDisk,
             // 🌍 世界书词条深度编辑 (Entry IDE)

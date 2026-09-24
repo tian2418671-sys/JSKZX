@@ -1,0 +1,14 @@
+{
+  "_comment": "📇 角色卡文件格式能力表（唯一权威定义）—— DF-22 根治：扫描白名单 / 导入 accept / 保存支持都从这里派生",
+  "_why": "缺陷现象「导入能进、扫描不进」的根因是同一件事在三处各写一份（HeaderBar accept / cardLoader 注释 / main.js 两处白名单）必然漂移。用 JSON 作单一数据源，CJS(main.js) 与 ESM(渲染层) 都能直接读。",
+  "_keyFact": "main.js 的 file:saveCard 只支持 .json/.png（源码原话「webp 无法回写数据」）⇒ JPEG/WebP 无法把标签/分类/编辑写回文件。故正确方向是收敛到「可读且可写」的格式，而非扩大「只能读」的格式。",
+  "scannable": [".png", ".webp", ".json"],
+  "savable": [".png", ".webp", ".json"],
+  "image": [".png", ".webp"],
+  "_notes": {
+    "scannable": "可扫描进库（磁盘目录扫描 + 导入对话框共用此列表）",
+    "savable": "可保存内容 —— ⚠️ **`.webp` 属「可保存但会升级」**：保存时自动转为同名 `.png`（与 SillyTavern 自身行为一致：`character-card-parser.js` 写 PNG tEXt 块 + `writeCharacterData` 输出路径硬编码 .png），成功后 `newPath` 指向新 PNG，渲染层必须同步 path",
+    "image": "图片类（需读内嵌数据；非图片走 JSON.parse）",
+    "webp": "WebP 原本无法回写（无 PNG 块结构）⇒ DF-25 修复为「保存时升级为 PNG」；转换需 sharp（可选依赖），缺失时给出可操作提示"
+  }
+}

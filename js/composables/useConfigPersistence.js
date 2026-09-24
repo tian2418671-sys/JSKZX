@@ -31,7 +31,7 @@ export function useConfigPersistence({
     // —— 收集源：UI 状态 ——
     theme, appSettings, sanitizeImportedTags, autoTagOnImport, snapshotConfig, localCategoryMap,
     sidebarWidth, viewMode, isCompactMode, sortBy,
-    systemPromptPresets, lastWorldbookDirPath, lastPresetDirPath, wbCategoryMap,
+    systemPromptPresets, lastWorldbookDirPath, lastPresetDirPath, wbCategoryMap, wbTagMap,
     // —— 收集源：导入时间映射（卡片首次入库时刻持久化） ——
     cardImportTimes,
     // —— 收集源：预设缝合中心「常用条目库」（🧵 自定义条目复用） ——
@@ -96,6 +96,8 @@ export function useConfigPersistence({
                 lastWorldbookDirPath: lastWorldbookDirPath.value || '',
                 lastPresetDirPath: lastPresetDirPath.value || '',
                 wbCategoryMap: JSON.parse(JSON.stringify(wbCategoryMap.value || {})),
+                // 🏷️ A2：世界书**标签**映射（与分组同源；独立世界书标签留在配置层）
+                wbTagMap: JSON.parse(JSON.stringify((wbTagMap && wbTagMap.value) || {})),
                 customTagCategories: JSON.parse(JSON.stringify(Array.isArray(customTagCategories.value) ? customTagCategories.value : [])),
                 customTagAssignments: JSON.parse(JSON.stringify(customTagAssignments.value || {})),
                 builtinCatHidden: JSON.parse(JSON.stringify(builtinCatHidden.value || {})),

@@ -352,15 +352,47 @@
                         <template v-else>
                             <div v-if="!memItems.length" class="text-zinc-600 py-1">{{ memViewMode === 'card' ? '本卡暂无记忆（发送对话后会自动记录）' : '记忆库为空' }}</div>
                             <div v-for="it in memItems" :key="it.id"
-                                 class="flex items-start justify-between gap-1.5 py-0.5 border-b border-zinc-800/60 last:border-b-0 group">
-                                <div class="min-w-0">
-                                    <span class="text-cyan-400/80">{{ it.type === 'fact' ? (it.key || '备忘') : (it.type === 'summary' ? '摘要' : '消息') }}：</span>
-                                    <span class="text-zinc-300 break-all">{{ it.content }}</span>
-                                    <span v-if="memViewMode === 'all' && !(it.cardPath)" class="ml-1 text-amber-500/80" title="未归属任何卡">◇</span>
+                                 class="py-0.5 border-b border-zinc-800/60 last:border-b-0 group">
+                                <!-- 查看态 -->
+                                <div v-if="editingMemId !== it.id" class="flex items-start justify-between gap-1.5">
+                                    <div class="min-w-0">
+                                        <span class="text-cyan-400/80">{{ it.type === 'fact' ? (it.key || '备忘') : (it.type === 'summary' ? '摘要' : '消息') }}：</span>
+                                        <span class="text-zinc-300 break-all">{{ it.content }}</span>
+                                        <span v-if="memViewMode === 'all' && !(it.cardPath)" class="ml-1 text-amber-500/80" title="未归属任何卡">◇</span>
+                                    </div>
+                                    <div class="flex items-center gap-1 shrink-0 opacity-60 group-hover:opacity-100">
+                                        <button @click="startMemEdit(it)"
+                                                class="text-cyan-400/70 hover:text-cyan-300 disabled:opacity-30"
+                                                :disabled="!!editingMemId"
+                                                :title="editingMemId ? '请先完成或取消当前编辑' : '编辑这条记忆'">✏</button>
+                                        <button @click="onMemRemove(it)" :disabled="memRemovingId === it.id || !!editingMemId"
+                                                class="text-rose-400/70 hover:text-rose-300 disabled:opacity-30"
+                                                :title="memRemovingId === it.id ? '删除中...' : '删除这条记忆'">🗑</button>
+                                    </div>
                                 </div>
-                                <button @click="onMemRemove(it)" :disabled="memRemovingId === it.id"
-                                        class="text-rose-400/70 hover:text-rose-300 shrink-0 opacity-60 group-hover:opacity-100 disabled:opacity-30"
-                                        :title="memRemovingId === it.id ? '删除中...' : '删除这条记忆'">🗑</button>
+                                <!-- 编辑态（草稿在本地，取消即丢弃） -->
+                                <div v-else class="space-y-1 py-0.5">
+                                    <div v-if="it.type === 'fact'" class="flex items-center gap-1">
+                                        <span class="text-[10px] text-zinc-500 shrink-0">key</span>
+                                        <input v-model="memDraft.key" type="text" maxlength="200"
+                                               class="flex-1 min-w-0 bg-zinc-900 border border-zinc-700 rounded px-1 py-0.5 text-zinc-200 focus:border-cyan-600 focus:outline-none"
+                                               placeholder="备忘键（如：喜好）">
+                                    </div>
+                                    <textarea v-model="memDraft.content" rows="2" maxlength="4096"
+                                              @keydown.ctrl.enter.prevent="saveMemEdit(it)"
+                                              @keydown.esc.prevent="cancelMemEdit"
+                                              class="w-full bg-zinc-900 border border-zinc-700 rounded px-1 py-0.5 text-zinc-200 focus:border-cyan-600 focus:outline-none resize-y custom-scrollbar"
+                                              placeholder="记忆内容（不能为空）"></textarea>
+                                    <div class="flex items-center gap-1.5">
+                                        <button @click="saveMemEdit(it)" :disabled="memSavingId === it.id || !memDraft.content.trim()"
+                                                class="text-white bg-cyan-700 hover:bg-cyan-600 disabled:bg-zinc-700 disabled:text-zinc-500 rounded px-1.5 shrink-0">
+                                            {{ memSavingId === it.id ? '保存中...' : '保存' }}
+                                        </button>
+                                        <button @click="cancelMemEdit" :disabled="memSavingId === it.id"
+                                                class="text-zinc-300 bg-zinc-700 hover:bg-zinc-600 disabled:opacity-40 rounded px-1.5 shrink-0">取消</button>
+                                        <span class="text-zinc-600">Ctrl+Enter 保存</span>
+                                    </div>
+                                </div>
                             </div>
                         </template>
                     </div>
@@ -427,7 +459,7 @@ import {
 } from '../composables/chat/useChatSettings.js';
 import {
     isMemoryEnabled, setMemoryEnabled, getMemoryLimit, setMemoryLimit, getMemoryStats, clearMemory,
-    listMemory, removeMemory
+    listMemory, removeMemory, updateMemory
 } from '../composables/chat/useChatMemory.js';
 import {
     loadSessions, setLastSessionId
@@ -533,6 +565,11 @@ export default {
             memItems: [],
             memItemsLoading: false,
             memRemovingId: '',
+            // 🧠 记忆编辑（CT-17 补全：查看/删除已有，本次补「编辑」）
+            //    一次只编辑一条（editingMemId），draft 为本地草稿（取消即丢弃，不污染列表）
+            editingMemId: '',
+            memDraft: { content: '', key: '' },
+            memSavingId: '',
             // 变量树展开态（路径集合）
             expandedVarPaths: {},
             _unwatch: null
@@ -595,6 +632,11 @@ export default {
             // 🧠 切到设置分区时加载记忆列表（CT-17：查看器 + 逐条删除）
             if (t === 'settings') { this.refreshMemStats(); this.refreshMemItems(); }
         },
+        // 🐛 修复（2026-09-24）：切换「只看本卡 / 全部」时**必须重新拉列表**。
+        //    旧实现只改了 `memViewMode` 标志 —— 按钮高亮会变，但**列表内容纹丝不动**
+        //    （用户看到的是上一次 scope 的数据，以为「全部」里没有别的卡）。
+        //    属「有开关、无效果」的静默失效（与 AI-05「开关时灵时不灵」同型）。
+        memViewMode() { this.refreshMemItems(); },
         // chatStorage.hydrate() 完成后重读一次：否则侧栏显示的是「首次运行的默认值」，
         // 而磁盘里其实有上次退出时保存的回复数/用户名/人设。
         storageReady(v) { if (v) this.refreshLocal(); },
@@ -785,6 +827,56 @@ export default {
             }
         } finally {
             this.memRemovingId = '';
+        }
+    },
+    // ═══════════════════════════════════════════════════════════════
+    // 🧠 记忆编辑（CT-17 补全，2026-09-24）
+    // ───────────────────────────────────────────────────────────────
+    // 📌 `updateMemory` 早已就绪（`main/memoryStore.js` 支持 content/key/cardName/cardPath/type），
+    //    缺的只是 UI。设计要点：
+    //    · **一次只编辑一条**（`editingMemId`）—— 避免多份草稿状态不同步；
+    //    · **草稿在本地**（`memDraft`），取消即丢弃 ⇒ 不会把半成品写进存储；
+    //    · **只有 fact 可改 key** —— message/summary 的 key 是程序生成的分类键，
+    //      用户改了没意义（且可能破坏去重合并语义）。
+    // ═══════════════════════════════════════════════════════════════
+    /** 进入编辑态：把该条的值拷进草稿（不直接编辑列表项，避免取消时无法还原） */
+    startMemEdit(it) {
+        if (!it || !it.id) return;
+        this.editingMemId = it.id;
+        this.memDraft = { content: String(it.content || ''), key: String(it.key || '') };
+    },
+    /** 取消编辑（丢弃草稿） */
+    cancelMemEdit() {
+        this.editingMemId = '';
+        this.memDraft = { content: '', key: '' };
+    },
+    /** 保存编辑：只提交**真正变化**的字段（少写一次盘 = 少一次 I/O 与快照风险） */
+    async saveMemEdit(it) {
+        if (!it || !it.id || this.memSavingId) return;
+        const content = String(this.memDraft.content || '').trim();
+        if (!content) { this.$emit('log', '⚠️ 记忆内容不能为空'); return; }
+        const patch = {};
+        if (content !== String(it.content || '').trim()) patch.content = content;
+        // 仅 fact 允许改 key（见上方说明）
+        if (it.type === 'fact') {
+            const key = String(this.memDraft.key || '').trim();
+            if (key !== String(it.key || '').trim()) patch.key = key;
+        }
+        if (!Object.keys(patch).length) { this.cancelMemEdit(); return; }   // 无变化 → 直接退出
+        this.memSavingId = it.id;
+        try {
+            const res = await updateMemory(it.id, patch);
+            if (res && res.success) {
+                // 本地就地更新（不必重拉整个列表；但统计要刷，因为 fact 改 key 可能触发修剪）
+                Object.assign(it, patch);
+                this.cancelMemEdit();
+                await this.refreshMemStats();
+                this.$emit('log', '✏️ 已更新记忆：' + content.slice(0, 20));
+            } else {
+                this.$emit('log', '⚠️ 更新记忆失败' + (res && res.error ? ('：' + res.error) : ''));
+            }
+        } finally {
+            this.memSavingId = '';
         }
     },
     armMemClear() { this.memClearArmed = true; this.$emit('log', '⚠️ 再次点击「确认清空？」才会删除长期记忆'); },

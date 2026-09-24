@@ -34,6 +34,10 @@
                         <span class="text-sm font-bold text-purple-400">『{{ group.name }}』</span>
                         <span class="text-xs text-zinc-500">共 {{ group.list.length }} 个内容高度相似的版本</span>
                     </div>
+                    <!-- 📊 排序口径说明（2026-09-24）：用户能知道「为什么这个排在前面」 -->
+                    <div class="mb-2 text-[10px] text-zinc-500">
+                        排序：📊 综合分从高到低（最相似的排最前）；最左为 👑 基准版（内容最长者）
+                    </div>
 
                     <div class="flex gap-3 overflow-x-auto custom-scrollbar pb-2">
                         <div v-for="(v, vIdx) in group.list" :key="vIdx"
@@ -56,6 +60,15 @@
                                     <span v-if="v._keysSimPct !== null && v._keysSimPct !== undefined" class="text-amber-300/90">
                                         ｜ 🔑 触发词重合: {{ v._keysSimPct }}%
                                     </span>
+                                </div>
+                                <!-- 📊 综合分（2026-09-24，世界书查重方案「第 2 步」补完）：
+                                     旧版 `_score` 算出来却**从未被消费**（不排序、不显示）。
+                                     现在：列表按它降序（最像的排最前），并把构成写清便于核对。
+                                     ⚠️ 权重未标定（真实库仅 8 对真重复）→ 只作**展示排序**，不参与闸门判定。 -->
+                                <div v-if="vIdx !== 0 && typeof v._score === 'number'"
+                                     class="text-[10px] font-mono text-fuchsia-300/90 mb-1"
+                                     title="综合分 = 长度惩罚 × (0.75×内容重合 + 0.25×触发词重合)；仅供排序，不参与是否同组的判定">
+                                    📊 综合分: {{ Math.round(v._score * 100) }}%
                                 </div>
                                 <!-- 🛡️ PK-29：给出**可验证依据** —— 旧版只显示 simhash 距离换算的
                                      「相似度」，实测会严重误导（距离 19 → 显示 70%，真实内容重叠仅 0.1%）。

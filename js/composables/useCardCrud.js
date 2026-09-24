@@ -72,6 +72,91 @@ function logSkipSummary() {
   console.log(`[载入] 跳过 ${_skipLogTotal} 个非角色卡/不可解析文件` + (hidden > 0 ? `（同类日志已折叠 ${hidden} 条）` : ''));
 }
 
+// ═══════════════════════════════════════════════════════════════
+// 🛑 DF-25（2026-09-24）：**写盘失败不得静默**
+// ───────────────────────────────────────────────────────────────
+// 📖 病根：`file:saveCard` 对不可写格式（WebP/JPEG）返回 `{success:false, error:'…无法回写数据'}`，
+//    而调用方只写 `if (saveRes && saveRes.success) { ... }` —— **失败分支什么都不做**
+//    （`try/catch` 也接不住：它不抛错，只是 `success:false`）
+//    ⇒ 用户「改了内容、看起来生效、重启还原」且**全程无提示**（与 DF-20「头疼捂嘴」同型）。
+// ✅ 修法（方案 ③：去掉静默，不转格式）：**按原因分桶汇总提示，每会话每桶只提示一次** ——
+//    · 不逐卡弹框（批量导入 100 张 WebP 会淹没界面）；
+//    · 但**必须让用户知道**（汇总一次 + 日志），且区分「格式不支持」与「其他失败」两类原因。
+// ═══════════════════════════════════════════════════════════════
+const _saveFailSeen = new Set();   // 已提示过的「原因桶」
+const _saveFailCount = { unsupported: 0, other: 0 };
+const _saveFailSample = { unsupported: [], other: [] };
+
+/**
+ * 记录一次保存失败；**首次遇到该原因桶时**给出汇总提示（不刷屏）。
+ * @param {string} reason 失败原因（来自 `saveRes.error`）
+ * @param {string} cardName 卡片名（仅用于日志样例）
+ * @param {(msg:string, type?:string, dur?:number)=>void} [toast] 非阻塞提示出口
+ */
+function noteSaveFailure(reason, cardName, toast) {
+  const msg = String(reason || '未知原因');
+  // 「能力边界」是可预期的（提示措辞不同，且应引导用户而非报错）——
+  // 包含：格式不支持（JPEG）/ 缺转换组件（WebP 无 sharp）
+  const isUnsupported = /无法回写|暂不支持|无法写入角色卡数据|缺少图片转换组件/.test(msg);
+  const bucket = isUnsupported ? 'unsupported' : 'other';
+  _saveFailCount[bucket]++;
+  if (_saveFailSample[bucket].length < 5) _saveFailSample[bucket].push(cardName || '(未命名)');
+  if (_saveFailSeen.has(bucket)) return;      // 本会话已提示过该桶 → 只累计，不再打扰
+  _saveFailSeen.add(bucket);
+  if (typeof toast !== 'function') return;
+  if (isUnsupported) {
+    toast('⚠️ 有卡片无法保存内容（格式不支持或缺少图片转换组件）——'
+      + '标签与分类仍会保留，详情见日志。', 'warning', 8000);
+  } else {
+    toast(`⚠️ 有卡片保存失败（${msg}）——已记录，详见日志。`, 'warning', 8000);
+  }
+}
+/** 汇总输出（供批量流程收尾调用）——**如实报数，不掩盖** */
+function logSaveFailureSummary() {
+  const total = _saveFailCount.unsupported + _saveFailCount.other;
+  if (total === 0) return;
+  const parts = [];
+  if (_saveFailCount.unsupported) {
+    parts.push(`格式不支持 ${_saveFailCount.unsupported} 张（例：${_saveFailSample.unsupported.join('、')}）`);
+  }
+  if (_saveFailCount.other) {
+    parts.push(`其他失败 ${_saveFailCount.other} 张（例：${_saveFailSample.other.join('、')}）`);
+  }
+  console.warn(`[保存] 本会话累计写盘失败 ${total} 张：${parts.join(' ｜ ')}`);
+}
+
+/**
+ * ✅ **写盘结果统一处理**（DF-25 真修复的配套）。
+ *
+ * 为什么必须有它：`saveCard` 对 **WebP 卡**会**升级为 PNG**（与 SillyTavern 自身行为一致），
+ * 成功后返回 `{ success:true, newPath, oldPath, converted:true }` ——
+ * 此时**磁盘上的文件已经换名**，渲染层若不更新 `item.path`，下次保存会指向**已删除的 .webp**。
+ *
+ * @param {object} res `saveCard` 的返回值
+ * @param {object} item 库条目（会被就地更新 `path` / `_mtime` / `_size`）
+ * @param {(msg:string,type?:string,dur?:number)=>void} [toast]
+ * @returns {{ok:boolean, converted:boolean, error?:string}}
+ */
+function applySaveResult(res, item, toast) {
+  if (res && res.success) {
+    if (res.converted && res.newPath && item) {
+      // 🖼️ WebP → PNG 升级：**必须同步库条目的 path**（否则下次保存指向已删文件）
+      const oldPath = item.path;
+      item.path = res.newPath;
+      if (item.fileName) item.fileName = String(res.newPath).split(/[\\/]/).pop();
+      console.log(`[保存] 卡片已从 WebP 升级为 PNG：${oldPath} → ${res.newPath}`);
+      if (typeof toast === 'function') {
+        toast('✅ 该卡片原为 WebP 格式（无法写入内容），已自动升级为 PNG 并保存成功。', 'success', 6000);
+      }
+    }
+    if (res.mtime && item) item._mtime = res.mtime;
+    if (res.size && item) item._size = res.size;
+    return { ok: true, converted: !!res.converted };
+  }
+  noteSaveFailure(res && res.error, (item && item.name) || '', toast);
+  return { ok: false, converted: false, error: (res && res.error) || '未知错误' };
+}
+
 export function useCardCrud({
     // —— 共享状态：App.vue 顶层持有，ref/computed 原样注入 ——
     library,              // 卡片库集合
@@ -164,16 +249,18 @@ export function useCardCrud({
         if (window.electronAPI && typeof window.electronAPI.saveCard === 'function' && cardItem.path && cardItem.data) {
             try {
                 const saveRes = await window.electronAPI.saveCard(cardItem.path, JSON.parse(JSON.stringify(cardItem.data)));
-                if (saveRes && saveRes.success && saveRes.mtime) {
-                    cardItem._mtime = saveRes.mtime;
-                } else {
+                // ✅ DF-25：统一处理（含 WebP→PNG 升级后的 path 同步）
+                const r = applySaveResult(saveRes, cardItem, showToast);
+                if (!r.ok) {
                     // 🔧 修复：物理写盘失败（快照备份失败/PNG 结构异常/文件缺失）时，
                     //    立即强制落盘覆盖层（不走 500ms 防抖），确保重启后标签仍可恢复
-                    console.error('卡片物理写盘失败，强制落盘覆盖层兜底:', saveRes && saveRes.error);
+                    console.error('卡片物理写盘失败，强制落盘覆盖层兜底:', r.error);
                     try { syncConfigToDisk(); } catch (e) { /* 忽略 */ }
                 }
             } catch (err) {
                 console.error('卡片文件物理覆盖失败，已用物理配置文件兜底:', err);
+                // 🛑 DF-25：抛错路径同样必须可见（旧实现只写 console.error）
+                noteSaveFailure(err && err.message, cardItem.name, showToast);
                 // 🔧 修复：同上——物理写盘抛异常时立即强制落盘覆盖层，防重启丢失
                 try { syncConfigToDisk(); } catch (e) { /* 忽略 */ }
             }
@@ -344,10 +431,12 @@ export function useCardCrud({
             await Promise.all(batch.map(async (cardInfo) => {
                 try {
                     const saveRes = await window.electronAPI.saveCard(cardInfo.path, JSON.parse(JSON.stringify(cardInfo.data)));
-                    // 🔧 v1.8.5 配套：回写新 mtime，防下次刷新误判变化触发死循环重写
-                    if (saveRes && saveRes.success && saveRes.mtime) cardInfo._mtime = saveRes.mtime;
+                    // ✅ DF-25：统一处理（回写 mtime/size + WebP→PNG 升级后的 path 同步）
+                    applySaveResult(saveRes, cardInfo, showToast);
                 } catch (e) {
                     console.warn(`自动打标后台保存失败 [${cardInfo.name}]:`, e);
+                    // 🛑 DF-25：抛错路径同样必须可见
+                    noteSaveFailure(e && e.message, cardInfo.name, showToast);
                 }
             }));
             await new Promise(r => setTimeout(r, 0)); // 批间让出主线程一拍
@@ -533,9 +622,11 @@ export function useCardCrud({
                         } else {
                             try {
                                 const saveRes = await window.electronAPI.saveCard(cardInfo.path, JSON.parse(JSON.stringify(cardInfo.data)));
-                                if (saveRes && saveRes.success && saveRes.mtime) cardInfo._mtime = saveRes.mtime;
+                                // ✅ DF-25：统一处理（含 WebP→PNG 升级后的 path 同步）
+                                applySaveResult(saveRes, cardInfo, showToast);
                             } catch (e) {
                                 console.warn(`自动打标物理保存失败 [${cardInfo.name}]:`, e);
+                                noteSaveFailure(e && e.message, cardInfo.name, showToast);
                             }
                         }
                     }
@@ -779,7 +870,8 @@ export function useCardCrud({
             else reset(); // 旧卡不在新库：关闭编辑器，避免编辑已失效对象
         }
         // 🚀 自动打标落盘转后台低并发执行，不阻塞首屏呈现
-        flushDeferredAutoTagSaves();
+        // 🛑 DF-25：后台落盘结束后输出**写盘失败汇总**（如实报数，不掩盖）
+        flushDeferredAutoTagSaves().then(logSaveFailureSummary, logSaveFailureSummary);
     };
 
     /**

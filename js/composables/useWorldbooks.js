@@ -8,11 +8,20 @@ import { ref, computed, triggerRef } from 'vue';
 //    超限就拒绝并说明原因 —— 而不是等内核杀进程（PK-27 那次连提示的机会都没有）。
 //    顺序路径（concurrency=1）峰值 ≈ 单本，天然安全，无需预检。
 import { preflightRead } from '../utils/memoryGuard.js';
+// 🏷️ A2（2026-09-24，RFC-20260921-WB-TAGS-02）：世界书分组/标签的纯函数层
+//    ⚠️ 已拍板：元数据**只留配置文件**（不写用户文件、不产快照）+ 保留中文哨兵 + 补碰撞防护。
+import {
+    WB_CAT_ALL, WB_CAT_DEFAULT, WB_RESERVED_CATEGORY_NAMES,
+    normalizeWbCategoryName, validateWbCategoryName, normalizeWbTag, normalizeWbTags,
+    toggleWbTag, countWbTags, matchWbFilter
+} from '../utils/wbGroupsTags.js';
 
 export function useWorldbooks({
     // 共享状态
     worldbooks, activeWorldbook, lastWorldbookDirPath,
     wbSearchQuery, wbFilterType, currentWbCategory, wbCategoryMap,
+    // 🏷️ A2：世界书**标签**映射（key = path||name → string[]），与 wbCategoryMap 同为配置层
+    wbTagMap, currentWbTags,
     // 工具方法
     saveWbCategoriesMap, syncWorldbooksToDisk, appMode,
     appPrompt, nativeAlert, confirmDialog, addLog,
@@ -925,13 +934,145 @@ export function useWorldbooks({
 
     // 1. 自动提取所有分组（Set 去重；'默认' 始终保留；无书的分类自动消失）
     const wbCategories = computed(() => {
-        const categories = new Set(['默认']);
+        const categories = new Set([WB_CAT_DEFAULT]);
         worldbooks.value.forEach(wb => {
             const cat = getWbCategory(wb);
             if (cat && cat.trim() !== '') categories.add(cat.trim());
         });
+        // 🚩 A2：**不得**把视图哨兵「全部」列为一个分组（它表示"不过滤"，不是真实分组）
+        categories.delete(WB_CAT_ALL);
         return Array.from(categories);
     });
+
+    // ═══════════════════════════════════════════════════════════════
+    // 🏷️ A2（2026-09-24）：世界书**标签**（存在配置层，与分组同源）
+    // ───────────────────────────────────────────────────────────────
+    // 📌 已拍板：**独立世界书标签留在系统配置**（不写进世界书文件）——
+    //    理由见 `js/utils/wbGroupsTags.js` 文件头（用户明确选择：角色卡随卡片走，世界书留配置）。
+    //    ⇒ 因此**不需要**新 IPC / 不产快照 / 不碰第三方格式（原方案要写 extensions.jskzx，已否决）。
+    // ═══════════════════════════════════════════════════════════════
+
+    /** 取某本书的标签（数组，已规范化去重） */
+    const getWbTags = (wb) => {
+        if (!wb) return [];
+        // 内存优先（本轮改动即时生效），否则读配置层
+        if (Array.isArray(wb.tags)) return normalizeWbTags(wb.tags);
+        const key = wb.path || wb.name || '';
+        if (key && wbTagMap && wbTagMap.value && Array.isArray(wbTagMap.value[key])) {
+            return normalizeWbTags(wbTagMap.value[key]);
+        }
+        return [];
+    };
+
+    /** 写某本书的标签（内存 + 配置层双写，与分组同款） */
+    const setWbTags = (wb, tags) => {
+        if (!wb) return [];
+        const next = normalizeWbTags(tags);
+        wb.tags = next;
+        const key = wb.path || wb.name || '';
+        if (key && wbTagMap && wbTagMap.value) {
+            if (next.length) wbTagMap.value[key] = next;
+            else delete wbTagMap.value[key];      // 空数组不留残key（防配置膨胀）
+        }
+        return next;
+    };
+
+    /** 切换一个标签（有则删、无则加）—— 供 UI 点击标签使用 */
+    const toggleWbTagOn = (wb, tag) => {
+        const next = toggleWbTag(getWbTags(wb), tag);
+        setWbTags(wb, next);
+        saveWbCategoriesMap();     // 与分组共用同一个持久化出口（配置层）
+        return next;
+    };
+
+    /** 给多本书批量加标签（供批量操作） */
+    const addWbTagsBatch = (list, tag) => {
+        const n = normalizeWbTag(tag);
+        if (!n) return 0;
+        let count = 0;
+        for (const wb of (list || [])) {
+            const next = normalizeWbTags([...getWbTags(wb), n]);
+            if (next.length !== getWbTags(wb).length) count++;
+            setWbTags(wb, next);
+        }
+        if (count) saveWbCategoriesMap();
+        return count;
+    };
+
+    /** 全库标签清单（含使用频次，按热度降序）—— 供标签选择器 */
+    const wbAllTags = computed(() => countWbTags(worldbooks.value.map(wb => getWbTags(wb))));
+
+    // ═══════════════════════════════════════════════════════════════
+    // 📁 A2：分组**生命周期**（显式重命名 / 删除入口 —— 规格 §〇-#6 指出「缺的只有入口」）
+    // ───────────────────────────────────────────────────────────────
+    // 📌 级联逻辑（改 `wbCategoryMap` 键、清 map、移空回落）**早已存在**（在
+    //    `renameWorldbook` / `deleteWorldbook` 里），此处只补「**显式**对整组操作」的入口。
+    // ═══════════════════════════════════════════════════════════════
+
+    /**
+     * 📁 重命名分组（级联全组）
+     * @param {string} oldName 现分组名
+     * @returns {Promise<number>} 实际改动的书本数（0 = 未改动）
+     */
+    const renameWbGroup = async (oldName) => {
+        const from = normalizeWbCategoryName(oldName);
+        if (!from || from === WB_CAT_ALL) {
+            nativeAlert('不能重命名「全部」（它是视图筛选，不是真实分组）。', 'warning');
+            return 0;
+        }
+        const newRaw = await appPrompt(
+            `📁 重命名分组「${from}」\n\n请输入新名称（组内 ${worldbooks.value.filter(w => getWbCategory(w) === from).length} 本书将一起改名）：`,
+            from
+        );
+        if (newRaw === null) return 0;
+        const v = validateWbCategoryName(newRaw, { existing: wbCategories.value, self: from });
+        if (!v.ok) { nativeAlert(`❌ ${v.reason}`, 'error'); return 0; }
+        const to = v.name;
+        if (to === from) return 0;
+
+        let n = 0;
+        for (const wb of worldbooks.value) {
+            if (getWbCategory(wb) !== from) continue;
+            wb.category = to;
+            const key = wb.path || wb.name || '';
+            if (key) wbCategoryMap.value[key] = to;
+            n++;
+        }
+        saveWbCategoriesMap();
+        if (currentWbCategory.value === from) currentWbCategory.value = to;
+        addLog(`📁 分组「${from}」已重命名为「${to}」（${n} 本）`, 'success');
+        return n;
+    };
+
+    /**
+     * 🗑️ 删除分组（组内全部回落「默认」）
+     * ⚠️ **只解散分组，不删书** —— 必须让用户明确知道（二次确认文案写清）。
+     * @param {string} name 分组名
+     * @returns {Promise<number>} 回落的书本数
+     */
+    const deleteWbGroup = async (name) => {
+        const target = normalizeWbCategoryName(name);
+        if (!target || target === WB_CAT_ALL || target === WB_CAT_DEFAULT) {
+            nativeAlert('「全部」「默认」不能删除。', 'warning');
+            return 0;
+        }
+        const members = worldbooks.value.filter(w => getWbCategory(w) === target);
+        const ok = await confirmDialog(
+            `确定解散分组「${target}」吗？\n\n组内 ${members.length} 本世界书会移回「${WB_CAT_DEFAULT}」，`
+            + `**不会删除任何世界书**。`
+        );
+        if (!ok) return 0;
+
+        for (const wb of members) {
+            wb.category = WB_CAT_DEFAULT;
+            const key = wb.path || wb.name || '';
+            if (key) delete wbCategoryMap.value[key];
+        }
+        saveWbCategoriesMap();
+        if (currentWbCategory.value === target) currentWbCategory.value = WB_CAT_ALL;
+        addLog(`🗑️ 分组「${target}」已解散（${members.length} 本移回「${WB_CAT_DEFAULT}」）`, 'warning');
+        return members.length;
+    };
 
     // 3. 修改世界书分组（自建弹窗替代 Electron 不支持的 prompt）
     const changeWbCategory = async (wb) => {
@@ -942,8 +1083,11 @@ export function useWorldbooks({
             `📁 将《${displayName}》移动到新分组\n\n请输入目标分组名称（当前：${currentCat}）：\n提示：输入全新的名字将自动创建新分组。`,
             currentCat
         );
-        if (newCat !== null && newCat.trim() !== '') {
-            const finalCat = newCat.trim();
+        if (newCat !== null) {
+            // 🛡️ A2：碰撞防护（「全部」是视图哨兵，用它当分组名会让该组筛选**静默失效**）
+            const v = validateWbCategoryName(newCat, { existing: wbCategories.value, self: currentCat });
+            if (!v.ok) { nativeAlert(`❌ ${v.reason}`, 'error'); return; }
+            const finalCat = v.name;
             wb.category = finalCat;
             const key = wb.path || wb.name || '';
             if (key) {
@@ -952,14 +1096,15 @@ export function useWorldbooks({
             }
             addLog(`📁 已将《${displayName}》移动到分组: ${finalCat}`, 'info');
             // 若当前筛选的分组已被移空，自动回落"全部"避免空列表困惑
-            if (currentWbCategory.value !== '全部' && currentWbCategory.value !== finalCat) {
+            if (currentWbCategory.value !== WB_CAT_ALL && currentWbCategory.value !== finalCat) {
                 const stillHas = worldbooks.value.some(w => getWbCategory(w) === currentWbCategory.value);
-                if (!stillHas) currentWbCategory.value = '全部';
+                if (!stillHas) currentWbCategory.value = WB_CAT_ALL;
             }
         }
     };
 
-    // 计算属性：世界书列表筛选（搜索 + 词条数过滤 + 📁 分组过滤）
+    // 计算属性：世界书列表筛选（搜索 + 词条数过滤 + 📁 分组过滤 + 🏷️ 标签过滤）
+    // 🏷️ A2：复合过滤判定抽到纯函数 `matchWbFilter`（可单测；语义见规格 TC-WB-05）
     const filteredWorldbooks = computed(() => {
         return worldbooks.value.filter(wb => {
             const name = wbDisplayName(wb).toLowerCase();
@@ -968,18 +1113,19 @@ export function useWorldbooks({
             // ⚡ PK-26：秒开后 `wb.data` 为 null（懒加载）→ 词条数**必须走轻量 `wbEntryCount`**，
             //    否则「1-15条 / 15+条 / 空书」三个筛选器恒判定为空（用户报的「依旧从 0 开始依旧是 0」）。
             const entryCount = wbEntryCount(wb);
-            let matchesFilter = true;
-            if (wbFilterType.value === 'empty') matchesFilter = entryCount === 0;
-            else if (wbFilterType.value === 'small') matchesFilter = entryCount > 0 && entryCount <= 15;
-            else if (wbFilterType.value === 'large') matchesFilter = entryCount > 15;
+            let matchesCount = true;
+            if (wbFilterType.value === 'empty') matchesCount = entryCount === 0;
+            else if (wbFilterType.value === 'small') matchesCount = entryCount > 0 && entryCount <= 15;
+            else if (wbFilterType.value === 'large') matchesCount = entryCount > 15;
 
-            // 📁 分组过滤（'全部' 不过滤）
-            let matchesCategory = true;
-            if (currentWbCategory.value !== '全部') {
-                matchesCategory = getWbCategory(wb) === currentWbCategory.value;
-            }
-
-            return matchesSearch && matchesFilter && matchesCategory;
+            return matchWbFilter({
+                bookCategory: getWbCategory(wb),
+                bookTags: getWbTags(wb),
+                filterCategory: currentWbCategory.value,
+                filterTags: currentWbTags ? currentWbTags.value : [],
+                matchesSearch,
+                matchesCount
+            });
         });
     });
 
@@ -989,6 +1135,9 @@ export function useWorldbooks({
         handleWorldbookFolderSelect, deleteWorldbook, duplicateWorldbook,
         openWbContextMenu, closeWbContextMenu, openWbInFolder,
         wbCategories, changeWbCategory, filteredWorldbooks,
+        // 🏷️ A2（2026-09-24）：世界书标签 + 分组生命周期（重命名 / 解散）
+        getWbTags, setWbTags, toggleWbTagOn, addWbTagsBatch, wbAllTags,
+        renameWbGroup, deleteWbGroup,
         // 📊🔍 查重/版本对比的扫描进度（不再用于浏览库）
         wbScanProgress, isWbScanning, wbScanPercent, rescanWorldbooks,
         // ⚡ 秒开阶段 2：元数据后台补齐状态

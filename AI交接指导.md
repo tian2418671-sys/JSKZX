@@ -23,7 +23,7 @@
 | 仓库 | `https://github.com/tian2418671-sys/JSKZX.git`（远端 `origin`） |
 | 分支 | 本地 `master`（与 origin 同步） |
 | 构建产物 | `sillytavern-card-manager-<版本>.exe`（NSIS 安装版）+ `latest.yml` + `.exe.blockmap` + zip 绿色版 |
-| 测试 | `npm test` = `node --test "test/**/*.test.mjs"` → 当前 **504 用例全绿**（44 个测试文件） |
+| 测试 | `npm test` = `node --test "test/**/*.test.mjs"` → 当前 **751 用例全绿**（54 个测试文件） |
 | 规模 | `js/components/` 47 个 SFC、`js/composables/` 41 个模块（顶层 24 + `chat/` 引擎 17）、`js/utils/` 解析与索引工具 |
 | 用户习惯 | 说「**一条龙服务**」= 升版本号 → 更新文档三件套 → 打包 → 提交推送 → 发 GitHub Release（含 `latest.yml` 保 OTA） |
 | 典型库 | 日常小库 `E:\AI\酒馆工具\角色卡`（75 张）；压测大库 `I:\03\角色色卡`（11,186 张 / 9.76GB）；2 万卡副本由脚本现造 |
@@ -113,7 +113,7 @@ node scripts/release-check.mjs                   # 语法 + 单测 + 构建 + �
 > S2' 同名查重只读索引 → S3' simhash 内容查重 → S4' CI 白名单守卫；
 > 另有 **AR-45 进度条横跳修复**与**加载速度实测**（结论：**已到磁盘物理下限，无提速空间**）。
 > 实测：同名查重 s1000 **70.8s → 9ms**、s5000 **OOM 被杀 → 7/7 通过**；L1 索引 **353.7MB → 23.4MB**；
-> 504 用例全绿；**未打包、未推送 Release**。
+> 751 用例全绿；**未打包、未推送 Release**。
 > 详见 [`docs/规格与计划/世界书大库-加载与查重架构方案.md`](docs/规格与计划/世界书大库-加载与查重架构方案.md)、
 > [`S0.5-simhash特征方案实验报告.md`](docs/规格与计划/S0.5-simhash特征方案实验报告.md) 与
 > [`后续计划-20260922-PK27架构改造收尾.md`](docs/规格与计划/后续计划-20260922-PK27架构改造收尾.md)。
@@ -137,7 +137,7 @@ js/utils/          cardLoader.js（卡解析/规范化）、pngParser.js、searc
 main/              vectorManager.js / vectorWorker.js / memoryStore.js（向量与长期记忆存储层）
 css/               tailwind.css（源）/ style.css（自定义）
 web/               vite build 产物（生产加载，gitignore）
-test/              44 个测试文件 / 504 用例（node:test，`npm test`）
+test/              54 个测试文件 / 751 用例（node:test，`npm test`）
 scripts/           压测与探针（library-dup-*、capacity-check.ps1、measure-startup.mjs、
                    release-check.mjs、_cdp-*.mjs 等）
 ```

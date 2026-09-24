@@ -114,6 +114,86 @@ function worldbookEntryList(book) {
 }
 
 /**
+ * 🆔 **SillyTavern 语义的「空闲 uid」分配**（DF-21 修复，2026-09-24）
+ *
+ * 🔬 **ST 源码取证**（`public/scripts/world-info.js`，这是定论依据）：
+ *   · `entries` 是**对象字典，键 = uid**（`data.entries[uid].content = ...`）；
+ *   · `getFreeWorldEntryUid(data)`：**从 0 起扫，返回第一个「不在 entries 里」的整数**（上限 1,000,000）；
+ *   · `createWorldInfoEntry`：新词条 = `{ uid: newUid, ...模板 }`，写入 `data.entries[newUid]`；
+ *   · `deleteWorldInfoEntry`：`delete data.entries[uid]` ⇒ **uid 会被腾出、可被后续新建复用**；
+ *   · `duplicateWorldInfoEntry`：`delete originalData.uid` 后走 `createWorldInfoEntry` ⇒ **新 uid**；
+ *   · 保存（`/api/worldinfo/edit`）**直接写整个 data** ⇒ **从不按下标重写 uid**。
+ *
+ * ⇒ **uid 是「词条身份」，不是「数组下标」**。真实库实测坐实：
+ *   `炎孕-副本01.json` 的 uid 为 `0..1904` 之后直接跳到 **5737 / 6239 / 10567 / 13331**
+ *   （397 条，有空洞，**单调递增但 ≠ 下标**）—— 正是「删除过词条、uid 被复用」的痕迹。
+ *
+ * @param {object} used 已占用集合（Set<number>）
+ * @returns {number} 最小可用非负整数
+ */
+function nextFreeUid(used) {
+  for (let uid = 0; uid < 1_000_000; uid++) {
+    if (!used.has(uid)) return uid;
+  }
+  return 0; // 理论上不可达（与 ST 的 MAX_UID 一致）
+}
+
+/**
+ * 📦 **把世界书 `entries` 数组还原为 SillyTavern 原生的「字典」形态**（DF-21 真修复）
+ *
+ * 🔴 **要修的真实缺陷**（2026-09-24 实测确证）：
+ *   本应用载入世界书时把 ST 的**字典**转成**数组**（`Object.values`），保存时**原样写回数组**
+ *   ⇒ 产出的文件**偏离 ST 原生格式**（ST 读到数组时虽能容错，但 uid 作为「词条身份」的
+ *     语义丢失，且 ST 再次保存会重新分配 uid）。
+ *   📊 实测（真实库 26 本 / 23,816 条）：**源文件 100% 是字典**；
+ *      经「载入→保存」链路后**100% 变成数组**。
+ *
+ * ✅ 修法：保存**独立世界书**时按 `uid` 还原为字典（键 = uid 的字符串形式）。
+ *   · uid 是**数字** → 直接用（保真，含空洞：`{0:…, 1:…, 5737:…}`）；
+ *   · uid 是**本应用生成的临时串**（`<Date.now()>_<base36>`）→ 按 ST 语义分配**最小空闲整数**
+ *     （本应用自己的 v-for key 不该落盘，但词条本身要保留）；
+ *   · uid 缺失 → 同上（与 `getFreeWorldEntryUid` 行为一致）。
+ *   ⚠️ **不按数组下标重写**（那是错的：会毁掉 ST 的 uid 身份语义，见 `nextFreeUid` 的取证）。
+ *
+ * ⚠️ **只对「独立世界书」调用** —— 角色卡**内嵌** `character_book.entries` 是**数组**
+ *   （V2/V3 规范如此，实测真实卡 100% 无 uid），**绝不能**转成字典。
+ *
+ * @param {object} data 世界书载荷（会被就地修改）
+ * @returns {object} 同一个对象，便于链式调用
+ */
+function restoreEntriesDict(data) {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return data;
+  const entries = data.entries;
+  if (!Array.isArray(entries)) return data; // 已是字典 / 无 entries → 不动
+
+  // 🔑 **两轮处理**（保真优先）：先登记**所有数字 uid**（它们是 ST 的真实身份，
+  //    含空洞如 5737 / 13331），再给「缺失 / 本应用临时串」分配**最小空闲整数**。
+  //    若按单轮即时分配，靠后的数字 uid 可能被前面的临时串抢走 —— 那就丢了真实身份。
+  const used = new Set();
+  for (const e of entries) {
+    if (e && typeof e === 'object' && Number.isInteger(e.uid) && e.uid >= 0) used.add(e.uid);
+  }
+
+  const assigned = new Set();   // 已写出的键（数字 uid 可能重复，需要重新分配）
+  const out = {};
+  for (const e of entries) {
+    if (!e || typeof e !== 'object') continue;
+    let uid = (Number.isInteger(e.uid) && e.uid >= 0 && !assigned.has(e.uid)) ? e.uid : null;
+    if (uid === null) {
+      // 缺失 / 本应用临时串 / 与已写出条目撞键 → 按 ST 语义分配最小空闲整数
+      uid = nextFreeUid(new Set([...used, ...assigned]));
+      used.add(uid);
+    }
+    assigned.add(uid);
+    // ⚠️ ST 把 uid **同时**放在「字典键」与「词条对象内」（`{uid: newUid, ...模板}`），
+    //    两者都要保留，否则 ST 读回后 `entry.uid` 为 undefined。
+    out[String(uid)] = { ...e, uid };
+  }
+  data.entries = out;
+  return data;
+}
+
+/**
  * 返回剥离了内部字段的**深拷贝**。
  * 兼容四种调用形态：
  *   1. 角色卡对象（character_book 在根或 data 下）
@@ -165,6 +245,9 @@ module.exports = {
   worldbookEntryList,
   dropInternalFields,
   isAppGeneratedUid,
+  // 🆔 DF-21：把独立世界书的 entries 数组还原为 ST 原生字典（键 = uid）
+  restoreEntriesDict,
+  nextFreeUid,
   APP_UID_RE,
   APP_UID_LEGACY_RE,
   ROOT_INTERNAL_FIELDS,

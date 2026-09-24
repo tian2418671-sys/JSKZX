@@ -17,7 +17,10 @@
             <!-- 顶部下拉菜单系统 -->
             <nav class="flex items-center gap-1 text-xs text-zinc-300 border-b border-zinc-800 bg-zinc-900/90 px-3 py-1.5 shrink-0 select-none z-30">
                 <!-- 隐藏文件输入：供【文件→导入角色卡】使用 -->
-                <input ref="importFileInput" type="file" accept=".png,.webp,.jpg,.jpeg,.json" multiple class="hidden" @change="handleImportFiles">
+                <!-- 📇 DF-22：`accept` 必须与磁盘扫描白名单**同源**（否则「导入能进、扫描不进」）
+                     ⚠️ 不含 .jpg/.jpeg —— 它们**不可写回保存**（`file:saveCard` 只支持 .json/.png），
+                        声明支持只会让用户以为能用，实际标签/编辑**静默不落盘**。 -->
+                <input ref="importFileInput" type="file" :accept="importAccept" multiple class="hidden" @change="handleImportFiles">
 
                 <div class="relative" @mouseenter="setMenu('file')" @mouseleave="closeMenus()">
                     <button class="px-2 py-1 rounded hover:bg-zinc-800 hover:text-zinc-100 transition" @click="setMenu('file')">文件(F)</button>
@@ -427,6 +430,8 @@ export default {
         const commitFontSize = () => { ctx.appSettings.value.fontSize = fontSizeDraft.value; };
         return {
             importFileInput: ctx.importFileInput,
+            // 📇 DF-22：导入 `accept` 来自**唯一权威格式表**（与磁盘扫描白名单同源）
+            importAccept: ctx.importAccept,
             handleImportFiles: ctx.handleImportFiles,
             selectFixedDirectory: ctx.selectFixedDirectory,
             loadWorldbooks: ctx.loadWorldbooks,

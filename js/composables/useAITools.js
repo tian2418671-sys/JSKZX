@@ -7,6 +7,14 @@
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 import { resolveFunnelPlan, isFunnelEmpty, formatFunnelSummary } from '../utils/tagFunnel.js'; // 🏷️ P1：三层漏斗的层决策（纯函数，UI 与引擎共用）
 import { classifyApiError, summarizeFailures } from '../utils/aiTagFeedback.js'; // 📜 打标过程日志：错误归类 + 失败聚合（纯函数）
+// 🧠 R1+R2（2026-09-24）：LLM 层「提示词分角色」+ 结构化输出截取
+//    ⚠️ **仅在「①规则关 且 ②向量关 且 ③LLM 开」时启用**（用户明确指定）——
+//       其他组合保持原有行为不变，零回归风险。判定见 `isLlmOnlyPlan()`。
+import {
+    isLlmOnlyPlan, normalizePromptPresets, buildLlmMessages, willUsePrefill,
+    parseStructuredTags, outputFormatRule, hasRoleFields, TAG_WRAPPER,
+    resolveCotPrompt, willUseCot, COT_MODE_DEFAULT, COT_MODE_OFF, COT_MODE_CUSTOM, DEFAULT_COT_PROMPT
+} from '../utils/llmPromptRoles.js';
 
 export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey, apiType, resolveApiModel, extractReplyContent, persistCardUpdate, refreshCardData, nativeAlert, confirmDialog, showToast, systemPromptPresets, autoTagRules, tagFunnel, syncConfigToDisk }) {
     // ================= [ AI 智能批量打标系统 ] =================
@@ -74,10 +82,19 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
     // 新增一条系统提示词
     const addSystemPromptPreset = () => {
         const newId = 'preset_' + Date.now() + '_' + Math.random().toString(36).substr(2, 4);
+        const defaultSystem = '你是一个专业的角色卡分析助手。请严格只返回 JSON 数组格式（例如：["标签1", "标签2"]），不要返回任何其他说明文字。';
         systemPromptPresets.value.push({
             id: newId,
             name: '新提示词模板',
-            content: '你是一个专业的角色卡分析助手。请严格只返回 JSON 数组格式（例如：["标签1", "标签2"]），不要返回任何其他说明文字。',
+            // 🧠 R1+R2：分角色四段（system 为主段，其余留空则走程序默认）
+            system: defaultSystem,
+            assistant: '',
+            user: '',
+            prefill: '',
+            // 🧠 思维链：默认走内置「思维链引导 + 破限」融合版（用户指定为默认）
+            cotMode: COT_MODE_DEFAULT,
+            cot: '',
+            content: defaultSystem, // 旧字段镜像（向后兼容旧逻辑 / 旧数据读取）
             expanded: true // 默认展开方便编辑
         });
         activeSystemPromptId.value = newId;
@@ -111,6 +128,12 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
         }
         return sys;
     };
+
+    // ═══════════════════════════════════════════════════════════════
+    // 🧠 R1+R2（2026-09-24）：供 **UI** 显示「分角色结构是否启用」
+    //    📌 实现见下方向量段（`llmOnlyActive` / `activePromptPreset`）——
+    //       放在 `vectorStatus` 声明之后，避免 TDZ。
+    // ═══════════════════════════════════════════════════════════════
     const aiTaggingProgress = ref({ current: 0, total: 0, status: '' });
     const isAITagging = ref(false);
 
@@ -203,6 +226,21 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
             hasApiConfig: !!(apiEndpoint.value && apiEndpoint.value.trim())
         });
 
+        // ═══════════════════════════════════════════════════════════════
+        // 🧠 R1+R2（2026-09-24）：**仅当「只有 LLM 层」时**启用分角色结构 + 结构化截取
+        // ───────────────────────────────────────────────────────────────
+        // 📖 用户明确指定：「挡规则，向量不启动时只启动 llm 的打标机制，则进行三层的思维链……
+        //    当只有 LLM 层单独启动时才启动 R1 的结构截取功能」
+        // ⇒ 判定 `isLlmOnlyPlan(plan)`：①规则关 且 ②向量关 且 ③LLM 开。
+        //   其他组合（如 规则+LLM 同时开）**保持原有行为**，零回归风险。
+        // ═══════════════════════════════════════════════════════════════
+        const llmOnly = isLlmOnlyPlan(plan);
+        // 当前生效的提示词预设（归一化：旧 `content` 自动迁移到 `system`）
+        const activePreset = (() => {
+            const list = normalizePromptPresets(systemPromptPresets.value);
+            return list.find(p => p.id === activeSystemPromptId.value) || list[0] || null;
+        })();
+
         isAITagging.value = true;
         // 分层统计（修正 3.3：严格区分规则命中/向量命中/LLM/无匹配/失败）
         // 🆕 P1：unprocessed = 因③层关闭/不可用而未处理的张数（记账，不静默）
@@ -217,6 +255,24 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
         if (!plan.rule) pushTagLog('⏭️ ① 规则层已关闭：全部卡片视为未命中，继续交给后续层', 'dim');
         if (!plan.vector) pushTagLog('⏭️ ② 向量层已关闭：未命中的卡将直接交给 ③ LLM（LLM 开着时会真实调用 API）', 'dim');
         else if (plan.skip && plan.skip.vector) pushTagLog(`⏭️ ② 向量层将跳过（${plan.skip.vector}）`, 'dim');
+        // 🧠 R1+R2：明确告知本次是否启用了「分角色结构 + 结构化截取」（用户要能看出区别）
+        if (llmOnly) {
+            const roleInfo = activePreset && hasRoleFields(activePreset)
+                ? '（已读取预设的 assistant / user / 预填充段）'
+                : '（预设未填副字段，走默认三段）';
+            pushTagLog(`🧠 仅 LLM 层启动 → 已启用「提示词分角色 + <${TAG_WRAPPER}> 结构化截取」${roleInfo}`, 'info');
+            // 🧠 思维链模式（默认版 / 自定义 / 关闭）—— 让用户一眼看出当前在跑哪档
+            const cotMode = (activePreset && activePreset.cotMode) || COT_MODE_DEFAULT;
+            if (cotMode === COT_MODE_OFF) {
+                pushTagLog('🧠 思维链提示词：已关闭（不注入 CoT 段）', 'dim');
+            } else {
+                const cotLen = resolveCotPrompt(activePreset).length;
+                const tag = cotMode === COT_MODE_CUSTOM ? '自定义版' : '内置默认版';
+                pushTagLog(`🧠 思维链提示词：${tag}（${cotLen} 字）→ 以 assistant 角色插在 user 之后`, 'info');
+            }
+        } else {
+            pushTagLog('ℹ️ 非「仅 LLM」组合 → 沿用原有打标链路（未启用分角色结构）', 'dim');
+        }
 
         // 统一落盘辅助：双层级写标签（内存显示层 customTags + 酒馆 PNG 元数据层 data.tags）+ 持久化
         const applyAutoTags = async (card, tags) => {
@@ -394,8 +450,8 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
                     promptText += `【附加要求】：${customAIPrompt.value.trim()}\n`;
                 }
 
-                // 4.4 输出格式与角色设定数据
-                promptText += `【输出强制规则】：必须只返回格式为 ["标签1", "标签2"] 的纯 JSON 数组，绝不要包含 markdown 标记或任何前导/后置解释文字。
+                // 4.4 输出格式（🧠 R1：仅 LLM 单独启动时要求 `<tags>` 结构化包裹）
+                promptText += outputFormatRule(llmOnly) + `
 
 【角色设定提取】：
 名字：${card.name || '未知'}
@@ -404,30 +460,93 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
 首句：${charMes}`;
 
                 // 5. 经主进程 IPC 转发调用 API（绕过 CORS；与聊天测卡共用通道）
-                const payload = {
-                    model: resolveApiModel(), // 优先使用配置的模型名称，留空回退 local-model
-                    messages: [
+                // 🧠 R2 + 思维链：仅 LLM 单独启动时走**分角色**（system / user / assistant 示例 / 思维链 / 预填充）；
+                //       其他组合保持原来的两条消息（零回归）。
+                const jbText = useJailbreak.value ? jailbreakPrompt.value : '';
+                const buildMsgs = (usePrefill, useCot) => buildLlmMessages({
+                    preset: activePreset,
+                    jailbreak: jbText,
+                    defaultUser: promptText,
+                    usePrefill,
+                    useCot
+                });
+                // 🛡️ **降级阶梯**（2026-09-24）：预填充与思维链都是「末尾 assistant 消息」，
+                //    部分中转站 / 思考型模型会**拒收或报错**（见方案 §七 风险表）。
+                //    逐级剥离重试，避免「整张卡打标失败」：
+                //      ① 全量（预填充 + 思维链）
+                //      ② 去预填充（保留思维链）—— 应对「只有预填充被拒」
+                //      ③ 去预填充 + 去思维链 —— 应对「所有末尾 assistant 都被拒」
+                //    ⚠️ 只保留**实际会用到**的档位（没开预填充/思维链就不白跑一趟）。
+                const cotOn = llmOnly && willUseCot(activePreset);
+                const prefillOn = llmOnly && willUsePrefill(activePreset);
+                const ladder = llmOnly
+                    ? [
+                        { usePrefill: true, useCot: true, label: '全量' },
+                        ...(prefillOn ? [{ usePrefill: false, useCot: true, label: '去预填充' }] : []),
+                        ...((prefillOn || cotOn) ? [{ usePrefill: false, useCot: false, label: '去预填充+去思维链' }] : [])
+                    ]
+                    : [null];
+                const messages = llmOnly
+                    ? buildMsgs(true, true)
+                    : [
                         { role: 'system', content: buildTaggingSystemPrompt() }, // 🚨 破限注入：开启时系统提示词末尾追加破限词
                         { role: 'user', content: promptText }
-                    ],
+                    ];
+                const payload = {
+                    model: resolveApiModel(), // 优先使用配置的模型名称，留空回退 local-model
+                    messages,
                     temperature: 0.2 // 偏低温度保证 JSON 格式稳定性
                 };
                 const authKey = (apiKey.value && apiKey.value.trim()) ? apiKey.value : 'test-key';
                 // 429 限流 / 网络抖动时自动退避重试，避免批量打标大面积失败
-                const result = await callAIWithRetry(payload, authKey);
+                let result;
+                let usedLabel = '全量';
+                let lastErr;
+                for (let li = 0; li < ladder.length; li++) {
+                    const step = ladder[li];
+                    try {
+                        result = await callAIWithRetry(
+                            step ? { ...payload, messages: buildMsgs(step.usePrefill, step.useCot) } : payload,
+                            authKey
+                        );
+                        usedLabel = step ? step.label : '';
+                        lastErr = null;
+                        break;
+                    } catch (e) {
+                        lastErr = e;
+                        const next = ladder[li + 1];
+                        if (!next) break; // 已到最后一档 → 原样抛出
+                        pushTagLog(`⚠️ ${card.name || '未知'} → 「${step.label}」被拒（${e.message}），降级为「${next.label}」重试…`, 'warn');
+                    }
+                }
+                if (lastErr) throw lastErr;
+                // 只在**真的降级过**时提示（正常走全量时不打扰用户）
+                if (llmOnly && usedLabel && usedLabel !== '全量') {
+                    pushTagLog(`ℹ️ ${card.name || '未知'} → 本次实际使用「${usedLabel}」模式`, 'dim');
+                }
 
-                // 6. 强力提取 JSON 数组（兼容 OpenAI / Anthropic 回复结构）
-                let rawReply = extractReplyContent(result).trim();
-                rawReply = rawReply.replace(/```json/gi, '').replace(/```/g, '').trim();
-                const jsonMatch = rawReply.match(/\[[\s\S]*\]/);
-                if (!jsonMatch) throw new Error(`模型未返回有效的 JSON 数组: ${rawReply}`);
-
+                // 6. 提取标签数组
+                // 🧠 R1：LLM 单独启动时走**三层降级**（结构化标签 → JSON 正则 → 暴力拆分），
+                //       解决思考型模型思维链里的方括号污染（旧的贪婪匹配会取错区间）。
+                //       其他组合保持原解析逻辑不变。
                 let newTags;
-                try {
-                    newTags = JSON.parse(jsonMatch[0]);
-                } catch (err) {
-                    // 兜底：按标点符号暴力拆分
-                    newTags = rawReply.replace(/[\[\]"'`]/g, '').split(/[,，、\n]/).map(t => t.trim()).filter(Boolean);
+                if (llmOnly) {
+                    const parsed = parseStructuredTags(extractReplyContent(result));
+                    if (!parsed.ok) throw new Error(parsed.reason || '模型未返回有效的标签数组');
+                    newTags = parsed.tags;
+                    // 📢 如实记录命中的解析层（第 3 层最脏，值得用户知道）
+                    if (parsed.layer === 3) pushTagLog(`⚠️ ${card.name || '未知'} → 走第③层兜底拆分（模型未遵守输出格式）`, 'warn');
+                } else {
+                    let rawReply = extractReplyContent(result).trim();
+                    rawReply = rawReply.replace(/```json/gi, '').replace(/```/g, '').trim();
+                    const jsonMatch = rawReply.match(/\[[\s\S]*\]/);
+                    if (!jsonMatch) throw new Error(`模型未返回有效的 JSON 数组: ${rawReply}`);
+                    try {
+                        newTags = JSON.parse(jsonMatch[0]);
+                    } catch (err) {
+                        // 兜底：按标点符号暴力拆分
+                        newTags = rawReply.replace(/[\[\]"'`]/g, '').split(/[,，、\n]/).map(t => t.trim()).filter(Boolean);
+                    }
                 }
 
                 if (Array.isArray(newTags) && newTags.length > 0) {
@@ -647,6 +766,92 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
     const vectorMatchBase = ref(0);   // 向量匹配开始前已完成的卡数（规则命中数）
     const vectorMatchActive = ref(false); // 是否处于向量匹配阶段
 
+    // ═══════════════════════════════════════════════════════════════
+    // 🧠 R1+R2（2026-09-24）：供 **UI** 显示「分角色结构是否启用」
+    // ───────────────────────────────────────────────────────────────
+    // 📌 启用条件：**只有 LLM 层**（①规则关 且 ②向量关 且 ③LLM 开）。
+    //    ⚠️ 这里用与引擎**同一个**判定函数（`isLlmOnlyPlan`），避免「UI 说启用了、引擎却没启用」。
+    //    ⚠️ 与引擎 `resolveFunnelPlan` 同口径：② 需「开关开 且 模型就绪 且 候选池非空」。
+    //    📌 位置说明：必须放在 `vectorStatus` / `aiCandidateTags` 声明**之后**（见下方向量段），
+    //       避免 TDZ 风险（虽然 computed 是惰性求值，但保持声明顺序更稳妥）。
+    // ═══════════════════════════════════════════════════════════════
+    const llmOnlyActive = computed(() => {
+        const f = tagFunnel.value || {};
+        const vectorRunnable = !!f.vector
+            && !!(vectorStatus.value && vectorStatus.value.ready)
+            && aiCandidateTags.value.length > 0;
+        const llmRunnable = !!f.llm && !!(apiEndpoint.value && apiEndpoint.value.trim());
+        return isLlmOnlyPlan({ rule: !!f.rule, vector: vectorRunnable, llm: llmRunnable });
+    });
+
+    /** 当前生效的提示词预设（归一化后的对象；供 UI 三小页签编辑用） */
+    const activePromptPreset = computed(() => {
+        const list = normalizePromptPresets(systemPromptPresets.value);
+        return list.find(p => p.id === activeSystemPromptId.value) || list[0] || null;
+    });
+
+    /** 🧠 当前预设实际会注入的思维链提示词（UI 预览用；'' = 已关闭） */
+    const activeCotPrompt = computed(() => resolveCotPrompt(activePromptPreset.value));
+
+    // ═══════════════════════════════════════════════════════════════
+    // 🔌 测试连通性（用户 2026-09-24 要求）
+    // ───────────────────────────────────────────────────────────────
+    // 📌 为什么需要它：打标是**批量**操作，Endpoint / Key / Model 任一配错，
+    //    都会在跑了几十张卡之后才暴露（每张还带 1.5s 间隔 + 重试退避）⇒ 白等很久。
+    //    先发一条**最小请求**（`hi` + max_tokens=8）就能立刻验证三要素是否真的通。
+    // ⚠️ 走 `sendChatMessage` 通道（主进程转发）—— 渲染层直接 fetch 会被 CORS 拦。
+    // ⚠️ 不写入任何状态、不改配置；只回一个 {ok, message, ms} 供 UI 显示。
+    // ═══════════════════════════════════════════════════════════════
+    const isTestingConn = ref(false);
+    const connTestStatus = ref('');
+
+    /**
+     * 测试 API 连通性（发一条最小 chat 请求）。
+     * @param {{silent?:boolean}} [opts] `silent=true` 时不弹 toast（供批量前静默预检）
+     * @returns {Promise<{ok:boolean, message:string, ms:number}>}
+     */
+    const testApiConnection = async (opts = {}) => {
+        const ep = (apiEndpoint.value || '').trim();
+        if (!ep) {
+            connTestStatus.value = '❌ 请先填写 API Endpoint';
+            if (!opts.silent) showToast('请先填写 API Endpoint', 'warning');
+            return { ok: false, message: '未填写 Endpoint', ms: 0 };
+        }
+        isTestingConn.value = true;
+        connTestStatus.value = '⏳ 正在测试连通性...';
+        const t0 = Date.now();
+        try {
+            const authKey = (apiKey.value && apiKey.value.trim()) ? apiKey.value : 'test-key';
+            const payload = {
+                model: resolveApiModel(),
+                messages: [{ role: 'user', content: 'hi' }],
+                max_tokens: 8,      // 只要一个字节的回应，省钱省时
+                temperature: 0
+            };
+            const result = await window.electronAPI.sendChatMessage(ep, payload, authKey, apiType.value);
+            const ms = Date.now() - t0;
+            if (!result || !result.success) {
+                const msg = (result && result.error) || '未知错误';
+                connTestStatus.value = `❌ 连接失败 (${ms}ms)：${msg}`;
+                if (!opts.silent) showToast(`连接失败：${msg}`, 'error');
+                return { ok: false, message: msg, ms };
+            }
+            // 能返回就说明三要素通了；顺便把模型名一起回显，便于确认没选错模型
+            const modelName = resolveApiModel() || 'local-model';
+            connTestStatus.value = `✅ 连接正常 (${ms}ms) · 模型：${modelName}`;
+            if (!opts.silent) showToast(`✅ 连接正常（${ms}ms）`, 'success');
+            return { ok: true, message: 'ok', ms };
+        } catch (e) {
+            const ms = Date.now() - t0;
+            const msg = (e && e.message) ? e.message : String(e);
+            connTestStatus.value = `❌ 连接异常 (${ms}ms)：${msg}`;
+            if (!opts.silent) showToast(`连接异常：${msg}`, 'error');
+            return { ok: false, message: msg, ms };
+        } finally {
+            isTestingConn.value = false;
+        }
+    };
+
     const sourceLabel = (url) => {
         if (!url) return '';
         if (url.includes('hf-mirror.com')) return '国内镜像 hf-mirror.com';
@@ -738,6 +943,11 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
         // 系统提示词（systemPromptPresets 保留在 App.vue，此处仅返回操作方法）
         activeSystemPromptId, addSystemPromptPreset, deleteSystemPromptPreset,
         saveSystemPromptsToStorage, getCurrentSystemPromptContent, buildTaggingSystemPrompt,
+        // 🧠 R1+R2（2026-09-24）：分角色结构 + 结构化截取（UI 用 llmOnlyActive 显示启用状态）
+        llmOnlyActive, activePromptPreset, hasRoleFields,
+        // 🧠 思维链（默认版 / 自定义 / 关闭）+ 🔌 连通性测试
+        activeCotPrompt, isTestingConn, connTestStatus, testApiConnection,
+        COT_MODE_DEFAULT, COT_MODE_OFF, COT_MODE_CUSTOM, DEFAULT_COT_PROMPT,
         // 破限
         useJailbreak, jailbreakPrompt, jailbreakPresets,
         // 翻译 / 格式升维

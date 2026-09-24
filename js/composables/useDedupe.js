@@ -6,7 +6,19 @@
 import { ref, triggerRef } from 'vue';
 import { alignEntryLists, summarizeAlignment, normalizeEntries } from '../utils/entryAlign.js';
 import { diffContentForDisplay } from '../utils/textDiff.js';
-import { classifySimilarity } from '../utils/similarityType.js';
+import { classifySimilarity, sortByCompositeScore } from '../utils/similarityType.js';
+// 🛡️ DF-19 同款：角色卡内嵌世界书是「全形态」数据（数组 / `entries` 数组 / `entries` 字典）
+//    ⇒ 一律走全形态提取器，**不得**用 `Array.isArray(entries)` 之类单一形态判据。
+import { extractBookEntries } from '../utils/cardLoader.js';
+// ⚙️ 预设查重：结构指纹（identifier 集合）+ 相似类型判定（纯函数，只产出标签）
+//    依据 `docs/规格与计划/角色卡与预设查重-方案评估.md` 的 P0-3（补「改名同源」漏报）
+import {
+    buildPresetStructure, structureSimilarity, contentSimilarity,
+    orderSimilarity, enabledAgreement, samplerAgreement, classifyPresetSimilarity, PRESET_SIM_TYPE,
+    // 🧲 聚类阈值**必须从这里 import** —— 旧实现把它写死在本文件里，
+    //    与 `presetStructure.js` 的 `STRUCT_HIGH` 各写一份 ⇒ 两处会各自漂移。
+    PRESET_CLUSTER_THRESHOLD
+} from '../utils/presetStructure.js';
 
 export function useDedupe({
     library, worldbooks, activeWorldbook, cardData,
@@ -342,12 +354,38 @@ export function useDedupe({
     //    ⚠️ 内容过短（<20 字）→ 返回 `null`（**无法判定就不臆断**，不标注）。
     //    💰 成本实测：4547 张 / 约 2.0s（一次性，且只对参与同名的卡计算）。
     const NAME_ONLY_MAX_DIST = 24;
+    /**
+     * 🧾 **「同名假阳性防护」专用文本提取**（**刻意只取 5 个原始字段**）
+     *
+     * 🛑🛑 **为什么不复用 `extractContentText`（2026-09-23 实测踩到，必须记下来）**：
+     *    AR-48 的 `NAME_ONLY_MAX_DIST = 24` 是在**旧口径（5 字段）**上、用**真实库 3907 张**
+     *    标定的（同源 p50=0 ｜ 无关 p50=31）。而本次把 `character_book` 等字段纳入查重后，
+     *    **文本量级 ×26**（真实卡实测 4,872 → 129,918 字符）⇒ **simhash 距离整体压缩**：
+     *      · 同名同源：0 → 13~18
+     *      · **无关对：30 → 20~23（落进 T=24 内！）**
+     *    真实 4-gram Jaccard 复核证实这些「无关对」**真实重叠仅 1.6%~2.1%** ——
+     *    即：**阈值被新口径作废，会凭空产生误报**（PK-29 的同型病：口径一变，阈值必须重标）。
+     *
+     * 📌 故**刻意保留双口径**，各司其职：
+     *    · **`_nameOnly` 防护** → 用本函数（5 字段），保住 AR-48 已标定的 T=24；
+     *    · **内容级查重** → 用 `extractContentText`（含世界书），走 **MinHash + LSH + 0.85** 闸门
+     *      （MinHash 是**完整 4-gram 集合语义**，不受「长文本 simhash 压缩」影响）。
+     *
+     * ⚠️ 顺带解释为何「长文本 simhash 会压缩」：中文散文的字符 4-gram 频率分布彼此相近，
+     *    长文本的 simhash 向量会向「通用中文质心」收敛 ⇒ 两段无关长文本的距离**远小于理论 32**。
+     */
+    const extractLegacyCardText = (item) => {
+        const d = item.data?.data || item.data || {};
+        return [d.description, d.personality, d.scenario, d.first_mes, d.mes_example]
+            .filter(Boolean).join('\n');
+    };
     /** 角色卡内容指纹（simhash）；内容过短返回 `null`。
-     *  ⚠️ 依赖 `extractContentText` / `normalizeText` / `computeSimhash`（本文件后段定义）——
-     *     它们与 `startDedupeScan` 同处一个函数作用域，运行时已初始化，**不存在 TDZ 问题**。 */
+     *  ⚠️ 依赖 `normalizeText` / `computeSimhash`（本文件后段定义）——
+     *     它们与 `startDedupeScan` 同处一个函数作用域，运行时已初始化，**不存在 TDZ 问题**。
+     *  ⚠️ 用 `extractLegacyCardText`（**5 字段**）而非 `extractContentText` —— 理由见上。 */
     const cardSigOf = async (c) => {
         try {
-            const txt = normalizeText(await extractContentText(c));
+            const txt = normalizeText(extractLegacyCardText(c));
             return txt.length < 20 ? null : computeSimhash(txt);
         } catch (e) { return null; }
     };
@@ -988,7 +1026,14 @@ export function useDedupe({
         const d = p.data || {};
         const subset = {};
         PRESET_KEYS.forEach(k => { if (d[k] !== undefined) subset[k] = d[k]; });
-        if (d.prompts && typeof d.prompts === 'object') {
+        // 🛑 修复（2026-09-23，与 `extractContentText` 同款）：旧实现**只处理对象形态**，
+        //    而真实库预设的 `prompts` **是数组** → `Object.keys(数组)` 得 `"0","1",…`，
+        //    `d.prompts[k]` 是**块对象** → `String(块对象)` = `"[object Object]"`。
+        //    ⇒ 指纹里**每个块都退化成同一个字符串** ⇒ 「内容完全相同」判定**恒真**
+        //      （实测真实库：任何两个预设的指纹都会因这段而高度相似）。
+        if (Array.isArray(d.prompts)) {
+            subset._prompts = d.prompts.map(x => String((x && x.content) || ''));
+        } else if (d.prompts && typeof d.prompts === 'object') {
             const prompts = {};
             // 🔧 数字键按数值升序（字典序会把 "10" 排在 "2" 前，导致同内容不同键集合误判）
             Object.keys(d.prompts).map(Number).sort((a, b) => a - b).forEach(k => { prompts[k] = String(d.prompts[k] || '').trim(); });
@@ -1025,26 +1070,96 @@ export function useDedupe({
             dedupeScanDone.value = 0;
             dedupeScanTotal.value = 0;
 
-            const groups = {};
-            // 1. 按预设名称聚类（data.name 优先，兜底文件名）
-            presets.value.forEach(p => {
-                const name = ((p.data && p.data.name) || (p.name || '').replace(/\.json$/i, '') || '未命名预设').trim();
-                if (!groups[name]) groups[name] = [];
-                groups[name].push(p);
+            // ═══════════════════════════════════════════════════════════
+            // ⚙️ 结构指纹聚类（2026-09-23 采纳「预设查重方案」评估的 P0-3）
+            // ───────────────────────────────────────────────────────────
+            // 🔴 **旧实现的漏洞**：只按 `data.name`（兜底文件名）聚类 ⇒
+            //    **不同名的同源预设永远不会进入比较**（漏报）。
+            //    实测坐实（`_probe-preset-struct-power.mjs`）：
+            //      `A.U.T.O.预设 v1.0.json` ↔ `万象枢机 2.5.json` —— **文件名完全不同**，
+            //      但 **identifier 结构 Jaccard = 99.3%**（正文 840KB vs 2.66MB）
+            //      ⇒ 旧实现**完全检测不到**这一对。
+            // ✅ 修法：按 **`identifier` 集合 Jaccard**（结构指纹）聚类。
+            //    实测判别力充足：无关预设 2.6%~4.9% ｜ 同源 99.3%（跨度 96.6 个百分点）。
+            // ⚠️ 聚类必须**带簇心校验**（`unionFindGated`）—— 否则 A~B、B~C 通过但 A~C 不通过时
+            //    会链式误聚（正是 PK-29 刚修掉的病根，本方案的「连通分量」主张已被否决）。
+            // 🎚️ 阈值取 **保守档**（2026-09-24 用户拍板方案 A）：**宁可漏报，绝不误报** ——
+            //    本弹窗按钮是「保留此版，清理其余」，**误报 = 一键误删真数据**；漏报只是「没查出来」。
+            //    值来自 `presetStructure.js` 的 `PRESET_CLUSTER_THRESHOLD`（**单一来源**，勿在本文件另写）。
+            // ═══════════════════════════════════════════════════════════
+            const PRESET_STRUCT_THRESHOLD = PRESET_CLUSTER_THRESHOLD;
+            const items = presets.value;
+            const structs = items.map(p => buildPresetStructure(p.data));
+            const names = items.map((p, i) =>
+                String((p.data && p.data.name) || (p.name || '').replace(/\.json$/i, '') || '未命名预设').trim());
+
+            applyDedupeProgress({ label: `正在比对预设结构（共 ${items.length} 个）…`, done: 0, total: items.length });
+            await new Promise(r => setTimeout(r, 0));
+
+            // 结构相似度矩阵按需计算（预设量级小，可全量两两）
+            const structSimOf = (i, j) => structureSimilarity(structs[i], structs[j]);
+            const structUf = unionFindGated(items.length, (i, j) => {
+                const s = structSimOf(i, j);
+                return s !== null && s >= PRESET_STRUCT_THRESHOLD;
+            }, items.map((_, i) => structs[i].blockCount));
+
+            const pairCount = (items.length * (items.length - 1)) / 2;
+            let done = 0;
+            for (let a = 0; a < items.length; a++) {
+                for (let b = a + 1; b < items.length; b++) structUf.union(a, b);
+                done++;
+                if (done % 20 === 0) {
+                    applyDedupeProgress({ done, total: items.length, percent: (done / items.length) * 100 });
+                    await new Promise(r => setTimeout(r, 0));
+                }
+            }
+            addLog(`⚙️ 预设结构查重：${items.length} 个预设 / ${pairCount} 对（结构阈值 ${PRESET_STRUCT_THRESHOLD}）`, 'info');
+
+            // 结构簇 → 分组（单例忽略）
+            const structClusters = new Map();
+            items.forEach((_, i) => {
+                const root = structUf.find(i);
+                if (!structClusters.has(root)) structClusters.set(root, []);
+                structClusters.get(root).push(i);
             });
 
-            const potentialGroups = Object.entries(groups).filter(([_, list]) => list.length > 1);
+            const potentialGroups = [];   // [{ name, idxs, byStructure }]
+            const captured = new Set();
+            structClusters.forEach(idxs => {
+                if (idxs.length < 2) return;
+                idxs.forEach(i => captured.add(i));
+                // 组名：取组内**最短**名称（更可能是「原名」，长名常是「XXX v2 / 副本」）
+                const groupName = idxs.map(i => names[i]).sort((a, b) => a.length - b.length)[0];
+                potentialGroups.push({ name: groupName, idxs, byStructure: true });
+            });
+
+            // ⚠️ 兼容保留「按名称聚类」：同名的预设若**结构并不相似**（结构 < 阈值），
+            //    旧实现会把它们列成一组；直接丢弃会**造成功能回退**（用户看不到它们了）。
+            //    ⇒ 仍然列出，但由 `classifyPresetSimilarity` 标成 `DIFFERENT`（「同名但无关」），
+            //      弹窗据此**降级清理按钮**（与 AR-48 角色卡同名防护同口径）。
+            const nameGroups = new Map();
+            items.forEach((_, i) => {
+                if (captured.has(i)) return;                 // 已被结构簇收走 → 不重复成组
+                const n = names[i];
+                if (!nameGroups.has(n)) nameGroups.set(n, []);
+                nameGroups.get(n).push(i);
+            });
+            nameGroups.forEach((idxs, n) => {
+                if (idxs.length < 2) return;
+                potentialGroups.push({ name: n, idxs, byStructure: false });
+            });
+
             if (potentialGroups.length === 0) {
                 // ⚠️ 必须收尾（否则进度条停在中间不收起）
                 finishDedupeScan();
-                if (typeof showToast === 'function') showToast('🎉 恭喜！当前库中未发现同名的重复预设！', 'success', 4000);
-                else nativeAlert('🎉 恭喜！当前库中未发现同名的重复预设！', 'info');
+                if (typeof showToast === 'function') showToast('🎉 恭喜！当前库中未发现重复预设（结构与名称均已比对）！', 'success', 4000);
+                else nativeAlert('🎉 恭喜！当前库中未发现重复预设（结构与名称均已比对）！', 'info');
                 return;
             }
 
             // 2. 批量获取物理文件状态（带空安全保护）
             const pathsToStat = [];
-            potentialGroups.forEach(([_, list]) => list.forEach(p => pathsToStat.push(p.path)));
+            potentialGroups.forEach(g => g.idxs.forEach(i => pathsToStat.push(items[i].path)));
             let fileStats = {};
             try {
                 const statsRes = await window.electronAPI.getFileStats(pathsToStat);
@@ -1053,8 +1168,11 @@ export function useDedupe({
                 console.warn('获取预设文件信息失败:', e);
             }
 
-            presetDuplicateGroups.value = potentialGroups.map(([name, list]) => {
-                list.forEach(p => {
+            presetDuplicateGroups.value = potentialGroups.map(({ name, idxs, byStructure }) => {
+                const list = idxs.map(i => items[i]);
+                list.forEach((p, k) => {
+                    const i = idxs[k];
+                    p._struct = structs[i];
                     p._settings = getPresetSettingsSummary(p);
                     p._promptCount = getPresetPromptCount(p);
                     p._fingerprint = getPresetFingerprint(p);
@@ -1064,26 +1182,71 @@ export function useDedupe({
                     p._sizeKb = ((fileStats?.[p.path]?.size || 0) / 1024).toFixed(1);
                 });
 
-                // 排序：提示词更全的排前面，参数更丰富的其次，再按修改时间新→旧
+                // 排序：块更全的排前面，参数更丰富的其次，再按修改时间新→旧
+                // ⚠️ 与角色卡侧「内容最长者排最前」同语义 —— 基准版应是**最完整的那份**。
                 list.sort((a, b) => {
                     if (b._promptCount !== a._promptCount) return b._promptCount - a._promptCount;
                     if (b._fingerLen !== a._fingerLen) return b._fingerLen - a._fingerLen;
                     return b._mtime - a._mtime;
                 });
 
-                // 计算相对第一份（推荐保留）的差异
+                // 计算相对第一份（推荐保留）的差异 + **相似类型判定**
+                // ⚠️ 契约（与 `similarityType.js` 一致）：判定**只产出标签**，
+                //    不参与「是否同组」（分组已由上面的簇心校验定死）。
                 const masterFp = list[0]._fingerprint;
+                const masterStruct = list[0]._struct;
                 list.forEach((p, idx) => {
                     if (idx === 0) {
-                        p._diffInfo = '👑 建议保留 (参数最全/最新)';
-                    } else if (p._fingerprint === masterFp) {
+                        p._diffInfo = '👑 建议保留 (块最全/最新)';
+                        p._simType = null;
+                        p._simLabel = null;
+                        p._simTone = null;
+                        p._simAdvice = null;
+                        p._structPct = null;
+                        p._contentPct = null;
+                        p._enabledPct = null;
+                        p._renamed = false;
+                        return;
+                    }
+                    if (p._fingerprint === masterFp) {
                         p._diffInfo = '⚠️ 参数内容完全一致 (可安全清理)';
                     } else {
                         p._diffInfo = '🔍 参数配置存在差异';
                     }
+                    // 📐 结构 / 内容 / 顺序 / 启用状态 / 参数 五维相似度
+                    const sSim = structureSimilarity(masterStruct, p._struct);
+                    const cSim = contentSimilarity(masterStruct, p._struct);
+                    const oSim = orderSimilarity(masterStruct, p._struct);
+                    // ★ P1-5：启用状态（块开关）是「生效与否」的硬开关 —— 单独一维
+                    const enSim = enabledAgreement(masterStruct, p._struct);
+                    const spSim = samplerAgreement(list[0], p);
+                    // 🔔 「改名同源」：名称不同但结构高度一致 —— 旧实现按名聚类会完全漏掉
+                    const sameName = names[idxs[0]] === names[idxs[idx]];
+                    const cls = classifyPresetSimilarity({
+                        structSim: sSim, contentSim: cSim, orderSim: oSim,
+                        enabledSim: enSim, samplerSim: spSim, sameName
+                    });
+                    p._structPct = (sSim === null) ? null : Math.round(sSim * 100);
+                    p._contentPct = (cSim === null) ? null : Math.round(cSim * 100);
+                    p._enabledPct = (enSim === null) ? null : Math.round(enSim * 100);
+                    p._simType = cls.type;
+                    p._simLabel = cls.label;
+                    p._simTone = cls.tone;
+                    p._simAdvice = cls.advice;
+                    p._renamed = cls.renamed;
                 });
 
-                return { name, list };
+                // 组级汇总：让用户在**组标题**就能看出这组的性质
+                const riskCount = list.filter((p, i) => i > 0
+                    && (p._simType === PRESET_SIM_TYPE.DIFFERENT || p._simType === PRESET_SIM_TYPE.SAMPLER_VARIANT
+                        || p._simType === PRESET_SIM_TYPE.REORDER || p._simType === PRESET_SIM_TYPE.FLIPPED
+                        || p._simType === PRESET_SIM_TYPE.RESKIN)).length;
+                return {
+                    name, list,
+                    byStructure: !!byStructure,
+                    renamedCount: list.filter(p => p._renamed).length,
+                    riskCount
+                };
             });
 
             // 🛑 收尾（2026-09-23）：进度推到 100% 再收起（与角色卡/世界书侧同口径）
@@ -1103,7 +1266,29 @@ export function useDedupe({
         const pathsToTrash = group.list.filter(p => p.path !== keepPath).map(p => p.path);
         if (pathsToTrash.length === 0) return;
 
-        const ok = await confirmDialog(`确定要将另外 ${pathsToTrash.length} 个冗余/旧版预设移入回收站吗？`);
+        // 🛡️ 假阳性防护（与角色卡同名防护 AR-48 / 世界书 PK-29 同口径）：
+        //    待清理项里若含「同名但无关」/「参数变体」/「内容相同重排」/「结构相同换皮」，
+        //    必须在确认框里**明确警示** —— 这几类的共同点是「**内容并不可安全删除**」：
+        //      · `DIFFERENT`（同名但无关）：本来就是不同预设，误删等于丢真数据；
+        //      · `SAMPLER_VARIANT`（仅调参）：属**有意调参**，删了丢用户的参数档；
+        //      · `REORDER`（内容相同重排）：块顺序/启用状态不同 ⇒ **行为不同**，应合并而非删除；
+        //      · `RESKIN`（结构相同换皮）：结构一致但**正文差异大** —— 可能只是块结构碰巧相同的不同预设。
+        //    🎚️ 保守档（2026-09-24 方案 A）：`RESKIN` 一并纳入警示。
+        const risky = group.list.filter(p => p.path !== keepPath
+            && (p._simType === PRESET_SIM_TYPE.DIFFERENT
+                || p._simType === PRESET_SIM_TYPE.SAMPLER_VARIANT
+                || p._simType === PRESET_SIM_TYPE.REORDER
+                || p._simType === PRESET_SIM_TYPE.FLIPPED
+                || p._simType === PRESET_SIM_TYPE.RESKIN));
+        // ⚠️ 确认框是**纯文本**（非 markdown）→ 不写 `**` 之类的标记
+        const warn = risky.length > 0
+            ? `\n\n⚠️ 注意：其中 ${risky.length} 个不建议直接清理：\n`
+              + risky.slice(0, 5).map(p => `  · ${(p._simLabel || '需人工核对').replace(/[*]/g, '')} — ${(p.path || '').split(/[\\/]/).pop()}`).join('\n')
+              + (risky.length > 5 ? `\n  …还有 ${risky.length - 5} 个` : '')
+              + `\n\n建议先点「🔍 查看参数差异」逐一确认，再决定是否清理。`
+            : '';
+
+        const ok = await confirmDialog(`确定要将另外 ${pathsToTrash.length} 个冗余/旧版预设移入回收站吗？${warn}`);
         if (!ok) return;
 
         const res = await window.electronAPI.trashFiles(pathsToTrash);
@@ -1324,10 +1509,21 @@ export function useDedupe({
             });
 
             // 提示词正文对比
+            // 🛑 修复（2026-09-23，与 `extractContentText` / `getPresetFingerprint` 同款）：
+            //    旧实现先判 `Array.isArray` 再 `join('\n')` —— 但数组元素是**块对象**，
+            //    `join` 会对对象调 `toString()` → **每块都变成 `[object Object]`**。
+            //    真实库预设 `prompts` **是数组** ⇒ 「提示词正文」差异比对一直在显示垃圾。
             const formatPrompts = (d) => {
                 const prompts = d.prompts;
                 if (!prompts) return '';
-                if (Array.isArray(prompts)) return prompts.join('\n');
+                if (Array.isArray(prompts)) {
+                    return prompts.map((p, i) => {
+                        if (typeof p === 'string') return `${i}: ${p}`;
+                        if (!p || typeof p !== 'object') return `${i}: ${String(p == null ? '' : p)}`;
+                        const id = (typeof p.identifier === 'string' && p.identifier) ? p.identifier : `#${i}`;
+                        return `[${id}]${p.enabled === false ? '(已禁用)' : ''}: ${String(p.content == null ? '' : p.content)}`;
+                    }).join('\n');
+                }
                 if (typeof prompts === 'object') {
                     return Object.keys(prompts).map(k => `${k}: ${String(prompts[k] || '')}`).join('\n');
                 }
@@ -1345,12 +1541,22 @@ export function useDedupe({
             });
         } else {
             // ---------- 🎴 角色卡对比逻辑 ----------
+            // 🛑🛑 P1-6（2026-09-24，DF-23 的必要配套）：**差异比对字段必须与查重字段对齐**。
+            //    病根：DF-23 把 `character_book` / `alternate_greetings` / `creator_notes` 等纳入查重后，
+            //    若**比对器仍只看 5 个字段**，就会出现最坏组合 ——
+            //      「查重说这两个是一组（因为世界书相同）→ 点「查看差异」→ 显示『设定完全一致』」
+            //      ⇒ 用户**看不到任何差异却被告知重复** ⇒ 一键误删（与 DF-19 的「反向结论」同型）。
+            //    ✅ 现在：比对字段与 `extractContentText` 的取字段**一一对应**，世界书按词条逐条比对。
             const fieldsToCompare = [
                 { key: 'description', label: '📝 角色描述 (Description)' },
                 { key: 'personality', label: '🎭 性格设定 (Personality)' },
                 { key: 'scenario', label: '🎬 当前场景 (Scenario)' }, // ✅ 补上漏掉的场景字段（此前场景改动在查重面板上不显示，可能误删新版本）
                 { key: 'first_mes', label: '💬 开场首句 (First Message)' },
-                { key: 'mes_example', label: '🗣️ 示例对话 (Mes Example)' }
+                { key: 'mes_example', label: '🗣️ 示例对话 (Mes Example)' },
+                // ↓ P1-6 新增：与查重口径对齐（旧比对器完全看不到这些字段）
+                { key: 'creator_notes', label: '📋 作者备注 (Creator Notes)' },
+                { key: 'system_prompt', label: '⚙️ 系统提示词 (System Prompt)' },
+                { key: 'post_history_instructions', label: '📜 历史后指令 (Post History Instructions)' }
             ];
 
             diffFieldResults.value = fieldsToCompare.map(f => {
@@ -1364,6 +1570,40 @@ export function useDedupe({
                     len2: `${val2.length} 字`,
                     diffText: isSame ? null : computeTextDiffLines(val1, val2)
                 };
+            });
+
+            // ── 🎁 备用开场白（数组）—— 逐条编号比对 ──
+            const ag1 = Array.isArray(masterData.alternate_greetings) ? masterData.alternate_greetings : [];
+            const ag2 = Array.isArray(compareData.alternate_greetings) ? compareData.alternate_greetings : [];
+            const agText = (arr) => arr.map((g, i) => `#${i + 1}: ${String(g == null ? '' : g)}`).join('\n\n');
+            const agSame = ag1.length === ag2.length
+                && ag1.every((g, i) => String(g || '').trim() === String(ag2[i] || '').trim());
+            diffFieldResults.value.push({
+                label: '🎁 备用开场白 (Alternate Greetings)',
+                isSame: agSame,
+                len1: `${ag1.length} 条`,
+                len2: `${ag2.length} 条`,
+                diffText: agSame ? null : computeTextDiffLines(agText(ag1), agText(ag2))
+            });
+
+            // ── 📚 内嵌世界书（P1-6 核心：按**词条**逐条比对，回答「删了/加了哪个词条」）──
+            //    🛡️ 走 `extractBookEntries` 全形态提取器（数组 / `entries` 数组 / `entries` 字典）
+            //       —— **不得**用 `Array.isArray(entries)`（DF-19 的教训）。
+            //    🧩 复用世界书侧的 `alignEntryLists`：同一套「新增 / 缺失 / 改动」语义，
+            //       避免两处各写一套对齐逻辑（DF-17 的做法）。
+            const book1 = extractBookEntries(masterData.character_book);
+            const book2 = extractBookEntries(compareData.character_book);
+            const bookPairs = alignEntryLists(book1, book2);
+            const bookStat = summarizeAlignment(bookPairs);
+            const bookSame = bookStat.onlyA === 0 && bookStat.onlyB === 0 && bookStat.changed === 0;
+            diffFieldResults.value.push({
+                label: '📚 内嵌世界书 (Character Book)',
+                isEntryPairs: true,
+                isSame: bookSame,
+                // 与世界书侧 `isEntryPairs` 的展示口径一致（DiffModal 读 `len1` / `len2`）
+                len1: `新增 ${bookStat.onlyB} / 缺失 ${bookStat.onlyA} / 改动 ${bookStat.changed}`,
+                len2: `共 ${bookPairs.length} 条`,
+                pairs: bookPairs
             });
 
             // 标签对比
@@ -1406,20 +1646,48 @@ export function useDedupe({
         if (appMode.value === 'presets') {
             const d = item.data || {};
             const promptTexts = [];
-            if (d.prompts && typeof d.prompts === 'object') {
+            // 🔧 两种真实形态都要收（数组 / 数字键对象）——与 `presetStructure.buildPresetStructure` 同口径。
+            //    ⚠️ 旧实现把对象分支写在前面且用 `typeof === 'object'`，**数组也是 object** →
+            //       数组形态的预设会走对象分支、`Object.keys` 得到 `"0","1",…` 字符串键，
+            //       `map(Number)` 后仍能升序，但块内容会退化成 `String(块对象)` → **变成 `[object Object]`**
+            //       （实测真实库预设 `prompts` **是数组** ⇒ 该分支一直在产出垃圾文本）。
+            if (Array.isArray(d.prompts)) {
+                d.prompts.forEach(p => promptTexts.push(
+                    typeof p === 'string' ? p : String((p && p.content) || '')
+                ));
+            } else if (d.prompts && typeof d.prompts === 'object') {
                 Object.keys(d.prompts).map(Number).sort((a, b) => a - b)
                     .forEach(k => promptTexts.push(String(d.prompts[k] || '')));
-            } else if (Array.isArray(d.prompts)) {
-                d.prompts.forEach(p => promptTexts.push(typeof p === 'string' ? p : JSON.stringify(p)));
             }
             const params = PRESET_KEYS.filter(k => d[k] !== undefined)
                 .map(k => `${k}=${JSON.stringify(d[k])}`).join('|');
             return promptTexts.join('\n') + '\n' + params;
         }
         // 角色卡
+        // 🛑🛑 2026-09-23 修复（采纳「角色卡跨版本查重方案评估」的 P0-1 / P0-2）：
+        //    旧实现只取 **5 个字段**（description / personality / scenario / first_mes / mes_example），
+        //    而真实卡库实测**忽略 71.7% 的文本**（`_probe-card-versions.mjs` 45 张卡；
+        //    本次用真实卡复核更极端：`鬼.png` 查用 1,049 字符 vs 忽略 72,253 字符 = **忽略 98.6%**）。
+        //    ⇒ **`character_book`（内嵌世界书）80% 的卡都有，却 0 参与角色卡查重** ——
+        //      这是「两版设定几乎相同、只是正文长在世界书里」的卡**查不出来**的直接原因。
+        //    ✅ 现在纳入：`character_book` 词条（key+content，与世界书侧同口径）
+        //      + `alternate_greetings`（29% 填充）+ `creator_notes`（33%）
+        //      + `system_prompt` / `post_history_instructions`（各 4.4%，成本近零，顺手纳入）。
+        //    ⚠️ **字段口径**：`item.data` 可能是 V2/V3 包装（`{spec, data}`）或 V1 扁平卡
+        //      ⇒ 取 `data.data || data`（与全项目既有写法一致，见 DF-17 的教训）。
+        //    ⚠️ **不能用 `Array.isArray(entries)` 判世界书**（DF-19）→ 走 `extractBookEntries` 全形态提取器。
         const d = item.data?.data || item.data || {};
-        return [d.description, d.personality, d.scenario, d.first_mes, d.mes_example]
-            .filter(Boolean).join('\n');
+        const parts = [d.description, d.personality, d.scenario, d.first_mes, d.mes_example];
+        if (Array.isArray(d.alternate_greetings)) parts.push(...d.alternate_greetings);
+        parts.push(d.creator_notes, d.system_prompt, d.post_history_instructions);
+        // 内嵌世界书：与独立世界书分支**同口径**（`keys` + `content`），保证同一份设定
+        // 无论放在卡内还是独立成书，参与查重的文本都一致。
+        for (const e of extractBookEntries(d.character_book)) {
+            if (!e || typeof e !== 'object') continue;
+            const keys = Array.isArray(e.keys) ? e.keys.join(',') : (e.keys || e.key || '');
+            parts.push(`${keys} ${e.content || ''}`);
+        }
+        return parts.filter(Boolean).join('\n');
     };
 
     // 2) 文本规范化（去空白/标点/大小写）
@@ -1799,7 +2067,18 @@ export function useDedupe({
                     } catch (e) { text = ''; }
                     // ★ 关键：**当场算签名**，不让文本进入结果（否则全部常驻 → 大库内存爆炸）
                     if (text.length >= 20) {
-                        valid.push({ item, idx, sig: computeMinHash(getShingles(text)), textLen: text.length });
+                        // 🛑 2026-09-23：**同时**算「5 字段」签名（`_legacySig`）——
+                        //    纳入 `character_book` 后文本量级 ×26，会把「仅正文不同」的同源卡
+                        //    相似度**稀释**（实测 `鬼.png` ↔ `鬼1.png`：5 字段 100% → 全字段 **67.7%**，
+                        //    低于 0.85 闸门 ⇒ 会**漏报**真实同源版本）。
+                        //    故闸门取 **「全字段 ≥0.85 **或** 5 字段 ≥0.85」**（`gate` 内 `||`）：
+                        //      · 全字段命中 → 覆盖「仅世界书不同」的新能力；
+                        //      · 5 字段命中 → 保住「正文版本迭代」的既有召回（不回退）。
+                        const legacy = normalizeText(extractLegacyCardText(item));
+                        valid.push({
+                            item, idx, sig: computeMinHash(getShingles(text)), textLen: text.length,
+                            _legacySig: legacy.length >= 20 ? computeMinHash(getShingles(legacy)) : null
+                        });
                     }
                     applyDedupeProgress({
                         done: idx + 1,
@@ -1911,12 +2190,33 @@ export function useDedupe({
             } else {
                 uf = unionFind(n);
                 // 角色卡 / 预设：保留原 MinHash + LSH 路径（集合语义更合适，且量级小）
+                // 🛑 2026-09-23（字段覆盖修复的**必要配套**）：闸门改为**双口径 OR** ——
+                //    · `sigs`（全字段，含 `character_book`）→ 覆盖「**仅世界书不同**」的新能力；
+                //    · `_legacySig`（原 5 字段）→ 保住「**正文版本迭代**」的既有召回。
+                //    为何必须 OR：纳入世界书后文本量级 ×26，`鬼.png` ↔ `鬼1.png` 的
+                //    全字段相似度被**稀释到 67.7%**（< 0.85 闸门）⇒ **会漏报真实同源版本**
+                //    （实测：这两张卡 5 字段 100%、世界书 66.7%，是货真价实的同源改版）。
+                //    这是「**扩大字段覆盖不得降低既有召回**」的必要条件。
+                const mhSim = (i, j) => {
+                    const a = sigs[i], b = sigs[j];
+                    if (a && b && estimateSimilarity(a, b) >= CONTENT_SIMILARITY_THRESHOLD) return true;
+                    const la = valid[i]._legacySig, lb = valid[j]._legacySig;
+                    return !!(la && lb && estimateSimilarity(la, lb) >= CONTENT_SIMILARITY_THRESHOLD);
+                };
                 const buckets = new Map();
                 valid.forEach((_, i) => {
                     for (let b = 0; b < LSH_BANDS; b++) {
                         const k = bandKey(sigs[i], b);
                         if (!buckets.has(k)) buckets.set(k, []);
                         buckets.get(k).push(i);
+                    }
+                    // 5 字段签名也进桶（否则「仅正文不同」的同源卡不会成为候选对）
+                    if (valid[i]._legacySig) {
+                        for (let b = 0; b < LSH_BANDS; b++) {
+                            const k = 'L' + bandKey(valid[i]._legacySig, b);
+                            if (!buckets.has(k)) buckets.set(k, []);
+                            buckets.get(k).push(i);
+                        }
                     }
                 });
                 const seenPairs = new Set();
@@ -1939,7 +2239,8 @@ export function useDedupe({
                                 const pairKey = a < b ? `${a}:${b}` : `${b}:${a}`;
                                 if (seenPairs.has(pairKey)) continue;
                                 seenPairs.add(pairKey);
-                                if (estimateSimilarity(sigs[a], sigs[b]) >= CONTENT_SIMILARITY_THRESHOLD) uf.union(a, b);
+                                // 🛡️ 双口径 OR 闸门（见上方说明）
+                                if (mhSim(a, b)) uf.union(a, b);
                             }
                         }
                     }
@@ -2005,8 +2306,21 @@ export function useDedupe({
                     //    ✅ 现在：展示 **MinHash 估计的真实 Jaccard**（复核闸门用的就是它，同源可信）。
                     //    兜底：无 MinHash 签名时（理论不应发生）回落到 simhash 换算，并标注口径。
                     const simOf = (a, b) => {
-                        const ma = a._mhSig, mb = b._mhSig;
-                        if (ma && mb) return Math.round(estimateSimilarity(ma, mb) * 100);
+                        // 🛑 2026-09-23：**双口径取较大者**展示 —— 与闸门（`mhSim` 的 OR）**同口径**，
+                        //    否则会出现「闸门判定同组、但展示相似度只有 67%」的观感矛盾。
+                        //    · 全字段（含世界书）→ 新能力；
+                        //    · 5 字段 → 既有「正文版本」口径（保住召回）。
+                        const pairs = [
+                            [a._mhSig, b._mhSig],
+                            [a._legacySig, b._legacySig]
+                        ];
+                        let best = null;
+                        for (const [x, y] of pairs) {
+                            if (!x || !y) continue;
+                            const v = estimateSimilarity(x, y);
+                            if (best === null || v > best) best = v;
+                        }
+                        if (best !== null) return Math.round(best * 100);
                         const d = hammingDistance(a.sig, b.sig);
                         return Math.max(0, Math.round((1 - d / 64) * 100));
                     };
@@ -2063,6 +2377,19 @@ export function useDedupe({
                     v._lenPenalty = cls.penalty;
                     v._score = cls.score;
                 });
+
+                // 🏷️ 组内排序（2026-09-24，世界书查重方案「第 2 步」补完）：
+                //    ⚠️ 排序**必须**在 `_score` 算完之后 —— 上面的类型判定是逐项 vs `master`，
+                //       而 `master = list[0]`（内容最长者），排序**不能动 master**（否则基准版会变）。
+                //    ⇒ 做法：**先摘出 master，只对「其余项」排序，再拼回开头**。
+                //    排序规则抽到纯函数 `sortByCompositeScore()`（可单测，见 `similarityType.js`）。
+                //    ⚠️ 这与 `docs/规格与计划/世界书查重-多维度方案评估.md` 的「第 2 步」对应，
+                //       但**刻意不做权重标定**（真实库仅 8 对真重复，拟合权重 = 过拟合）。
+                //       权重仍是 `similarityType.js` 里的既定值，本次只把**已算出的分用起来**。
+                const [masterItem, ...restItems] = list;
+                const sortedRest = sortByCompositeScore(restItems);
+                list.length = 0;
+                list.push(masterItem, ...sortedRest);
                 return { name: master._name, kind: 'content', list };
             });
 
