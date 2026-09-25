@@ -2,7 +2,8 @@
 
 > 本目录存放**可复用的技术资产**：完整代码片段、实测技术数据、外部 API 参考、格式规范、探针工具。
 > 与 `docs/bugs/` 的分工：那里写「坏在哪、怎么修」，这里写「**代码长什么样、实测数字是多少、外部接口怎么用**」。
-> 最后整理：2026-09-22
+> **📁 目录结构（2026-09-25 起重排）：按主题分 5 组** —— `插件与扩展/` · `世界书与卡片/` · `AI打标/` · `性能与稳定性/` · `调试技术/`；同类资产归一组，新增文档请放入对应组（规则见 [`../文档整理规则.md`](../文档整理规则.md) §一之二）。
+> 最后整理：2026-09-25（按主题分组重排）
 
 ---
 
@@ -10,25 +11,26 @@
 
 | 文档 | 内容 | 规模 |
 |---|---|---|
-| [代码片段-AI打标.md](代码片段-AI打标.md) | AI 打标 5 处代码完整汇总：自动打标规则表（纯常量）、规则式打标 + 后台落盘、AI 智能打标引擎（组合式）、AI 打标弹窗组件、**提示词分角色 + `<tags>` 结构化输出 + 思维链（`js/utils/llmPromptRoles.js`，2026-09-24 新增，含三层降级截取与思考块剥离的关键设计点）** | 约 1,200 行 |
-| [代码片段-世界书条目名修复与导入.md](代码片段-世界书条目名修复与导入.md) | 世界书导出条目名缺失的修复代码 + 「从世界书库导入词条到角色卡」7 个修改点（精确锚点 + 可照拄的替换内容） | 约 294 行 |
-| [代码片段-Git导入封存.md](代码片段-Git导入封存.md) | 已**移除**的「Git 链接导入插件」功能全部代码（主进程 IPC / preload 桥接 / 组合式 / UI），封存备查与将来恢复 | 约 270 行 |
-| [方案-界面重整与应用级扩展系统.md](方案-界面重整与应用级扩展系统.md) | **修改方案 v1.2（已过 2026-09-20 评审 + 含变更风控，未改动任何源码）**：①打标三层漏斗的逐层/逐条开关（`compileAutoTagRules` 第二参 + `autoTagDisabledRules` 关闭清单 + 白名单耦合处理）；②命令注册表与 43 项菜单归位映射；③全局资产库三步走；④关系图谱只注册不外置的评估；⑤应用级扩展系统（manifest / 权限 / iframe 沙箱**源隔离** / 事件 / 存储）；⑥**§八 变更风控**（分级门禁 / 影响半径 / 检出盲区 / 处置流程 / 回退纪律 / 每期「新 BUG 预判」）。含 `E1~E53` 证据锚点表（`文件:行号`）、§十 评审结论与修订状态 | 约 692 行 |
-| [方案-卡片自动分组.md](方案-卡片自动分组.md) | **新功能方案 v2.0（已按评审意见修订，未改动任何源码）**：在**文件级**按「分组自己声明的收纳条件」自动把卡片移进同名分组文件夹（不存在则自动创建），视角为**分组声明成员资格**——**「标签即分组」已否决**（LLM 层标签自由产出 → 文件夹数量在原理上不可控，四条系统论证）。取证结论：建文件夹 / 物理移动 / 三类 path 派生键迁移（覆盖层·测卡会话·记忆）**底层已具备**；判定层取标签**定死走 `useSearch.js` 的 `extractCardTags`**（输出全小写，slim 卡可读）。含现状证据锚点、**回滚设计**（按卡名定位 + 必须走原语 + 空分组重建）、风险与回退表、S1~S6 分期、12 条专项验收（含"绕过原语"的静态检查，**范围覆盖回滚路径**）与 **Q1~Q9 裁决表** | 约 451 行 |
+| [代码片段-AI打标.md](AI打标/代码片段-AI打标.md) | AI 打标 5 处代码完整汇总：自动打标规则表（纯常量）、规则式打标 + 后台落盘、AI 智能打标引擎（组合式）、AI 打标弹窗组件、**提示词分角色 + `<tags>` 结构化输出 + 思维链（`js/utils/llmPromptRoles.js`，2026-09-24 新增，含三层降级截取与思考块剥离的关键设计点）** | 约 1,200 行 |
+| [代码片段-世界书条目名修复与导入.md](世界书与卡片/代码片段-世界书条目名修复与导入.md) | 世界书导出条目名缺失的修复代码 + 「从世界书库导入词条到角色卡」7 个修改点（精确锚点 + 可照拄的替换内容） | 约 294 行 |
+| [代码片段-Git导入封存.md](世界书与卡片/代码片段-Git导入封存.md) | 已**移除**的「Git 链接导入插件」功能全部代码（主进程 IPC / preload 桥接 / 组合式 / UI），封存备查与将来恢复 | 约 270 行 |
+| [方案-界面重整与应用级扩展系统.md](插件与扩展/方案-界面重整与应用级扩展系统.md) | **修改方案 v1.2（已过 2026-09-20 评审 + 含变更风控，未改动任何源码）**：①打标三层漏斗的逐层/逐条开关（`compileAutoTagRules` 第二参 + `autoTagDisabledRules` 关闭清单 + 白名单耦合处理）；②命令注册表与 43 项菜单归位映射；③全局资产库三步走；④关系图谱只注册不外置的评估；⑤应用级扩展系统（manifest / 权限 / iframe 沙箱**源隔离** / 事件 / 存储）；⑥**§八 变更风控**（分级门禁 / 影响半径 / 检出盲区 / 处置流程 / 回退纪律 / 每期「新 BUG 预判」）。含 `E1~E53` 证据锚点表（`文件:行号`）、§十 评审结论与修订状态 | 约 692 行 |
+| [方案-卡片自动分组.md](世界书与卡片/方案-卡片自动分组.md) | **新功能方案 v2.0（已按评审意见修订，未改动任何源码）**：在**文件级**按「分组自己声明的收纳条件」自动把卡片移进同名分组文件夹（不存在则自动创建），视角为**分组声明成员资格**——**「标签即分组」已否决**（LLM 层标签自由产出 → 文件夹数量在原理上不可控，四条系统论证）。取证结论：建文件夹 / 物理移动 / 三类 path 派生键迁移（覆盖层·测卡会话·记忆）**底层已具备**；判定层取标签**定死走 `useSearch.js` 的 `extractCardTags`**（输出全小写，slim 卡可读）。含现状证据锚点、**回滚设计**（按卡名定位 + 必须走原语 + 空分组重建）、风险与回退表、S1~S6 分期、12 条专项验收（含"绕过原语"的静态检查，**范围覆盖回滚路径**）与 **Q1~Q9 裁决表** | 约 451 行 |
 
 ## 二、实测技术数据
 
 | 文档 | 内容 |
 |---|---|
-| [技术数据-大库压测与性能.md](技术数据-大库压测与性能.md) | 11,186 卡 / 9.76GB 与 22,372 卡 / 19.85GB 两大库的**全部实测数字**：加载分项、堆构成审计、P1a 前后对比、内嵌缓存 A/B、冷启动 I/O 量化、容量边界、移动版 500 卡压测 |
+| [技术数据-大库压测与性能.md](性能与稳定性/技术数据-大库压测与性能.md) | 11,186 卡 / 9.76GB 与 22,372 卡 / 19.85GB 两大库的**全部实测数字**：加载分项、堆构成审计、P1a 前后对比、内嵌缓存 A/B、冷启动 I/O 量化、容量边界、移动版 500 卡压测 |
 
 ## 三、外部接口参考
 
 | 文档 | 内容 |
 |---|---|
-| [API参考-酒馆插件渲染.md](API参考-酒馆插件渲染.md) | SillyTavern / JS-Slash-Runner 源码与官方文档整理：扩展模板渲染（Handlebars）、消息渲染（Showdown）、消息块 DOM 结构、`getContext()` 完整成员、事件系统、Slash 命令、脚本 API |
-| [格式说明-插件格式.md](格式说明-插件格式.md) | 插件 JSON 扩展格式、支持的插件形态、本地目录扫描接入方式、工作区「📄 代码 / ✨ 效果」双卡 |
-| [CDP探针-DOM查询三大陷阱.md](CDP探针-DOM查询三大陷阱.md) | **写 CDP 端到端探针必读**（2026-09-24 实测踩坑，两个探针初版共致 **18 条假失败**）：① `offsetParent` 对 `position:fixed` 元素**恒为 null** ⇒ 弹窗可见性须用 `getComputedStyle` + `getBoundingClientRect`；② 弹窗根节点**必须要求 `inset-0`** ⇒ 否则先命中 **Toast 容器**（也是 `fixed z-50`）；③ 按钮查询**必须限定弹窗内 + 规范化后完全等于** ⇒ 否则「API 引擎」命中 HeaderBar 菜单、「关闭档」**误关弹窗**；④ `[...divs].find(含文案)` 返回**最外层祖先** ⇒ 会点到**别的行**的按钮（**夹具至少 2 条同类数据**才暴露）；⑤ 侧栏/列表这类**流式元素**不能用弹窗判据，分区 tab 是 `<div>` 不是 `<button>`；⑥ 同页多个 `textarea` 必须用 **placeholder 精确定位**。🛑 附「**禁止用 PowerShell 改源码**」真实事故（PS 5.1 `Set-Content` 默认 ANSI → 写坏 UTF-8，229 个 `U+FFFD`，**构建与单测都不报错**）+ 检测与还原方法。附「探针有效性双向对照」验证法 |
+| [方案-卡片正文口径收口.md](世界书与卡片/方案-卡片正文口径收口.md) | **收口执行方案（2026-09-25，约 90 行）**：P1a 正文懒加载**既有三条承诺未落到底**所引发的一整类缺陷（读侧空结论 / 写侧可写空 ⇒ 数据丢失）的强制收口 —— **一条入口**（`setCardBodyLoader` + `ensureFullBody`，缺加载器即告警）+ **一道出口闸门**（`file:saveCard` 检测「正文集体变空」⇒ 拒写）+ **一套守卫**（`guard:card-body` 白名单制 + 文案源 + 清理防护）。含迁移清单与可测验收（接手 PK-16 的 ⬜ 待复测项）。⚠️ **不是新设计** —— 设计见 `CHANGELOG.md` v2.2.7（五）与 [`../bugs/BUG-性能与大库.md`](../bugs/BUG-性能与大库.md) §五 护栏 6/7（状态：✅ 方案定稿，实施中） |
+| [API参考-酒馆插件渲染.md](插件与扩展/API参考-酒馆插件渲染.md) | SillyTavern / JS-Slash-Runner 源码与官方文档整理：扩展模板渲染（Handlebars）、消息渲染（Showdown）、消息块 DOM 结构、`getContext()` 完整成员、事件系统、Slash 命令、脚本 API |
+| [格式说明-插件格式.md](插件与扩展/格式说明-插件格式.md) | 插件 JSON 扩展格式、支持的插件形态、本地目录扫描接入方式、工作区「📄 代码 / ✨ 效果」双卡 |
+| [CDP探针-DOM查询三大陷阱.md](调试技术/CDP探针-DOM查询三大陷阱.md) | **写 CDP 端到端探针必读**（2026-09-24 实测踩坑，两个探针初版共致 **18 条假失败**）：① `offsetParent` 对 `position:fixed` 元素**恒为 null** ⇒ 弹窗可见性须用 `getComputedStyle` + `getBoundingClientRect`；② 弹窗根节点**必须要求 `inset-0`** ⇒ 否则先命中 **Toast 容器**（也是 `fixed z-50`）；③ 按钮查询**必须限定弹窗内 + 规范化后完全等于** ⇒ 否则「API 引擎」命中 HeaderBar 菜单、「关闭档」**误关弹窗**；④ `[...divs].find(含文案)` 返回**最外层祖先** ⇒ 会点到**别的行**的按钮（**夹具至少 2 条同类数据**才暴露）；⑤ 侧栏/列表这类**流式元素**不能用弹窗判据，分区 tab 是 `<div>` 不是 `<button>`；⑥ 同页多个 `textarea` 必须用 **placeholder 精确定位**。🛑 附「**禁止用 PowerShell 改源码**」真实事故（PS 5.1 `Set-Content` 默认 ANSI → 写坏 UTF-8，229 个 `U+FFFD`，**构建与单测都不报错**）+ 检测与还原方法。附「探针有效性双向对照」验证法 |
 
 ---
 
@@ -42,7 +44,7 @@
 
 | 位置 | 内容 | 数量 |
 |---|---|---|
-| `scripts/`（根） | **门禁 / 校验**：`check-batch-read-guard.mjs`、`check-doc-links.mjs`、`check.py`、`checkkit.py`、`extract-release-notes.mjs`、`release-check.mjs` —— 被 `npm scripts` 或发版流程直接调用，路径不能变 | 6 |
+| `scripts/`（根） | **门禁 / 校验**：`check-batch-read-guard.mjs`、`check-doc-links.mjs`、**`check-undefined-scope.mjs`**、`check.py`、`checkkit.py`、`extract-release-notes.mjs`、`release-check.mjs` —— 被 `npm scripts` 或发版流程直接调用，路径不能变 | 7 |
 | `scripts/probes/` | **探针**（`_probe-*`）：取证、压测、端到端验证 | 98 |
 | `scripts/tools/` | **工具**：调试（`_cdp-*` / `_dbg-*` / `_heap-*` / `_heat-*`）、测试（`*-test` / `*-smoke`）、扫描分析（`scan-*` / `audit-*` / `extract-*`）、一次性清洗 | 47 |
 
@@ -60,6 +62,7 @@
 | `release-check.mjs` | **发版前置自查**（语法 + 单测 + 构建 + 文档一致性 + git 状态），`--e2e dev/prod` 加跑端到端 |
 | `check-doc-links.mjs` | 校验全仓库 markdown 的相对链接能否解析（当前 50 文件 / 275 条全有效） |
 | `check-batch-read-guard.mjs` | **CI 白名单守卫（PK-27 / S4'）**：批量读世界书正文**必须走唯一入口** —— `ensureWorldbookLoaded` 只允许出现在白名单清单里，其余任何文件出现即 fail。接 `npm run guard:batch-read`（含在 `npm run check` 里） |
+| `check-undefined-scope.mjs` | **静态「未定义标识符」门禁**（2026-09-25，AR-51 事故产物）：基于 `acorn` 做**作用域感知**的引用解析，抓「定义在**另一个闭包**里 → 运行期 `ReferenceError`」这类 `npm test` / `vite build` 都看不见的错（事故现场：查重结果 **0 组**，日志 `ReferenceError: fullSigOf is not defined`）。`node scripts/check-undefined-scope.mjs [目录…]`，命中退出码 1；单测 `test/scopeUndefined.test.mjs`（含正向对照 —— 先证明它**真抓得住**） |
 | `extract-release-notes.mjs` | 从 `RELEASE_NOTES.md` 抽取指定版本段（默认当前 `package.json` 版本）到临时文件，供 `gh release create --notes-file` 使用——**不要手抄正文** |
 | `dev-run.ps1` | dev 启动（含终端编码修正） |
 
@@ -95,7 +98,7 @@
 | `_probe-aitag-nav.mjs` | **AI 打标窗口布局重构（静态结构）**：12 条断言 —— 左导航三组七分区齐全、逐分区切换后特征控件可见（判据用 `offsetParent` 而非 `innerText`，后者会误判隐藏分区）、「管理规则表」入口去重、三层开关 / API 字段 / 破限区未丢、无渲染错误。用法：`$env:CDP_PORT=9375; node scripts/probes/_probe-aitag-nav.mjs` |
 | `_probe-aitag-hot.mjs` | **AI 打标窗口动态行为热测**：30 条断言 —— 徽标联动、跨分区状态保持、分区互斥、进度条位置、管线全关保护、取消 / ✕ / 开合循环 ×5、窄窗 900×620、规则弹窗、**副作用校验（不得误开无关弹窗）**。⚠️ 实例须加 `--disable-renderer-backgrounding --disable-backgrounding-occluded-windows --disable-background-timer-throttling` 启动，否则窗口被遮挡时 rAF 被节流 → Vue 过渡卡住 → 假失败（详见文件头注） |
 | `_probe-aitag-run.mjs` | **AI 打标真实 API 端到端**：真实入口 + 真实 UI 按钮启动，校验打标中「取消 / ✕ 关闭」被禁用、进度推进、逐卡日志有结论、无渲染错误。🚫 **会真实写卡** → 只能跑在隔离库副本上（探针内含真实库路径检测，命中即退出码 2）。用法：`$env:CDP_PORT=9375; $env:TAG_COUNT=2; node scripts/probes/_probe-aitag-run.mjs` |
-| `_probe-aitag-cot.mjs` | **AI 打标「分角色 + 思维链 + 连通性测试」端到端**（R1+R2+CoT，**20 条断言**）：5 个小页签齐全 / 逐页签切换后编辑区可见 / 思维链三档（默认只读 · 自定义可写 · 关闭无框且**不误关弹窗**）/ 🔌 测试连通性按钮 / 🟢 徽标按「仅 LLM 层」条件出现与消失 / 引擎侧三档取值一致 / 无渲染错误。⚠️ **必须 dev 模式**（`__jskDiag` 仅 dev 暴露）且隔离 profile 的 `tavern_manager_config.json` 需预置 `lastFolder` 指向真实卡库。🛑 **三个 DOM 陷阱（初版踩了共 10 条假失败，详见 [CDP探针-DOM查询三大陷阱.md](CDP探针-DOM查询三大陷阱.md)）**。用法：`npm run dev` 后 `$env:VITE_DEV_SERVER_URL="http://localhost:5173"; $env:CDP_PORT=9376; node scripts/probes/_probe-aitag-cot.mjs` |
+| `_probe-aitag-cot.mjs` | **AI 打标「分角色 + 思维链 + 连通性测试」端到端**（R1+R2+CoT，**20 条断言**）：5 个小页签齐全 / 逐页签切换后编辑区可见 / 思维链三档（默认只读 · 自定义可写 · 关闭无框且**不误关弹窗**）/ 🔌 测试连通性按钮 / 🟢 徽标按「仅 LLM 层」条件出现与消失 / 引擎侧三档取值一致 / 无渲染错误。⚠️ **必须 dev 模式**（`__jskDiag` 仅 dev 暴露）且隔离 profile 的 `tavern_manager_config.json` 需预置 `lastFolder` 指向真实卡库。🛑 **三个 DOM 陷阱（初版踩了共 10 条假失败，详见 [CDP探针-DOM查询三大陷阱.md](调试技术/CDP探针-DOM查询三大陷阱.md)）**。用法：`npm run dev` 后 `$env:VITE_DEV_SERVER_URL="http://localhost:5173"; $env:CDP_PORT=9376; node scripts/probes/_probe-aitag-cot.mjs` |
 | `_probe-mem-dedupe-ui.mjs` | **记忆库逐条编辑 + 查重综合分排序端到端**（2026-09-24，**16 条断言**）：排序纯函数三级回退 / 返回新数组不改入参 / 记忆行有 ✏ / 点 ✏ 进编辑态 / fact 才有 key 框 / **编辑时其他行 ✏ 被禁用** / 空内容禁用保存 / 取消丢弃草稿 / **保存真写入存储** / 清理干净 / 无渲染错误。⚠️ **必须 dev 模式**，且需 `__jskDiag.chat.openCard()` 先开卡（测卡侧栏只在「有卡打开 + 测卡 Tab」时渲染）。🛑 **四个 DOM 陷阱（初版踩了 8 条假失败）**：① 记忆库在**测卡侧栏**不在 AI 打标弹窗（`aiTag.open()` 找不到）；② 分区 tab 是 **`<div>` 不是 `<button>`**，标签带图标前缀（用 `endsWith`）；③ 编辑框必须用 **placeholder 精确定位**（侧栏有多个 textarea）；④ 行必须用 **class 特征（`border-b` + `group`）** 定位 —— `[...divs].find(含文案)` 会返回**最外层祖先**，点到的 ✏ 是**别的行**的（只注入 1 条时碰巧对，2 条立刻暴露）。用法：`$env:CDP_PORT=9376; node scripts/probes/_probe-mem-dedupe-ui.mjs` |
 | `_probe-dedupe-progress.mjs` | **AR-42** 查重进度条**位置修正**端到端（15/15）：断言①浏览库后侧栏**无**进度条、改用日志反馈；②查重前**确实重扫磁盘**；③扫描期间**弹窗内**出现进度文案（`withProgress=true`）；④进度带当前文件名、`phase` 序列 `parsing→done→idle`；⑤查重后收起、无 TDZ。用法：`node scripts/probes/_probe-dedupe-progress.mjs "<世界书目录>"` |
 | `_probe-wb-regression.mjs` | 世界书**功能回归**（100 本库）：扫描/entries 归一化/进度复位/侧栏存活/分组/搜索/词条数筛选/`wbEntryCount`/同名查重/内容级查重/模式反复切换/渲染期错误。用法：`node scripts/probes/_probe-wb-regression.mjs "<目录>"`（**位置参数**，环境变量跨命令会丢） |
@@ -110,6 +113,13 @@
 | `_probe-instant-regression.mjs` | **PK-26** 秒开回归门禁（**带断言，退出码即结果**）：秒开态 `entryCount`/`wbName` 覆盖率、`wbEntryCount()` 真实值、同名查重 `_entryCount` **不得为 0**、重合度**不得是反向的「0%」**、差异比对**必须走世界书分支**且不出现「设定完全一致」。⚠️ 修复前此脚本是「大量 0 / 0%」的取证工具，现已加断言。用法：`node scripts/probes/_probe-instant-regression.mjs "<目录>"` |
 | `_probe-pk26-release.mjs` | **PK-26 后续**「用后释放」专项门禁（**7/7**）：断言同名查重过程中确实逐本载入正文（**峰值 > 查重前**）、且终值**回落到查重前水平**（未累积）、未把全部书留在内存、词条数为真实值、堆未失控。⚠️ **判据必须看「峰值 → 终值」的回落**，不能写「终值必须为 0」—— 扫描器会按内联预算主动载入少量书（PK-20 既有设计），那样会恒失败。用法：`node scripts/probes/_probe-pk26-release.mjs "<目录>"` |
 | `_probe-l1-size.mjs` | **PK-27 架构方案**：**L1 摘要体积实测**（离线，不起应用）—— 去重触发词数/长度分布、**原字符串方案 vs `Uint32Array` hash 方案的真实体积**（含 JS 字符串头部与数组槽开销）、体积系数（parse 后字符/磁盘字节）、非 BMP（emoji）占比、hash 计算耗时、全库外推。**改 L1 设计前必跑**（实测推翻了原估算 16~32 倍）。用法：`node scripts/probes/_probe-l1-size.mjs "<目录>" [采样本数]`（`TOTAL_BOOKS` 可调外推基数） |
+
+### 卡片正文口径专项（PK-31 / PK-32）
+
+| 脚本 | 用途 |
+|---|---|
+| `_probe-qiuziqi-vs-pair.mjs` | **PK-31** 两卡取证（只读真实库、独立解析不走应用内存）：逐字段长度 + 4-gram Jaccard（5 字段 / 全字段+词条 / 仅词条）、内嵌词条数与其 keys/正文长度。**判“同组是否误报”先用它**，别靠截图推断。用法：`node scripts/probes/_probe-qiuziqi-vs-pair.mjs ["A 路径"] ["B 路径"]`（缺省为秋青子那对） |
+| `_probe-disk-wiped-books.mjs` | **PK-32** 磁盘排雷（只读真实库）：抽样扫 PNG，统计「≥10 条词条但正文全空」的卡 —— 即**是否已被「瘦身态 payload 写回」抹掉过**（正常作者不会建 10+ 条空词条）。**写完侧改动后应保持 0**。用法：`node scripts/probes/_probe-disk-wiped-books.mjs "I:\03\角色色卡" 400` |
 
 ### PK-27 架构改造专项（L1 摘要 / simhash / 进度条）
 
@@ -177,7 +187,7 @@
 
 ### 角色卡 / 预设查重勘查探针（两份外部方案评估，2026-09-23）
 
-> 依据：`../规格与计划/角色卡与预设查重-方案评估.md`。这 4 个探针产出「采纳 / 修正 / 否决」的全部实测依据。
+> 依据：`../规格与计划/查重引擎/角色卡与预设查重-方案评估.md`。这 4 个探针产出「采纳 / 修正 / 否决」的全部实测依据。
 
 | 脚本 | 用途 |
 |---|---|
@@ -235,6 +245,7 @@
 | `save-strip-live-worldbook.mjs` | 同上，覆盖另外 3 条落盘路径：`saveCard(.json)` / `wb:create` / `wb:save`（结束自动删样本，不动用户卡片库） |
 
 ⚠️ 跑热测试的两个坑（都实际踩过）：
+
 1. 样本目录必须放 **`%APPDATA%\sillytavern-card-manager\`**（= `productName` 派的 userData），
    放 `%APPDATA%\JSK管理\` 会被 `isPathAllowed` 判「路径越界」——那不是功能 bug。
 2. 脚本里的 Windows 路径**一律在 Node 侧用 `JSON.stringify` 生成字面量**，

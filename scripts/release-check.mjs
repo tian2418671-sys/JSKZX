@@ -130,7 +130,7 @@ for (const r of results) {
 console.log('');
 if (blocked === 0) {
     console.log('✅ 无阻塞项，可进入打包：npm run build');
-    console.log('   之后按 docs/发布/一条龙-发布流程.md 执行：装包自测 → tag → push → Release 上传 → OTA 验证');
+    console.log('   之后按 docs/发布/规范与流程/一条龙-发布流程.md 执行：装包自测 → tag → push → Release 上传 → OTA 验证');
 } else {
     console.log(`❌ 有 ${blocked} 项阻塞，先修完再打包`);
 }

@@ -10,7 +10,7 @@
  * 消费方：`useAITools.js`（引擎短路）、`AITagModal.vue`（开始按钮可用性 + 管线区）、
  *        `HeaderBar.vue`（编辑菜单状态提示）、`useConfigPersistence.js`（落盘归一化）。
  *
- * 规格：`docs/规格与计划/打标三层开关-P1实现规格.md` §3.2
+ * 规格：`docs/规格与计划/AI打标/打标三层开关-P1实现规格.md` §3.2
  */
 
 /**

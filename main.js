@@ -114,6 +114,9 @@ try {
 // 为什么**不能**递归剔除所有 `_` 前缀键 —— 第三方扩展里有 7 类、131 处真实数据是 `_` 开头）。
 // 这里只做引入；卡片保存（PNG chara / JSON）、世界书保存、整合包导出共用同一套清洗规则。
 const { stripInternalFields, restoreEntriesDict } = require('./main/cardFieldSanitizer.js');
+// 🛡️ PK-32（2026-09-25）：保存闸门（拒绝「正文集体变空」的写入）——抽到独立模块便于单测。
+//    用**真实卡片**做样本的单测见 `test/cardBodyGuard.test.mjs`。
+const { checkBodyDegrade } = require('./main/cardBodyGuard.js');
 
 
 // ================= [ 📸 历史快照配置与节流阀（可在设置面板动态更新） ] =================
@@ -575,6 +578,9 @@ function readTavernPNGChunk(buffer) {
   }
   return null;
 }
+
+// 🛡️ PK-32（2026-09-25）：保存闸门 `checkBodyDegrade` 已抽到 `main/cardBodyGuard.js`
+//    （配置在文件顶部 require）——本处只留调用点，见 `file:saveCard` 各分支。
 
 // 系统级应用数据目录（用于保存配置，不会随项目丢失）
 const configPath = path.join(app.getPath('userData'), 'tavern_manager_config.json');
@@ -1051,7 +1057,7 @@ const WB_META_CONCURRENCY = 8;
 // ─────────────────────────────────────────────────────────────────────────
 // 📖 病根：扫描时 `entriesArr` **已经在内存里**，但只把 `{mtime,size,name,entryCount}` 写进缓存
 //    → **触发词被丢掉** → 下游查重只能**重读 34.8GB 正文** → 三次 OOM 事故（PK-20 / 内容查重 / PK-27）。
-// 📖 方案：`docs/规格与计划/世界书大库-加载与查重架构方案.md`（三层模型 L0/L1/L2）。
+// 📖 方案：`docs/规格与计划/世界书大库/世界书大库-加载与查重架构方案.md`（三层模型 L0/L1/L2）。
 //    **L1 只在主进程算** —— 渲染进程**零正文**（这是与「只把并发改成顺序」的本质区别）。
 //
 // 📊 实测依据（`scripts/probes/_probe-l1-size.mjs`，s1000 采样 92 本）：
@@ -1061,7 +1067,7 @@ const WB_META_CONCURRENCY = 8;
 //    · keys hash 计算仅 **0.04ms/本**（parse 31ms 的 0.13%，可忽略）
 //    ⇒ **keys 必须存 hash 而非原字符串**（必须项，非优化项）
 //
-// ⚠️ **分层落盘**（S0.5 实验的结论，`docs/规格与计划/S0.5-simhash特征方案实验报告.md`）：
+// ⚠️ **分层落盘**（S0.5 实验的结论，`docs/规格与计划/世界书大库/S0.5-simhash特征方案实验报告.md`）：
 //    · **L1a（本文件实现，S1' 落盘）**：`keyHashes` + `exactContentHash` —— 供**同名查重（S2'）**
 //      成本极低（0.04ms/本），对阶段 2 的 160s **无可见影响**
 //    · **L1b（延后到 S3'）**：`simhash64` —— 供**内容级查重（S3'）**
@@ -1328,58 +1334,14 @@ function exactContentHash(entries) {
 //
 // 📊 体积：64 位 = 8 字节/本 → 5401 本 ≈ **43KB**（可忽略，对比 L1a 的 23.4MB）。
 //
-// 🎯 口径必须与渲染层 `useDedupe.js` 的 `computeSimhash` **逐字一致**（否则查重结果会错）：
-//    · 输入：**仅 `entries[].content` 拼接**（不含 key！—— 与 `extractContentText` 的世界书分支不同，
-//      那个是 `key + content`；但 S3' 内容查重的 simhash 输入见下方 `simhashInputOf` 注释）
+// 🎯 口径（v4 §12 单源化，2026-09-25）：simhash 权威实现已拁移到
+//    `js/utils/simhash64.mjs`（渲染层与主进程**同一实现**）——
+//    Electron 43 / Node 24 支持 `require(esm)`，主进程直接 require 即可（已实测）。
+//    ⚠️ 打包白名单（package.json build.files）必须包含 `js/utils/simhash64.mjs`；
+//    ⚠️ 行为由 `test/simhashParity.test.mjs` 的 golden vectors 锁定，改实现必挂测试。
+//    · 输入：`simhashInputOf(entries)` = `"${keys} ${content}"` 逐条拼接后归一化
 //    · char 4-gram + 采样 step=4 + number 双 32 位（`Math.imul`）
-const SIMHASH_N = 4;
-const SIMHASH_STEP = 4;
-
-/** 🧬 64 位 simhash（number 双 32 位）—— **必须与 `useDedupe.js` 的 `computeSimhash` 一致** */
-function computeSimhash64(text) {
-  const v = new Int32Array(64);
-  const len = text.length;
-  const n = SIMHASH_N, step = SIMHASH_STEP;
-  for (let i = 0; i + n <= len; i += step) {
-    let lo = 0x811c9dc5 >>> 0, hi = 0x01000193 >>> 0;
-    for (let k = 0; k < n; k++) {
-      const c = text.charCodeAt(i + k);
-      lo = Math.imul(lo ^ c, 0x01000193) >>> 0;
-      hi = Math.imul(hi ^ c, 0x01000193) >>> 0;
-    }
-    for (let b = 0; b < 32; b++) {
-      v[b] += ((lo >>> b) & 1) ? 1 : -1;
-      v[b + 32] += ((hi >>> b) & 1) ? 1 : -1;
-    }
-  }
-  let outLo = 0, outHi = 0;
-  for (let b = 0; b < 32; b++) {
-    if (v[b] > 0) outLo |= (1 << b);
-    if (v[b + 32] > 0) outHi |= (1 << b);
-  }
-  return [outLo >>> 0, outHi >>> 0];
-}
-
-/**
- * 🧬 从 entries 构造 simhash 的**输入文本**（与渲染层同口径）。
- *
- * ⚠️ 口径对齐（改这里必须同步改 `useDedupe.js`）：
- *   渲染层 `extractContentText`（世界书分支）产出 `"${keys} ${content}"` 逐条拼接，
- *   再过 `normalizeText`（`\s+`→空格、非字母数字→空格、转小写、trim）。
- *   ⇒ 这里必须**完全复刻**，否则「落盘 simhash」与「运行时算的 simhash」不一致，
- *     会导致「同一本书两次查重结果不同」这种极难定位的问题。
- */
-function simhashInputOf(entries) {
-  return entries.map(e => {
-    if (!e || typeof e !== 'object') return '';
-    const keys = Array.isArray(e.key) ? e.key.join(',') : (e.key || '');
-    return `${keys} ${e.content || ''}`;
-  }).join('\n')
-    .replace(/\s+/g, ' ')
-    .replace(/[^\p{L}\p{N}]+/gu, ' ')
-    .toLowerCase()
-    .trim();
-}
+const { computeSimhash64, simhashInputOf } = require('./js/utils/simhash64.mjs');
 
 const MAX_PLUGIN_SCRIPT_BYTES   = 2 * 1024 * 1024;  // 🧩 单个插件脚本读取上限（超大文件跳过）
 const SCAN_FILE_BATCH        = 64;               // 扫描文件批并发
@@ -1545,7 +1507,12 @@ app.whenReady().then(() => {
   // IPC：重新扫描当前角色卡库目录（刷新按钮用，无需重新弹出目录选择框）
   // 安全契约：folderPath 必须已在白名单内（即用户此前通过选择目录/启动加载确认过的库），
   // 否则拒绝，避免被注入脚本利用来枚举任意磁盘目录。
-  ipcMain.handle('library:rescan', async (event, folderPath) => {
+  //
+  // 📊 AR-49（2026-09-24）：新增 `opts.withProgress` —— 查重前重扫需要**真实进度**，
+  //    否则渲染层只能用「不定态滚动光条」（用户实测：「没有依次推进的效果」）。
+  //    经 'library:scan-progress' 推送 { phase, done, total }（phase: counting/scanning）。
+  //    ⚠️ 默认**不传 opts 就不报进度**（启动加载/普通刷新保持原样，不付清点开销）。
+  ipcMain.handle('library:rescan', async (event, folderPath, opts) => {
     try {
       if (!folderPath || typeof folderPath !== 'string') {
         return { folderPath: null, files: [], error: '未指定库目录' };
@@ -1554,7 +1521,11 @@ app.whenReady().then(() => {
       if (!fs.existsSync(folderPath)) {
         return { folderPath: null, files: [], error: '库目录不存在，请重新打开角色库目录。' };
       }
-      return scanAndSaveFolder(folderPath);
+      const withProgress = !!(opts && opts.withProgress);
+      const onProgress = withProgress
+        ? (p) => { try { event.sender.send('library:scan-progress', p); } catch (e) { /* 渲染层已销毁 → 忽略 */ } }
+        : undefined;
+      return scanAndSaveFolder(folderPath, onProgress);
     } catch (e) {
       return { folderPath: null, files: [], error: e.message };
     }
@@ -2352,6 +2323,13 @@ app.whenReady().then(() => {
 
   // IPC：原生消息对话框（替代 alert）
   ipcMain.handle('dialog:showMessage', async (event, options) => {
+    // 🧪 e2e/探针专用（默认关闭）：`JSK_TEST_CONFIRM=1` 时「确认类/提示类」弹窗直接应答、不弹模态窗，
+    //    供 CDP 探针无人值守跑通「清理」全链路（scripts/probes/_probe-dedupe-p1.mjs）。
+    //    · question → 按 defaultId（默认 1=确定）；error/warning → 静默（默认 0）——模态窗会干扰 CDP 自动化
+    //    ⚠️ 仅此环境变量开启时生效；正常运行（未设变量）行为**完全不变**。
+    if (process.env.JSK_TEST_CONFIRM === '1' && options && ['question', 'error', 'warning'].includes(options.type)) {
+      return { response: options.type === 'question' ? (Number.isInteger(options.defaultId) ? options.defaultId : 1) : 0 };
+    }
     // 🛡️ 类型规范化：Electron showMessageBox 仅接受 none/info/error/question/warning；
     //   渲染层 nativeAlert 会传 'success' 等业务类型，直接透传会抛 "Invalid message box type" 导致弹窗失败
     const allowed = ['none', 'info', 'error', 'question', 'warning'];
@@ -2822,6 +2800,15 @@ app.whenReady().then(() => {
         //    停留在扫描时刻，本次保存改了磁盘 mtime，下次刷新会把该卡误判为"已变化"
         //    重新解析并再次触发自动打标写盘 → mtime 又变 → 死循环（每次刷新全量重写）
         if (ext === '.json') {
+          // 🛡️ PK-32 出口闸门（同 PNG 分支）：旧卡有正文而 payload 集体变空 ⇒ 拒写
+          try {
+            let oldCard = null;
+            try { oldCard = JSON.parse(await fs.promises.readFile(filePath, 'utf-8')); } catch (e) { oldCard = null; }
+            const degraded = checkBodyDegrade(oldCard, updatedJson);
+            if (degraded) return { success: false, error: degraded };
+          } catch (e) {
+            console.warn('[saveCard] 正文退化检测异常（已放行）:', e && e.message);
+          }
           // 原子写入：tmp + rename（tmp 唯一命名防并发互踩）
           tmpPath = `${filePath}.${process.pid}.${++saveTmpSeq}.tmp`;
           await fs.promises.writeFile(tmpPath, JSON.stringify(stripInternalFields(updatedJson), null, 2), 'utf-8');
@@ -2830,6 +2817,13 @@ app.whenReady().then(() => {
           return { success: true, mtime: st.mtimeMs, size: st.size };
         } else if (ext === '.png') {
           const buffer = await fs.promises.readFile(filePath);
+          // 🛡️ PK-32 出口闸门：磁盘旧卡有正文而 payload 集体变空 ⇒ 拒写（详见 checkBodyDegrade 注释）
+          try {
+            const degraded = checkBodyDegrade(readTavernPNGChunk(buffer), updatedJson);
+            if (degraded) return { success: false, error: degraded };
+          } catch (e) {
+            console.warn('[saveCard] 正文退化检测异常（已放行）:', e && e.message);
+          }
           const newBuffer = writeTavernPNGChunk(buffer, updatedJson);
           if (newBuffer) {
             // 🔧 修复：与 JSON 分支同口径 tmp + rename 原子替换，
@@ -4358,8 +4352,17 @@ app.whenReady().then(() => {
       const results = { success: true, count: 0, failed: [] };
       let seq = 0; // 🔧 同批次 Date.now() 可能撞同一毫秒，加序号防回收站内同名互覆
       for (const p of (Array.isArray(filePaths) ? filePaths : [])) {
-        if (!isPathAllowed(p)) continue;
-        if (!p || !fs.existsSync(p)) continue;
+        // 🛡️ DF-27（2026-09-25）：白名单外 / 文件不存在 → **显式失败**，绝不静默跳过 ——
+        //    调用方（查重清理）以「不在 failed」判定成功，静默跳过会产生
+        //    「幽灵移除」（内存删了、磁盘还在），UI 还显示清理成功。
+        if (!isPathAllowed(p)) {
+          results.failed.push({ path: p, error: '路径不在授权范围（需在应用中先绑定该目录）' });
+          continue;
+        }
+        if (!p || !fs.existsSync(p)) {
+          results.failed.push({ path: p, error: '文件不存在（可能已被移动或删除）' });
+          continue;
+        }
         try {
           const dest = path.join(trashDir, `${Date.now()}_${seq++}_${path.basename(p)}`);
           try {
@@ -4961,7 +4964,44 @@ async function flushStatQueue(queue) {
   }));
 }
 
-async function walkLibraryDir(dirPath, relPath, files, categories, visitedDirs, statQueue) {
+/**
+ * 🔢 快速清点可扫描文件总数（**只 readdir、不 stat**）—— 供进度条拿到真实 `total`。
+ *
+ * 📊 实测（`I:\03\角色色卡` / 11,667 文件 / 192 目录）：**171ms**，
+ *    而完整扫描（readdir + 128 路并发 stat）为 **1,772ms** ⇒ 清点开销仅 **9.7%**。
+ *    ⇒ 用「多花 10% 时间」换「进度条从 0% 真实推进到 100%」，划算（AR-49 的修法）。
+ *
+ * 🛑 过滤口径**必须与 `walkLibraryDir` 完全一致**（隐藏文件 / `skipFolders` / `isScannable`），
+ *    否则 `total` 与实际 `done` 对不上（进度条会提前满格或永远到不了 100%）。
+ */
+async function countScannableFiles(dirPath, visited = new Set()) {
+  let realDir;
+  try { realDir = fs.realpathSync(dirPath); } catch (e) { return 0; }
+  if (visited.has(realDir)) return 0;   // 防 junction / 符号链接环路（同 walkLibraryDir）
+  visited.add(realDir);
+  let entries;
+  try {
+    entries = await fsp.readdir(dirPath, { withFileTypes: true });
+  } catch (e) { return 0; }
+  let n = 0;
+  for (const f of entries) {
+    if (f.name.startsWith('.')) continue;
+    if (f.isDirectory()) {
+      if (skipFolders.includes(f.name.toLowerCase())) continue;
+      n += await countScannableFiles(path.join(dirPath, f.name), visited);
+    } else if (f.isFile()) {
+      if (isScannable(path.extname(f.name).toLowerCase())) n++;
+    }
+  }
+  return n;
+}
+
+/**
+ * @param {(p:{phase:string,done:number,total:number})=>void} [onTick]
+ *        进度心跳（可选）。**仅当调用方需要进度时才传** —— 启动加载（`config:load`）不传，
+ *        避免无谓的清点开销。`files` 数组是递归共享的，故 `files.length` 即全局已发现数。
+ */
+async function walkLibraryDir(dirPath, relPath, files, categories, visitedDirs, statQueue, onTick) {
   // 🛡️ v1.8.5：realpath + visited 集合防符号链接/junction 环路（同 wb:scan walk；
   //    指回祖先的链接会让异步递归无限循环、files 数组无限膨胀直至内存耗尽）
   let realDir;
@@ -4982,7 +5022,7 @@ async function walkLibraryDir(dirPath, relPath, files, categories, visitedDirs, 
       if (skipFolders.includes(lowerName)) continue; // node_modules 等海量垃圾目录黑名单
       if (!relPath) categories.add(f.name); // 一级文件夹名 = 物理分组
       const subRel = relPath ? path.join(relPath, f.name) : f.name;
-      await walkLibraryDir(absPath, subRel, files, categories, visitedDirs, statQueue);
+      await walkLibraryDir(absPath, subRel, files, categories, visitedDirs, statQueue, onTick);
     } else if (f.isFile()) {
       const ext = path.extname(f.name).toLowerCase();
       // 📇 DF-22：改走**共享格式表**（与上面扫描路径同源，不得各写一份）
@@ -5010,13 +5050,18 @@ async function walkLibraryDir(dirPath, relPath, files, categories, visitedDirs, 
       files.push(file);
       statQueue.push({ absPath, file });
       if (statQueue.length >= STAT_BATCH) await flushStatQueue(statQueue);
+      // 📊 AR-49：进度心跳（**节流**：每 STAT_BATCH 个文件报一次，避免 IPC 风暴）。
+      //    `files` 是递归共享的，`files.length` 即全局已发现数。
+      if (onTick && files.length % STAT_BATCH === 0) onTick();
       // 🫀 让出事件循环：保证扫描期间主进程仍能处理窗口绘制/IPC，杜绝「未响应」
       if (files.length % YIELD_EVERY === 0) await yieldToEventLoop();
     }
   }
+  // 📊 目录遍历收尾时补一次（否则最后一批不足 STAT_BATCH 的文件不报进度）
+  if (onTick) onTick();
 }
 
-async function scanAndSaveFolder(folderPath) {
+async function scanAndSaveFolder(folderPath, onProgress) {
   try {
     // 【新增】记录当前库根目录，供白名单校验使用
     addAllowedRoot(folderPath);
@@ -5034,8 +5079,32 @@ async function scanAndSaveFolder(folderPath) {
     const files = [];
     const categories = new Set();
     const statQueue = []; // 🚀 v2.2：文件元数据批量并发 stat 队列
-    await walkLibraryDir(folderPath, '', files, categories, new Set(), statQueue);
+    // 📊 AR-49（2026-09-24）：**先清点总数再带进度扫描** ——
+    //    旧实现无进度通道，渲染层只能用「不定态滚动光条」（用户：「没有依次推进的效果」）。
+    //    清点只 readdir 不 stat，实测 11,667 文件仅 **171ms**（完整扫描 1,772ms 的 9.7%）。
+    //    ⚠️ 仅当调用方传了 onProgress 才清点（启动加载不付这个开销）。
+    let scanTotal = 0;
+    const emit = onProgress
+      ? (phase, doneOverride) => {
+          try {
+            onProgress({
+              phase,
+              done: typeof doneOverride === 'number' ? doneOverride : files.length,
+              total: scanTotal
+            });
+          } catch (e) { /* 渲染层已销毁等 → 忽略，绝不影响扫描 */ }
+        }
+      : null;
+    if (emit) {
+      emit('counting', 0);
+      scanTotal = await countScannableFiles(folderPath);
+      // 清点后立刻报一次：让进度条**从 0/total 开始**（而不是先显示「0 / ?」再跳）
+      emit('scanning', 0);
+    }
+    await walkLibraryDir(folderPath, '', files, categories, new Set(), statQueue,
+      emit ? () => emit('scanning') : null);
     while (statQueue.length > 0) await flushStatQueue(statQueue); // flush 剩余 stat
+    if (emit) emit('scanning', files.length);   // 收尾：done 对齐到实际发现数
 
     // 🦾 v1.9.x 文件级稳定排序：扫描结果按「文件名 → 相对子路径」自然排序（中文拼音+数字），
     //    默认加载顺序 = 文件系统顺序（与资源管理器一致），彻底杜绝 readdir 顺序不稳定

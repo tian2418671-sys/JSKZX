@@ -156,7 +156,7 @@ export function useDiskScan({
     //    「加载未完成就点刷新」或快速连点刷新时，两个循环会交错操作同一个 library
     //    数组（后进入者清空、先进入者的分块 push 又落回），同一 path 进两次 → 重复卡。
     //    withLoadLock 由 useCardCrud 注入，两边共用同一把锁。
-    const refreshLibraryInner = async () => {
+    const refreshLibraryInner = async (opts) => {
         if (!window.electronAPI) {
             return nativeAlert("该功能需要 Electron 桌面环境，请使用 npm start 启动应用。", 'warning');
         }
@@ -167,7 +167,23 @@ export function useDiskScan({
             return nativeAlert("当前版本不支持一键刷新目录，请更新到最新版。", 'warning');
         }
         const prevCardPath = cardData.value ? (library.value.find(i => i.data === cardData.value)?.path || null) : null;
-        const result = await window.electronAPI.rescanLibrary(currentFolderPath.value);
+        // 📊 AR-49（2026-09-24）：`opts.onScanProgress` 存在时 → 要求主进程推真实进度。
+        //    为什么要它：查重前重扫在 11k 大库上要 **27 秒**，旧实现无进度通道
+        //    ⇒ 渲染层只能显示「不定态滚动光条」（用户：「没有依次推进的效果」）。
+        //    ⚠️ 订阅必须在 invoke **之前**建立（进度是扫描过程中推的）。
+        let unbind = null;
+        const onScanProgress = opts && typeof opts.onScanProgress === 'function' ? opts.onScanProgress : null;
+        if (onScanProgress && typeof window.electronAPI.onLibraryScanProgress === 'function') {
+            window.electronAPI.onLibraryScanProgress((p) => { if (p) onScanProgress(p); });
+            unbind = () => { try { window.electronAPI.onLibraryScanProgress(() => {}); } catch (e) { /* 忽略 */ } };
+        }
+        let result;
+        try {
+            result = await window.electronAPI.rescanLibrary(currentFolderPath.value,
+                onScanProgress ? { withProgress: true } : undefined);
+        } finally {
+            if (unbind) unbind();   // 🧹 解绑：防上一轮的监听器在下一次重扫时重复触发
+        }
         // 🛡️ 先判错：主进程 `scanAndSaveFolder` 的 catch 分支返回的是
         //    `{ folderPath:null, files:[], error }` —— 空数组是「真值」，
         //    旧写法 `if (result && result.files)` 会把它当成「库已清空」，
@@ -252,10 +268,14 @@ export function useDiskScan({
      */
     let refreshPending = false;
     let refreshRunning = false;
-    const refreshLibraryOnce = () => (typeof withLoadLock === 'function'
-        ? withLoadLock(refreshLibraryInner)
-        : refreshLibraryInner());
-    const refreshLibrary = async () => {
+    const refreshLibraryOnce = (opts) => (typeof withLoadLock === 'function'
+        ? withLoadLock(() => refreshLibraryInner(opts))
+        : refreshLibraryInner(opts));
+    /**
+     * @param {{onScanProgress?: (p:{phase:string,done:number,total:number})=>void}} [opts]
+     *        可选进度回调（AR-49）。**不传则行为与旧版完全一致**（不付清点开销、不订阅通道）。
+     */
+    const refreshLibrary = async (opts) => {
         if (refreshRunning) {
             // 已有刷新在跑：只记一次「待补跑」，多余点击直接丢弃
             refreshPending = true;
@@ -263,11 +283,11 @@ export function useDiskScan({
         }
         refreshRunning = true;
         try {
-            await refreshLibraryOnce();
+            await refreshLibraryOnce(opts);
             // 跑期间被点过 → 补跑一次（把期间的外部改动一并纳入）
             if (refreshPending) {
                 refreshPending = false;
-                await refreshLibraryOnce();
+                await refreshLibraryOnce(opts);
             }
         } finally {
             refreshRunning = false;

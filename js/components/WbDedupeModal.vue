@@ -79,15 +79,16 @@
                 </div>
 
                 <div v-if="groups.length === 0" class="text-center py-10 text-zinc-500">
-                    <!-- ⚠️ 扫描中不能显示「已清理完毕」—— 弹窗现在**先开再扫**，
-                         否则扫描期间会误报「已完成」（对照 AR-38：零反馈/错反馈都算坏） -->
+                    <!-- ⚠️ 扫描中不能显示「已完成」—— 弹窗现在**先开再扫**，
+                         否则扫描期间会误报「已完成」（对照 AR-38：零反馈/错反馈都算坏）
+                         🔧 2026-09-25：查重旧实现已整体下线 —— 空状态只能如实说「已下线」 -->
                     <template v-if="scanning">
                         <span class="text-5xl opacity-30 mb-4 block">🔎</span>
                         <p>正在扫描世界书库，请稍候…</p>
                     </template>
                     <template v-else>
-                        <span class="text-5xl opacity-30 mb-4 block">📖</span>
-                        <p>所有冗余世界书已清理完毕！</p>
+                        <span class="text-5xl opacity-30 mb-4 block">🔧</span>
+                        <p>查重功能已下线（旧实现已移除，等待重构方案）</p>
                     </template>
                 </div>
             </div>

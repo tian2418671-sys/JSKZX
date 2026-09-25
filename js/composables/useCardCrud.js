@@ -10,6 +10,9 @@ import { triggerRef } from 'vue';
 import { normalizeCardData, isCharacterCardData, getCardRejectReason } from '../utils/cardLoader.js';
 import { parsePNGChunk, deepScanForJSON } from '../utils/pngParser.js';
 import { clearMemoryByCard } from './chat/useChatMemory.js';
+// 🛡️ PK-32（2026-09-25）：保存前把瘦身卡拉回完整态 —— 否则会把卡内世界书正文写空（数据丢失）。
+//    走 `cardSlim` 的**模块级注册表**（App.vue 启动时注册），不需要逐处注入。
+import { ensureFullBody, isSlim } from '../utils/cardSlim.js';
 
 // 🚀 v2.3 Web Worker：批量角色卡解析（CPU 多线程）。把「JSON.parse + 血统鉴定 +
 //    规范化」从主线程搬到 Worker，与主线程的「自动分类/打标/组装」流水线并行。
@@ -248,6 +251,17 @@ export function useCardCrud({
         // 🔧 v1.8.5 配套：保存成功后回写 _mtime（防下次"刷新库"把本卡误判为已变化）
         if (window.electronAPI && typeof window.electronAPI.saveCard === 'function' && cardItem.path && cardItem.data) {
             try {
+                // 🛡️🛡️ PK-32（2026-09-25）：**本卡可能是大库的「瘦身态」**（内嵌世界书词条正文被
+                //    P1a 清空省内存）—— 直接把这份 payload 写回去 = **抹掉整本书的正文**（实测：
+                //    54 条词条、非空 0 条）。故保存前先走**统一入口**把正文读回；读不回来就**中止保存**
+                //    （宁可不存，也不写坏 —— 与主进程 `checkBodyDegrade` 闸门双保险）。
+                //    ⚠️ 只在「本来是瘦身态」时才付读盘成本（`ensureFullBody` 内部自带 `isSlim` 短路）。
+                const restore = await ensureFullBody(cardItem, { silent: true });
+                if (restore.unavailable && isSlim(cardItem)) {
+                    showToast('⚠️ 正文加载器未就绪，为防写空已跳过物理保存（标签已记入配置层）', 'error', 5000);
+                    try { syncConfigToDisk(); } catch (e) { /* 忽略 */ }
+                    return;
+                }
                 const saveRes = await window.electronAPI.saveCard(cardItem.path, JSON.parse(JSON.stringify(cardItem.data)));
                 // ✅ DF-25：统一处理（含 WebP→PNG 升级后的 path 同步）
                 const r = applySaveResult(saveRes, cardItem, showToast);

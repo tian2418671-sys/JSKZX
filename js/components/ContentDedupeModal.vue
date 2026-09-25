@@ -61,6 +61,16 @@
                                         ｜ 🔑 触发词重合: {{ v._keysSimPct }}%
                                     </span>
                                 </div>
+                                <!-- 🛑 AR-50（2026-09-24）：**分口径展示**，不再取 max。
+                                     旧实现取「全字段/ 5字段」的**较大者**，实测把「全字段 2.1% + 5字段 100%」
+                                     显示成 100%，用户误以为「内容完全一样」（而两卡大小差 2.6 倍）。
+                                     ⚠️ 现在主值（内容重合）= **全字段**；当「5 字段」与它**明显不同**时才另列
+                                     —— 口径分歧本身就是「可疑」的信号，一致时不必扰民。 -->
+                                <div v-if="vIdx !== 0 && v._legacyPct !== null && v._fullPct !== null && Math.abs(v._legacyPct - v._fullPct) >= 5"
+                                     class="text-[10px] font-mono text-amber-300/80 mb-1 leading-snug"
+                                     title="「5 字段」= 描述/人格/场景/开场白/示例对话；「内容重合」= 含卡内世界书等全部字段。两者差距大时说明“只有部分字段像”，需先对比再处理">
+                                    ⚠️ 但仅 5 基础字段重合 {{ v._legacyPct }}%（其余字段不像）
+                                </div>
                                 <!-- 📊 综合分（2026-09-24，世界书查重方案「第 2 步」补完）：
                                      旧版 `_score` 算出来却**从未被消费**（不排序、不显示）。
                                      现在：列表按它降序（最像的排最前），并把构成写清便于核对。
@@ -76,8 +86,9 @@
                                 <div class="text-[10px] text-zinc-500 font-mono mb-1">
                                     {{ vIdx === 0 ? '（基准版）' : `🧾 指纹距离 ${v._hamming}${v._lenPenalty !== undefined && v._lenPenalty < 0.99 ? ` ｜ 长度惩罚 ×${v._lenPenalty.toFixed(2)}` : ''}` }}
                                 </div>
-                                <div v-if="v._simAdvice && vIdx !== 0" class="text-[10px] text-zinc-400 mb-1 leading-snug">
-                                    💡 {{ v._simAdvice }}
+                                <div v-if="v._pctAdvice && vIdx !== 0" class="text-[10px] text-zinc-400 mb-1 leading-snug"
+                                     title="按上方百分比分档给出（每 10% 一档，与上方数字同源）">
+                                    💡 {{ v._pctAdvice }}
                                 </div>
                                 <div class="text-[10px] text-zinc-500 font-mono mb-1">
                                     {{ v._sizeKb }} KB
@@ -90,7 +101,11 @@
                                     📁 {{ (v.item.path || '').split(/[\\/]/).pop() || '（未知文件）' }}
                                 </div>
                                 <div class="text-[10px] px-2 py-1 rounded font-bold mb-3 bg-purple-500/10 text-purple-300 border border-purple-500/30">
-                                    {{ vIdx === 0 ? '👑 内容最完整（推荐保留）' : (v._simPct >= 98 ? '🧬 内容几乎完全一致' : '⚠️ 高度相似，细节有差异') }}
+                                    <!-- 🏷️ PK-31（2026-09-25）：徽标改由 `badgeForContentPct(v._simPct)` 产出
+                                         （与「🧬 内容重合」百分比、与 💡 那行**同一张分档表**）。
+                                         旧实现是内联硬编码（只看 ≥98）⇒ 实测 **9% 也说「⚠️ 高度相似，细节有差异」**，
+                                         与同卡片的「⚠️ 仅名称相同」当场打架。 -->
+                                    {{ vIdx === 0 ? '👑 内容最完整（推荐保留）' : (v._pctBadge || '—') }}
                                 </div>
                             </div>
 
@@ -106,10 +121,12 @@
                                      · 仅名称相同：本来就无关，误删等于丢真书
                                      与 AR-48（同名查重聚错组）的防护同口径。 -->
                                 <button @click="$emit('resolve-group', gIdx, v.item.path)"
-                                        :class="vIdx === 0 ? 'bg-purple-600 hover:bg-purple-500'
+                                        :class="vIdx === 0
+                                            ? (groupHasRisky(group) ? 'bg-rose-900/70 hover:bg-rose-800 border border-rose-500/50' : 'bg-purple-600 hover:bg-purple-500')
                                             : (isRisky(v) ? 'bg-rose-900/70 hover:bg-rose-800 border border-rose-500/50' : 'bg-zinc-700 hover:bg-zinc-600')"
                                         class="w-full py-1.5 text-white text-xs font-bold rounded shadow transition">
-                                    <span v-if="vIdx === 0">✅ 保留此版，清理其余</span>
+                                    <span v-if="vIdx === 0 && groupHasRisky(group)">🚨 清理其余（含高风险项，请先核对）</span>
+                                    <span v-else-if="vIdx === 0">✅ 保留此版，清理其余</span>
                                     <span v-else-if="isRisky(v)">🚨 请先人工核对（勿直接清理）</span>
                                     <span v-else>⚠️ 保留此版本</span>
                                 </button>
@@ -120,7 +137,7 @@
 
                 <div v-if="groups.length === 0" class="text-center py-12 text-zinc-500 text-sm">
                     <template v-if="scanning">🔎 正在扫描并比对内容，请稍候…</template>
-                    <template v-else>🎉 未发现内容高度相似的重复项</template>
+                    <template v-else>🔧 查重功能已下线（旧实现已移除，等待重构方案）</template>
                 </div>
             </div>
         </div>
@@ -150,6 +167,16 @@ export default {
          */
         isRisky(v) {
             return v && (v._simType === 'conflict' || v._simType === 'different');
+        },
+        /**
+         * 🛡️ AR-52（2026-09-25）：**组级**风险 —— 只要组里有高风险成员，
+         * 基准版那个「保留此版，清理其余」也必须降级警示。
+         * 🐞 旧实现只对 `vIdx !== 0` 的按钮做 `isRisky` ⇒ 实测：对家是「⚠️ 仅名称相同」/ 9% 时，
+         *    右侧写着「请先人工核对」，**左侧一键删除入口照常可用**（那组要删的卡含 7536 字独占词条）。
+         */
+        groupHasRisky(group) {
+            return !!(group && Array.isArray(group.list)
+                && group.list.some((x, i) => i > 0 && this.isRisky(x)));
         }
     },
     props: {

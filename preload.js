@@ -10,7 +10,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
     // 加载上次的配置（返回扫描结果）
     loadConfig: () => ipcRenderer.invoke('config:load'),
     // 重新扫描当前角色卡库目录（刷新按钮用，无需重新弹目录选择框）
-    rescanLibrary: (folderPath) => ipcRenderer.invoke('library:rescan', folderPath),
+    rescanLibrary: (folderPath, opts) => ipcRenderer.invoke('library:rescan', folderPath, opts),
+    // 📊 AR-49：角色卡库重扫的**真实进度**心跳（查重前重扫用；需给 rescanLibrary 传 {withProgress:true}）
+    //    ⚠️ 与世界书 `onWbScanProgress`（'wb:scan-progress'）是**两条独立通道**：
+    //       角色卡扫描是单次 IPC 调用，必须在调用内推进度，不能复用世界书的心跳。
+    onLibraryScanProgress: (callback) => {
+        ipcRenderer.removeAllListeners('library:scan-progress'); // 防止重复绑定
+        ipcRenderer.on('library:scan-progress', (event, data) => callback(data));
+    },
     // 📁 物理文件夹分组：在库目录下新建分组文件夹
     createGroupFolder: (data) => ipcRenderer.invoke('fs:createGroupFolder', data),
     // 📁 物理文件夹分组：重命名分组文件夹（同步迁移子文件夹内卡片路径）

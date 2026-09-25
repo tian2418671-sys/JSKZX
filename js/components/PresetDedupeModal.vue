@@ -70,8 +70,9 @@
                                      :class="pIdx === 0 ? 'bg-sky-500/10 text-sky-400 border border-sky-500/30' : 'bg-zinc-700/40 text-zinc-300 border border-zinc-600/50'">
                                     {{ p._diffInfo }}
                                 </div>
-                                <div v-if="p._simAdvice && pIdx !== 0" class="text-[10px] text-zinc-400 mb-2 leading-snug">
-                                    💡 {{ p._simAdvice }}
+                                <div v-if="p._pctAdvice && pIdx !== 0" class="text-[10px] text-zinc-400 mb-2 leading-snug"
+                                     title="按上方百分比分档给出（每 10% 一档，与上方数字同源）">
+                                    💡 {{ p._pctAdvice }}
                                 </div>
                             </div>
 
@@ -96,8 +97,8 @@
                 </div>
 
                 <div v-if="groups.length === 0" class="text-center py-10 text-zinc-500">
-                    <span class="text-5xl opacity-30 mb-4 block">⚙️</span>
-                    <p>所有冗余预设已清理完毕！</p>
+                    <span class="text-5xl opacity-30 mb-4 block">🔧</span>
+                    <p>查重功能已下线（旧实现已移除，等待重构方案）</p>
                 </div>
             </div>
         </div>

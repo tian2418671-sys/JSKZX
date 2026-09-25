@@ -5,7 +5,7 @@
  *    main.js 因 require('electron') 无法被 node --test 直接加载，故此处内联等价实现
  *    （与 test/snapshotFilter.test.mjs 同款做法 —— 修改 main.js 时须同步此处）。
  *
- * 背景（见 docs/规格与计划/查重扫描与检索-最终方案.md §2.5）：
+ * 背景（见 docs/规格与计划/查重引擎/查重扫描与检索-最终方案.md §2.5）：
  *   旧写法 `if (st.size > 5 * 1024 * 1024) return;` 是**静默丢弃**：
  *   无日志、无 UI、不进统计 → 用户只看到「这本大书不见了」。
  *   且 512KB 头部预检未命中会写 `cache = { valid: false }` → **误杀被永久固化**，修了逻辑也不自愈。

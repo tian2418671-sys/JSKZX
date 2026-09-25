@@ -3,7 +3,7 @@
  *
  * 用法：node scripts/probes/_probe-latin-prefix.mjs [卡数]
  *
- * 背景（见 docs/规格与计划/查重扫描与检索-最终方案.md §2.6）：
+ * 背景（见 docs/规格与计划/查重引擎/查重扫描与检索-最终方案.md §2.6）：
  *   `searchIndex._getMatches(keyword)` 先 `index.get(keyword)` 精确命中，
  *   **miss 时退化为遍历整个倒排表**（`word.includes(keyword)`）。
  *   - 中文按单字建 token → 中文查询必精确命中，**不走全表扫**（实测 0~0.2ms）

@@ -1,7 +1,7 @@
 # RL · BUG 记录 — 发布 / 打包 / 更新 / OTA
 
 > 领域：从「代码就绪」到「用户收到 OTA」这条链上踩过的坑。
-> 完整流程见 [`../发布/一条龙-发布流程.md`](../发布/一条龙-发布流程.md)；总索引见 [`README.md`](README.md)。
+> 完整流程见 [`../发布/规范与流程/一条龙-发布流程.md`](../发布/规范与流程/一条龙-发布流程.md)；总索引见 [`README.md`](README.md)。
 > 一句话记忆：**发布链上的错误几乎都是"静默失败"** —— 不报错、但用户收不到更新。
 
 ---
@@ -121,4 +121,4 @@
 | 冒烟 | 隔离 profile 启动，`crash.log` 无新增 |
 | OTA | `releases/latest/download/latest.yml` → 200 且版本正确 |
 
-> 参考实现：本次发版用的 `%TEMP%\jsk-verify.ps1` / `jsk-asar-check2.mjs` / `jsk-smoke2.ps1`（一次性脚本，逻辑已沉淀到本节与 `docs/发布/一条龙-发布流程.md`）。
+> 参考实现：本次发版用的 `%TEMP%\jsk-verify.ps1` / `jsk-asar-check2.mjs` / `jsk-smoke2.ps1`（一次性脚本，逻辑已沉淀到本节与 `docs/发布/规范与流程/一条龙-发布流程.md`）。

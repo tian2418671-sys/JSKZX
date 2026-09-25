@@ -120,14 +120,15 @@
                 </div>
 
                 <div v-if="groups.length === 0" class="h-full flex flex-col items-center justify-center text-zinc-500">
-                    <!-- ⚠️ 扫描中不能显示「已清理完毕」：弹窗先开再扫，否则扫描期间误报完成 -->
+                    <!-- ⚠️ 扫描中不能显示「已完成」：弹窗先开再扫，否则扫描期间误报完成
+                         🔧 2026-09-25：查重旧实现已整体下线 —— 空状态只能如实说「已下线」 -->
                     <template v-if="scanning">
                         <span class="text-5xl opacity-30 mb-4">🔎</span>
                         <p>正在扫描角色卡库，请稍候…</p>
                     </template>
                     <template v-else>
-                        <span class="text-5xl opacity-30 mb-4">✨</span>
-                        <p>所有冗余卡片已清理完毕！库内非常干净。</p>
+                        <span class="text-5xl opacity-30 mb-4">🔧</span>
+                        <p>查重功能已下线（旧实现已移除，等待重构方案）</p>
                     </template>
                 </div>
             </div>

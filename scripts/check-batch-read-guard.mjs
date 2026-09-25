@@ -23,8 +23,6 @@ const ROOT = process.cwd();
 const ALLOWED = new Map([
     ['js/composables/useWorldbooks.js',
         '定义处：唯一入口 consumeWorldbookBodies 内部 + selectWorldbook（单本点击）+ ensureActiveData（编辑器单本）'],
-    ['js/composables/useDedupe.js',
-        '差异比对（只读 2 本，有 diffLoadAttempted 防重入）+ 内容查重（走 consumeWorldbookBodies）'],
     ['js/composables/useWorldbookEntries.js',
         '编辑器写入口 ensureActiveData（单本，用户主动操作）'],
     ['js/components/App.vue',

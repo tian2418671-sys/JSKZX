@@ -21,6 +21,51 @@
 
 import { extractBookEntries } from './cardLoader.js'; // 🛡️ 脏形态（对象字典 / V1 数组）安全提取
 
+// ══════════════════════════════════════════════════════════════
+// 🔌 注册式正文加载器（2026-09-25，PK-31 收口）
+// ──────────────────────────────────────────────────────────────
+// 🐞 为什么要注册式：过去加载器是**逐处注入**的（App.vue → useDedupe / 全局资产库…），
+//    结果「全库词条搜索」这种后来加的面板就漏了注入 ⇒ 卡片词条正文**搜不到**，
+//    差异比对也因「查重收尾把正文交还了」而读到空串，输出「（无正文）」的空结论。
+// ✅ 现在：App.vue 启动时**注册一次**，任何模块可直接 `ensureFullBody(items)`，无需注入。
+//    与 `js/utils/dedupeBusy.js` 同款：**模块级普通变量，刻意不用 ref**
+//    （避免跨 setup 段落引用 ref 触发 TDZ，见 AR-06 / AR-17）。
+// ⚠️ 缺加载器时**告警不静默** —— 「静默读到空串」正是本类缺陷的病根。
+let _bodyLoader = null;
+
+/** 注册唯一条正文加载器（App.vue 启动时调用；传 null 可清除） */
+export function setCardBodyLoader(fn) {
+    _bodyLoader = (typeof fn === 'function') ? fn : null;
+}
+
+/** 是否已有加载器（守卫 / 降级提示用） */
+export function hasCardBodyLoader() {
+    return typeof _bodyLoader === 'function';
+}
+
+/**
+ * 🔑 **统一入口**：确保给定库条目为「完整态」（瘦身卡按需读回）。
+ * @param {object|Array} items 库条目（或条目数组）
+ * @param {{concurrency?:number, onProgress?:Function, silent?:boolean}} [opts]
+ * @returns {Promise<{restored:number,total:number,unavailable:boolean}>}
+ *          `unavailable=true` 表示**没有加载器**（调用方应降级提示，不得假装读到了正文）
+ */
+export async function ensureFullBody(items, opts = {}) {
+    const { concurrency = 8, onProgress = null, silent = false } = opts;
+    const list = (Array.isArray(items) ? items : [items]).filter(it => it && typeof it === 'object');
+    const todo = list.filter(it => isSlim(it));
+    if (!todo.length) return { restored: 0, total: 0, unavailable: false };
+    if (!hasCardBodyLoader()) {
+        if (!silent) {
+            console.warn(`[cardSlim] 未注册正文加载器，${todo.length} 张瘦身卡无法还原 —— `
+                + '调用方必须降级提示（不得把空正文当“真的空”）');
+        }
+        return { restored: 0, total: todo.length, unavailable: true };
+    }
+    const restored = await ensureCardsFull(todo, _bodyLoader, concurrency, onProgress);
+    return { restored, total: todo.length, unavailable: false };
+}
+
 /** 列表里展示用的描述截断长度 */
 export const SLIM_DESC_LIMIT = 120;
 
@@ -199,4 +244,4 @@ export function slimStats(library) {
     return { total: list.length, slim, full: list.length - slim };
 }
 
-export default { slimCard, ensureCardFull, ensureCardsFull, isSlim, slimStats, SLIM_DESC_LIMIT, SLIM_MIN_LIBRARY };
+export default { slimCard, ensureCardFull, ensureCardsFull, isSlim, slimStats, setCardBodyLoader, hasCardBodyLoader, ensureFullBody, SLIM_DESC_LIMIT, SLIM_MIN_LIBRARY };

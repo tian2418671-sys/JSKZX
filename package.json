@@ -15,7 +15,9 @@
     "build": "npm run build:web && electron-builder -w",
     "test": "node --test \"test/**/*.test.mjs\"",
     "guard:batch-read": "node scripts/check-batch-read-guard.mjs",
-    "check": "npm run guard:batch-read && npm test"
+    "guard:scope": "node scripts/check-undefined-scope.mjs",
+    "guard:dedupe": "node scripts/check-dedupe-api.mjs && node scripts/check-dedupe-literals.mjs",
+    "check": "npm run guard:batch-read && npm run guard:scope && npm run guard:dedupe && npm test"
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^6.0.8",
@@ -48,6 +50,7 @@
       "web/**/*",
       "main.js",
       "main/**/*",
+      "js/utils/simhash64.mjs",
       "preload.js",
       "package.json"
     ],

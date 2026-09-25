@@ -1,7 +1,7 @@
 # 项目协作指令 · JSK管理（SillyTavern 角色卡管理器）
 
 > 本文件由 AI 助手**自动加载**。开工前请**先读 [`START-HERE.md`](../START-HERE.md) → [`AI交接指导.md`](../AI交接指导.md)**。
-> 当前版本 **v2.2.13**（Electron 43 + Vue 3 + Vite 8；`npm test` = 751 用例）。
+> 当前版本 **v2.2.13**（Electron 43 + Vue 3 + Vite 8；`npm test` = 733 用例）。
 
 ## 铁律（违反会出事）
 
@@ -10,7 +10,7 @@
 3. 改动后必须过三关：`get_errors` → `npm run build:web` → **真实启动冒烟**（`npx electron . --disable-gpu --enable-logging`）。
    `vite build` **只验编译、不验运行时**（TDZ、渲染崩溃都是编译期看不出来的）。
 4. **文档分工**：`RELEASE_NOTES.md` 是对外文档（只写用户能感知的变化，禁写文件名 / 函数名 / 脚本名 / 内存 MB / 阶段耗时 / 崩溃原文）；
-   `CHANGELOG.md` 与 `docs/**` 是内部文档。细则见 `docs/发布/内部信息.md`、`docs/发布/用户可看信息.md`。
+   `CHANGELOG.md` 与 `docs/**` 是内部文档。细则见 `docs/发布/规范与流程/内部信息.md`、`docs/发布/规范与流程/用户可看信息.md`。
 5. **发现新缺陷**：先在 `docs/bugs/README.md` 加一行，再在对应领域文档加「现象 / 根因 / 修复 / 验证」条目，**然后**才写修复代码。
 6. 涉及**物理路径变化**的操作（移动分组 / 重命名 / 换卡图）必须同步迁移所有按 path 派生的键（会话 / 变量树 / 覆盖层配置）。
 7. 🚫 **测试一律上真实库，禁止「隔离 / 模拟」糊弄** —— **读操作**（扫描 / 搜索 / 索引 / 渲染 / 统计）必须跑真实库；
@@ -28,9 +28,9 @@
 | 找什么 | 去哪 |
 |---|---|
 | 接手须知、架构、标准工作流、高频缺陷地图 | [`AI交接指导.md`](../AI交接指导.md) |
-| 历史缺陷与坑（**146 条**，按领域） | [`docs/bugs/README.md`](docs/bugs/README.md) |
+| 历史缺陷与坑（**153 条**，按领域） | [`docs/bugs/README.md`](docs/bugs/README.md) |
 | 代码片段 / 实测技术数据 / 外部 API 参考 / 脚本清单 | [`docs/技术支持/README.md`](docs/技术支持/README.md) |
-| 发版流程（产物校验、OTA 验证、回滚、检查单） | [`docs/发布/一条龙-发布流程.md`](docs/发布/一条龙-发布流程.md) |
+| 发版流程（产物校验、OTA 验证、回滚、检查单） | [`docs/发布/规范与流程/一条龙-发布流程.md`](docs/发布/规范与流程/一条龙-发布流程.md) |
 | 实现规格与后续计划 | [`docs/规格与计划/`](docs/规格与计划/README.md) |
 | 版本级技术细节 | `CHANGELOG.md` |
 | 文档总地图 | [`docs/README.md`](docs/README.md) |
@@ -39,7 +39,8 @@
 ## 常用命令
 
 ```bash
-npm test                      # 751 用例
+npm test                      # 733 用例
+npm run guard:scope           # 静态未定义标识符门禁（acorn 作用域检查）
 npm run build:web             # 构建渲染层
 npm start                     # 源码版运行（= build:web + electron .）—— 运行时验证用它
 npx electron . --disable-gpu --enable-logging    # 生产代码直接启动，看 [Vue 错误]

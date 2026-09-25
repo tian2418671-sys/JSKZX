@@ -700,7 +700,8 @@ import tokenCache from '../utils/tokenCache.js'; // 🚀 Token 估算缓存
 import { createMemoryGuard } from '../utils/memoryGuard.js'; // 🧠 内存守门员（OOM → 主动降级）
 import { migrateMemoryToV2, isMemoryV2 } from '../composables/chat/useChatMemory.js'; // 🧠 记忆 v4.1 一次性迁移
 import { migrateChatKeys } from '../composables/chat/chatStorage.js'; // 🧭 测卡会话/变量树的键随物理路径迁移
-import { slimCard, ensureCardFull, ensureCardsFull, isSlim, slimStats, SLIM_MIN_LIBRARY } from '../utils/cardSlim.js'; // 🪶 P1a 大库正文懒加载
+import { slimCard, ensureCardFull, ensureCardsFull, isSlim, slimStats, setCardBodyLoader, SLIM_MIN_LIBRARY } from '../utils/cardSlim.js'; // 🪶 P1a 大库正文懒加载
+import { isDedupeBusy } from '../utils/dedupeBusy.js'; // 🚦 AR-50：查重忙标志（v4-P0 恢复；查重期间延后瘦身）
 
 /** 用户可读的错误提示映射 */
 const ERROR_MESSAGES = {
@@ -4323,12 +4324,23 @@ export default {
             }
         };
 
+        // 🔌 PK-31 收口（2026-09-25）：把加载器**注册到 `cardSlim` 的模块级注册表** ——
+        //    此后任何模块（差异比对 / 全库词条搜索 / 以后新增的面板）直接 `ensureFullBody(items)`
+        //    即可读回正文，**不必再逐处注入**；过去正是因为没有这个入口，
+        //    「全库词条搜索」漏了注入、差异比对又撞上「查重收尾把正文交还」⇒ 读到空串却当真。
+        //    ⚠️ 必须写在 `loadFullCardFromDisk` **定义之后**（写在前面会踩 const 的 TDZ）。
+        setCardBodyLoader(loadFullCardFromDisk);
+
         /**
          * 索引建完之后压缩整个库（仅大库；跳过当前打开的卡）
          * @param {string} reason 日志用触发点
          * @returns {number} 本次压缩的卡数
          */
+        let slimPendingAfterDedupe = false; // 🚦 v4-P0 恢复（AR-50）：查重期间被延后的瘦身请求
         const slimLibraryIfNeeded = (reason = 'post-index') => {
+            // 🚦 v4-P0 恢复（AR-50 补充）：查重期间**延后瘦身** —— 防「比对中途口径不一致」
+            //    （实测旧病：比对期间库被瘦身 0 → 9557 张，同轮前后半段结果无法解释）
+            if (isDedupeBusy()) { slimPendingAfterDedupe = true; return 0; }
             const lib = library.value;
             if (!Array.isArray(lib) || lib.length < SLIM_MIN_LIBRARY) return 0;
             const openCard = cardData.value;
@@ -5327,8 +5339,8 @@ export default {
         };
 
         // 🌍 世界书库与分组：组合式函数注入（共享状态 worldbooks/wbCategoryMap 等保留在 App.vue）
-        //    ⚠️ 顺序约束：必须在 useDedupe **之前** —— 查重前重扫要用它的 `rescanWorldbooks` /
-        //       `wbScanProgress`，若颠倒会触发 TDZ（`Cannot access 'X' before initialization`，
+        //    ⚠️ 顺序约束：历史上 `useDedupe` 依赖这里的 `rescanWorldbooks` / `wbScanProgress`
+        //       （颠倒会踩 TDZ：AR-06 / AR-17）。查重旧实现已下线，但顺序**照旧不变**。
         //       编译期不报、只在运行时崩，历史上 AR-06 / AR-17 两次同款）。
         const {
             importUrl, isImportingWb, wbContextMenu,
@@ -5337,49 +5349,53 @@ export default {
             openWbContextMenu, closeWbContextMenu, openWbInFolder,
             wbCategories, changeWbCategory, filteredWorldbooks,
             wbScanProgress, isWbScanning, wbScanPercent, rescanWorldbooks,
-            reportSkipped, wbEntryCount, ensureWorldbookLoaded, selectWorldbook, releaseWorldbookBody,
-            consumeWorldbookBodies,
-            // 🧠 PK-27 / S1'：L1 摘要消费（查重只读索引，永不重读正文）
-            hasKeyIndex, compareKeyHashes, isExactSame,
+            reportSkipped, wbEntryCount, ensureWorldbookLoaded, selectWorldbook,
             // ⚡ 秒开：书名取法（`wb.data` 不再常驻）+ 元数据后台补齐状态
             wbDisplayName, wbMetaFilling, wbMetaProgress,
+            // 🧠 PK-27 / S2'：L1 摘要消费 + 批量读正文入口（v4-P0 接线恢复）
+            releaseWorldbookBody, consumeWorldbookBodies,
+            hasKeyIndex, compareKeyHashes, isExactSame,
             // 🏷️ A2（2026-09-24）：世界书标签 + 分组生命周期
             //    ⚠️ 必须在这里解构（AR-13 同型坑：ctx 里引用了但没解构 → 模板拿到 undefined）
             getWbTags, setWbTags, toggleWbTagOn, addWbTagsBatch, wbAllTags,
             renameWbGroup, deleteWbGroup,
         } = useWorldbooks({ worldbooks, activeWorldbook, lastWorldbookDirPath, wbSearchQuery, wbFilterType, currentWbCategory, wbCategoryMap, wbTagMap, currentWbTags, saveWbCategoriesMap, syncWorldbooksToDisk, appMode, appPrompt, nativeAlert, confirmDialog, addLog, contextMenu, closeContextMenu });
 
-        // 📊🔍 查重与差异比对：组合式函数注入（estimateCardTokens 为共享工具，保留在 App.vue）
+        // 📊🔍 查重与差异比对：组合式函数注入
+        //    ✅ v4-P0（2026-09-25，评审已批准的《查重引擎重构方案 v4》）：
+        //       本层恢复**全量注入契约**（32 项，实测计数；规格文案曾写 33 项为计数笔误）——
+        //       数据源 / 清理安全 / 世界书 L1 / 瘦身卡按需读回 全部按规格 §11.1 接线。
+        //    ⚠️ 顺序约束：必须在 `useWorldbooks` 解构之后（AR-06 / AR-17 两次 TDZ 事故）。
         const {
             showDedupeModal, duplicateGroups, startDedupeScan, resolveDedupeGroup,
             showWbDedupeModal, wbDuplicateGroups, startWorldbookDedupeScan, resolveWbDedupeGroup,
             showPresetDedupeModal, presetDuplicateGroups, startPresetDedupeScan, resolvePresetDedupeGroup,
             showContentDedupeModal, contentDuplicateGroups, startContentDedupeScan, resolveContentDedupeGroup,
             startSmartDedupe,
-            // 📊🔍 查重扫描进度（供查重弹窗消费）
-            // 🛑 AR-45 二次修复：`dedupeScanDone` / `dedupeScanTotal` 一起解构 ——
-            //    弹窗**数字**改读它们（与 `dedupeScanPercent` 同源），见下方 `dedupeScanProgressForModal`
+            // 📊🔍 查重扫描进度（单写入口在 useDedupe 内；弹窗消费见下方 dedupeScanProgressForModal）
             dedupeScanning, dedupeScanLabel, dedupeScanPercent, dedupeScanIndeterminate,
             dedupeScanDone, dedupeScanTotal,
             showDiffDetailModal, diffMasterItem, diffCompareItem, diffFieldResults, openDiffDetailModal
         } = useDedupe({
-            library, worldbooks, activeWorldbook, cardData, presets, activePreset, appMode, estimateCardTokens,
+            library, worldbooks, activeWorldbook, cardData, presets, activePreset, appMode,
+            estimateCardTokens,
             nativeAlert, confirmDialog, addLog, reset, cleanupEmptyCategories, deleteCardOverlays, showToast,
-            // 📊🔍 查重/版本对比的扫描进度（2026-09-22 设计修正）：查重前先重扫磁盘，进度显示在查重弹窗内
+            loadFullCardFromDisk,
             rescanWorldbooks, wbScanProgress, isWbScanning, wbScanPercent,
             refreshLibrary, currentFolderPath, lastWorldbookDirPath, lastPresetDirPath,
-            // 🦥 PK-20 后续：查重/比对必须读正文，而懒加载的书 data 为 null → 需按需载入
-            //    ⚠️ 它来自上面 `useWorldbooks` 的解构，故 `useDedupe` 必须在其**之后**调用（防 TDZ）
-            ensureWorldbookLoaded,
-            // ⚡ PK-26：秒开后 `wb.data` 为 null → 查重/比对必须走**轻量字段**
-            //    （否则词条数算成 0、触发词重合度恒 0%、世界书被判成角色卡）
             wbEntryCount, wbDisplayName,
-            // ⚡ PK-26 后续：同名查重逐本读正文后必须**用后释放**（防 1000+ 本 OOM）
-            releaseWorldbookBody,
-            // 🧯 PK-27：**唯一**的「批量读正文」入口（受控并发 + 用后释放 + 进度）
-            consumeWorldbookBodies,
-            // 🧠 PK-27 / S2'：L1 摘要消费（查重只读索引）
+            releaseWorldbookBody, consumeWorldbookBodies,
             hasKeyIndex, compareKeyHashes, isExactSame
+        });
+
+        // 🚦 AR-50 补充（v4-P0 恢复）：查重收尾后**补跑**被延后的瘦身
+        //    ⚠️ 必须注册在 `useDedupe` 解构**之后**：`dedupeScanning` 是该解构出来的 ref，
+        //      在 setup 前段引用会踩 **TDZ**（AR-06 / AR-17 同款坑，编译期不报、运行时崩）。
+        watch(dedupeScanning, (busy) => {
+            if (busy || !slimPendingAfterDedupe) return;
+            slimPendingAfterDedupe = false;
+            // 让出一帧：查重还有「展示分组 / 收起进度条」的收尾动作，别挤在同一帧
+            setTimeout(() => slimLibraryIfNeeded('after-dedupe'), 0);
         });
 
         // 📊🔍 查重弹窗的进度对象
@@ -5653,6 +5669,56 @@ export default {
                     idx: searchIndex,
                     tokenCache,
                     mem: memGuard,   // 🧠 内存守门员（容量压测读 stats / 手动 checkNow 用）
+                    // 🔍 查重引擎（v4-P1 冒烟用，dev-only）——四入口 + 可序列化状态/分组摘要
+                    dedupe: {
+                        run: (kind) => {
+                            const fns = {
+                                card: startDedupeScan, wb: startWorldbookDedupeScan,
+                                preset: startPresetDedupeScan, content: startContentDedupeScan,
+                                smart: startSmartDedupe,
+                            };
+                            return Promise.resolve((fns[kind] || startDedupeScan)());
+                        },
+                        resolve: (idx, keepPath) => resolveDedupeGroup(idx, keepPath),
+                        resolveWb: (idx, keepPath) => resolveWbDedupeGroup(idx, keepPath),
+                        resolvePreset: (idx, keepPath) => resolvePresetDedupeGroup(idx, keepPath),
+                        resolveContent: (idx, keepPath) => resolveContentDedupeGroup(idx, keepPath),
+                        // ⚖️ 差异窗口（v4 §10.3）：返回 fieldResults 行数（-1 = 无组，-2 = 成员不足）
+                        openDiff: (groupIndex = 0, memberIndex = 0) => {
+                            const src = duplicateGroups.value[groupIndex]
+                                || wbDuplicateGroups.value[groupIndex]
+                                || presetDuplicateGroups.value[groupIndex]
+                                || contentDuplicateGroups.value[groupIndex];
+                            if (!src) return -1;
+                            const members = src.cards || src.list || [];
+                            const compare = members[memberIndex] || members[1];
+                            if (!members[0] || !compare) return -2;
+                            openDiffDetailModal(members[0].item, compare.item);
+                            return diffFieldResults.value.length;
+                        },
+                        state: () => ({
+                            scanning: dedupeScanning.value,
+                            card: duplicateGroups.value.length,
+                            wb: wbDuplicateGroups.value.length,
+                            preset: presetDuplicateGroups.value.length,
+                            content: contentDuplicateGroups.value.length,
+                        }),
+                        groups: (kind) => {
+                            const map = {
+                                card: duplicateGroups.value, wb: wbDuplicateGroups.value,
+                                preset: presetDuplicateGroups.value, content: contentDuplicateGroups.value,
+                            };
+                            const arr = map[kind] || [];
+                            return arr.map((g) => {
+                                const members = g.cards || g.list || [];
+                                const m0 = members[0] || {};
+                                return {
+                                    name: g.name, n: members.length, type: g.type, simPct: g.simPct,
+                                    firstBadge: m0._diffType || m0._diffInfo || m0._pctBadge || '',
+                                };
+                            });
+                        },
+                    },
                     slim: () => slimStats(library.value),   // 🪶 P1a 压缩状态（压测前后对比）
                     setSearch: (q) => { searchQueryInput.value = q; },
                     clearSearch: () => { searchQueryInput.value = ''; },

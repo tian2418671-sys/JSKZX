@@ -6,6 +6,10 @@
  */
 import { ref, computed } from 'vue';
 import { extractBookEntries } from '../utils/cardLoader.js';
+// 🛡️ PK-31（2026-09-25）：大库的卡片是**瘦身态**（内嵌世界书词条正文被清空省内存）——
+//    不读回就建索引 ⇒ **卡片词条正文永远搜不到**（世界书侧过去调了 `ensureWorldbookLoaded`，
+//    卡片侧没调 —— 同一函数内不对称）。本处走 `cardSlim` 的**模块级注册表**（无需注入）。
+import { ensureFullBody } from '../utils/cardSlim.js';
 
 // 把触发词字段归一化为字符串数组（兼容数组 / 逗号分隔字符串 / 空）
 function toArray(v) {
@@ -61,6 +65,21 @@ export function useGlobalEntrySearch({ worldbooks, library, appMode, activeWorld
             }
             // 角色卡内嵌世界书（🛡️ extractBookEntries 兼容 entries 数组/字典/数组 book 全形态，
             //    旧版漏索引字典形态 entries 的卡片，其内嵌词条在全库搜索中永远搜不到）
+            //
+            // 🛡️ PK-31（2026-09-25）：**先读回正文再索引**。
+            //    🐞 旧实现直接读 live `character_book` —— 大库（≥3000 张自动瘦身）里
+            //       `entries[].content` 已被清空，于是「按正文搜卡片词条」**恒定搜不到**
+            //       （只能命中触发词/备注）；而同一函数内世界书侧却调了 `ensureWorldbookLoaded`。
+            //    ✅ 现在走统一入口（缺加载器会告警）；读回的正文在面板关闭时由 App.vue 回收。
+            try {
+                const r = await ensureFullBody(library.value, { silent: true });
+                if (r.total > 0) {
+                    console.log(`[entry-search] 已读回 ${r.restored}/${r.total} 张瘦身卡的正文用于词条索引`
+                        + (r.unavailable ? '（⚠️ 加载器未注册，卡片词条正文未参与索引）' : ''));
+                }
+            } catch (e) {
+                console.warn('[entry-search] 读回卡片正文失败，卡片词条正文可能未参与索引:', e && e.message);
+            }
             (library.value || []).forEach(item => {
                 const d = (item.data && item.data.data) || item.data || {};
                 const book = d.character_book || (item.data && item.data.character_book) || {};

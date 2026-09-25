@@ -3,7 +3,7 @@
 > 领域：角色卡「聊天测试」侧栏与引擎（7 分区、预设装配、世界书注入、EJS/MVU 变量、长期记忆）。
 > 桌面版实现在 `js/components/ChatTestSidebar.vue` + `js/composables/chat/*`（17 个模块）；
 > 移动版为 `JSK管理APP`（Android/Capacitor）；本文件里 CT-04 ~ CT-08 即来自 **v1.10.21 移动版专项实测**（变量树 / 预设条目 / 本地导入）。
-> 规格文档：[`../规格与计划/桌面版测卡工作区-实现规格.md`](../规格与计划/桌面版测卡工作区-实现规格.md)、[`../规格与计划/移动版测卡引擎-移植前置检查报告.md`](../规格与计划/移动版测卡引擎-移植前置检查报告.md)
+> 规格文档：[`../规格与计划/测卡工作区/桌面版测卡工作区-实现规格.md`](../规格与计划/测卡工作区/桌面版测卡工作区-实现规格.md)、[`../规格与计划/测卡工作区/移动版测卡引擎-移植前置检查报告.md`](../规格与计划/测卡工作区/移动版测卡引擎-移植前置检查报告.md)
 > 总索引见 [`README.md`](README.md)。
 
 ---
@@ -16,21 +16,21 @@
 - **根因**：模板对**来源不可信**的列表直接取 `.length`。props 虽有 default，但 `v-for` 源为 `undefined` 不报错、而**插值 / `v-if` 里的 `.length` 会抛错**，渲染期一抛即中断组件。
 - **修复**：新增 `arr(v)` / `objKeys(v)` 兜底，模板 20 处列表访问全部改用它；`varRows` 加对象类型兜底。
 - **防回归**：侧栏 e2e 增加断言「**每区点击后抽屉必须存活 + 特征词必须命中**」。
-- **来源**：`docs/规格与计划/桌面版测卡工作区-实现规格.md` §五 缺陷①
+- **来源**：`docs/规格与计划/测卡工作区/桌面版测卡工作区-实现规格.md` §五 缺陷①
 
 ### CT-02 ｜ 🔴 读存储的 `computed` **永久缓存**（选了预设引擎永远读不到）
 - **现象**：侧栏选预设后 localStorage 已写入 259KB，但引擎 `activePreset` 恒为 `null`，预设装配分支永不进入 —— **静默失效，无任何报错**。
 - **根因**：`computed(() => loadActivePreset())` 的 getter 读的是**同步非响应式**存储，Vue 认为它没有依赖 → **首次求值后永久缓存**。
 - **修复**：`chatStorage` 每次写入/hydrate 都 bump 响应式 `chatStorageVersion`；读存储的 computed 先 `void chatStorageVersion.value` 建立依赖（引擎与侧栏各一处）。`plugins` 同病同治。
 - **防回归**：`test/chatStorage.test.mjs` 新增 4 例，含**反例断言**（无依赖的 computed 确实读不到变更），把机理钉死在测试里。
-- **来源**：`docs/规格与计划/桌面版测卡工作区-实现规格.md` §五 缺陷②
+- **来源**：`docs/规格与计划/测卡工作区/桌面版测卡工作区-实现规格.md` §五 缺陷②
 
 ### CT-03 ｜ 🟡 测试自身的模块实例陷阱（记录以免后人再踩）
 - **现象**：CDP 里 `import('/js/composables/chat/useChatPresets.js')` 会**另建一份模块实例**，其 `chatStorage` 与应用模块图里的是两个独立 Map →「测试里存上了、引擎读不到」。
 - **诊断特征**：同一实例内 `loadActivePreset()` 有值、引擎 `activePreset.value` 为 `null`。
 - **正确做法**：端到端测试一律**驱动真实 UI**（如从侧栏下拉选预设），不要自己 import 引擎模块。
 - **同类**：探针读搜索索引**必须**走 `window.__jskDiag.idx`（应用真正使用的单例）；`import('/js/utils/searchIndex.js')` 会因 Vite 的 `?t=` 查询参数拿到**另一个模块实例**，读数全错。
-- **来源**：`docs/规格与计划/桌面版测卡工作区-实现规格.md` §五 缺陷③；`v2.2.7 大库压测` §七
+- **来源**：`docs/规格与计划/测卡工作区/桌面版测卡工作区-实现规格.md` §五 缺陷③；`v2.2.7 大库压测` §七
 
 ### CT-09 ｜ 🔴 项目此前**完全不维护 `prompt_order`** → 预设开关不生效
 - **现象**：预设条目勾选框点了不生效；带 `enabled: false` 的条目仍被发给 AI；嵌套形态的预设**条目全部丢失**。
@@ -107,13 +107,13 @@
 | 1 | **2 处 import 路径失效**（共 4 个路径） | `useChatApiConfig.js:7` / `useChatMemory.js:7` 写 `from '../bridge/api.js'` → 解析到不存在的位置；`ChatPanelSeg.vue:26` 写 `from '../useChatRender'` → 少一级 `chat/` 且缺 `.js` | 改 `./chatBridge.js` / `./useChatRender.js`。这是**当时唯一让引擎无法加载的原因** |
 | 2 | **`useChatPresets.js` 落后于移动版** | 移动版 10291B 有 `normalizePromptOrder` / `setPromptEnabled` / 双位置 `enabled` 判定 / `seen` 去重；桌面暂存区 8123B 全无 | 直接用移动版整文件覆盖（纯函数、零依赖） |
 | 3 | **`useStatusbarPreview.js` 两端分叉** | 移动版导出 `parseRegexPattern` / `classifyTemplate` / `sanitizeStatusHtml` / `extractLoaderUrls`，桌面版是模块私有（`sanitizeStatusHtml` 整个函数不存在） | 加 `export` 关键字（不改逻辑）+ 搬入 `sanitizeStatusHtml` |
-- **来源**：`docs/规格与计划/移动版测卡引擎-移植前置检查报告.md` §三
+- **来源**：`docs/规格与计划/测卡工作区/移动版测卡引擎-移植前置检查报告.md` §三
 
 ### CT-12 ｜ 📌 自动化坑：重复点击已激活的 Tab 不会 remount
 - **现象**：侧栏只在聊天 Tab 挂载时创建；若侧栏已被收起，直接再点「💬 聊天测试」**无效**（`currentTab` 值未变），测试脚本会误判为"点不开"。
 - **规避**：测试须「**先切走再切回**」。
 - **相关**：`vite build` 不清理旧产物（`build:web` 才清 `web/`）。
-- **来源**：`docs/规格与计划/桌面版测卡工作区-实现规格.md` §五「踩坑记录」
+- **来源**：`docs/规格与计划/测卡工作区/桌面版测卡工作区-实现规格.md` §五「踩坑记录」
 
 ---
 

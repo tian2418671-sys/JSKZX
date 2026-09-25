@@ -382,7 +382,7 @@ export function registerAppCommands(registry, ctx) {
         },
         // ⛔ 已下线（2026-09-20，用户决定）：全局资产库功能关闭 —— 入口隐藏、代码保留备查。
         //    恢复：取消本段注释 + `HeaderBar.vue` 工具栏按钮 + `App.vue` 的弹窗渲染（三处都留了标记）。
-        //    日后若转「扩展」重启，见 docs/规格与计划/后续升级计划.md 第四节（P3）+ 方案 §四 P3。
+        //    日后若转「扩展」重启，见 docs/规格与计划/计划与记录/后续升级计划.md 第四节（P3）+ 方案 §四 P3。
         // {
         //     id: 'toolbar.globalAssets', title: '📚 全局资产库', category: '工具',
         //     menu: 'toolbar', section: 1, order: 40,

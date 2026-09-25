@@ -196,3 +196,58 @@ test('slimStats：统计压缩状态（压测前后对比用）', () => {
     assert.equal(s.slim, 2);
     assert.equal(s.full, 1);
 });
+
+// ══════════════════════════════════════════════════════════════
+// 🔌 PK-31（2026-09-25）：**注册式统一入口** —— 让任何模块都能保证「读到的是正文」
+//     🐞 病根：加载器过去是逐处注入的 ⇒ 后来新增的消费者（全库词条搜索）漏了注入、
+//        差异比对又撞上「查重收尾把正文交还」⇒ **读到空串却当真**，输出「（无正文）」空结论。
+// ══════════════════════════════════════════════════════════════
+import { setCardBodyLoader, hasCardBodyLoader, ensureFullBody } from '../js/utils/cardSlim.js';
+
+/** 造一张「瘦身态」卡（词条正文已清空、_slim=true） */
+function makeSlimItem(name) {
+    return {
+        path: '/x/' + name + '.png',
+        _slim: true,
+        data: { data: { name, character_book: { entries: [{ comment: 'a', content: '' }] } } }
+    };
+}
+/** 假加载器：把正文补回去（模拟 App.vue 的 loadFullCardFromDisk） */
+const fakeLoader = async (path, item) => ({
+    data: { name: item.data.data.name, character_book: { entries: [{ comment: 'a', content: '正文' + path }] } }
+});
+
+test('★ 契约：未注册加载器时 → 报 unavailable（**绝不静默返回空**）', async () => {
+    setCardBodyLoader(null);
+    assert.equal(hasCardBodyLoader(), false);
+    const it = makeSlimItem('a');
+    const r = await ensureFullBody(it, { silent: true });
+    assert.equal(r.unavailable, true, '缺加载器必须让调用方知道（否则又会把空正文当真）');
+    assert.equal(isSlim(it), true, '未还原成功时保持瘦身态（不假装完整）');
+});
+
+test('注册后：瘦身卡被读回，且是非瘦身态返回零成本', async () => {
+    setCardBodyLoader(fakeLoader);
+    assert.equal(hasCardBodyLoader(), true);
+    const it = makeSlimItem('b');
+    const r = await ensureFullBody(it, { silent: true });
+    assert.equal(r.unavailable, false);
+    assert.equal(r.restored, 1);
+    assert.equal(isSlim(it), false, '读回成功后应摘掉 _slim');
+    assert.equal(it.data.data.character_book.entries[0].content, '正文/x/b.png', '正文必须真的回来了');
+
+    const fresh = { path: '/x/full.png', data: { data: { name: 'f' } } };   // 本来就完整
+    const r2 = await ensureFullBody(fresh, { silent: true });
+    assert.equal(r2.total, 0, '非瘦身卡不计入待办（零成本）');
+    setCardBodyLoader(null);
+});
+
+test('批量：多张瘦身卡一次读回；数组/单张两种入参都支持', async () => {
+    setCardBodyLoader(fakeLoader);
+    const list = [makeSlimItem('c1'), makeSlimItem('c2'), { path: '/x/ok.png', data: {} }];
+    const r = await ensureFullBody(list, { silent: true });
+    assert.equal(r.total, 2, '只把瘦身的那两张算进总数');
+    assert.equal(r.restored, 2);
+    assert.ok(list.slice(0, 2).every(x => !isSlim(x)));
+    setCardBodyLoader(null);
+});
