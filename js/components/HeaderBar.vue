@@ -346,6 +346,10 @@
             <button @click="runCommand('toolbar.graph')" class="flex items-center gap-1.5 px-2 py-1 hover:bg-zinc-800 hover:text-zinc-100 rounded text-zinc-400 transition whitespace-nowrap shrink-0" :title="appMode === 'worldbooks' ? '生成当前世界书的词条关联图谱' : '生成全库角色关系图谱'">
                 {{ appMode === 'worldbooks' ? '🌍' : '🌌' }} 关系图谱
             </button>
+            <!-- 🏷️ S3（2026-09-25）：统一打标入口（按当前视图自动分发——与「关系图谱」「智能查重」同款） -->
+            <button @click="runCommand('edit.aiTag')" class="flex items-center gap-1.5 px-2 py-1 hover:bg-zinc-800 hover:text-zinc-100 rounded text-zinc-400 transition whitespace-nowrap shrink-0" :title="appMode === 'worldbooks' ? '对当前世界书（或当前筛选结果）AI 智能打标' : '对选中卡片 AI 智能打标'">
+                🤖 AI 打标
+            </button>
             <!-- ⛔ 已下线（2026-09-20，用户决定）：全局资产库入口隐藏（浏览器/菜单/快捷键均无其它入口）
             <button @click="runCommand('toolbar.globalAssets')" class="flex items-center gap-1.5 px-2 py-1 hover:bg-zinc-800 hover:text-zinc-100 rounded text-zinc-400 transition whitespace-nowrap shrink-0" title="查看全库收集的世界书与正则脚本">
                 📚 全局资产库

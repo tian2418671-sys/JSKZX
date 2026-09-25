@@ -9,7 +9,9 @@
  *   + 「管理规则表」重复两处 + 进度条在最底部（打标时必须滚到底才能看进度）。
  *
  * 重构后（对齐项目既有范式 TagCategoryModal 的左导航）：
- *   max-w-5xl + 左导航（7 分区）+ 右内容区（v-show 切换）+ 进度条顶部常驻。
+ * ⚠️ 2026-09-25（第二批改造）已同步：破限并入「系统提示词」页顶部，旧「强制破限」独立项撤销；
+ *    「系统提示词库」更名为「系统提示词」→ 左导航共 **6 项**；新链路专项验证见 `_probe-aitag-chain-v2.mjs`。
+ *   max-w-5xl + 左导航（6 分区）+ 右内容区（v-show 切换）+ 进度条顶部常驻。
  *
  * 本探针断言：
  *   ① 弹窗打开后左导航存在（7 个分区条目）
@@ -84,24 +86,24 @@ const info = (n, d = '') => console.log(`ℹ️  ${n}${d ? '  → ' + d : ''}`);
     check('通过 App 真实入口打开 AI 打标弹窗', opened.ok, opened.err || `库内 ${opened.cards} 张`);
     if (!opened.ok) { console.log('\n无法继续'); process.exit(1); }
 
-    // ② 左导航存在且 7 个分区
+    // ② 左导航存在且 6 个分区（第二批改造：6 项）
     const nav = await evaluate(`(() => {
         const t = document.body.innerText || '';
         // 左导航容器：含「本次打标 / 引擎设置 / 提示词」三个分组标题
         const groups = ['本次打标', '引擎设置', '提示词'].filter(g => t.includes(g));
-        const items = ['执行管线', '候选标签池', 'AI 提取设置', '本地向量', 'API 引擎', '系统提示词库', '强制破限'].filter(x => t.includes(x));
+        const items = ['执行管线', '候选标签池', 'AI 提取设置', '本地向量', 'API 引擎', '系统提示词'].filter(x => t.includes(x));
         return { hasModal: t.includes('AI 智能批量打标'), groups, items, itemCount: items.length };
     })()`);
     check('弹窗已渲染', nav.hasModal);
     check('左导航三个分组标题齐全', nav.groups.length === 3, nav.groups.join(' / '));
-    check('左导航 7 个分区条目齐全', nav.itemCount === 7, `${nav.itemCount} 个：${nav.items.join('、')}`);
+    check('左导航 6 个分区条目齐全', nav.itemCount === 6, `${nav.itemCount} 个：${nav.items.join('、')}`);
 
     // ③ 逐个点击分区 → 右内容区切换（每次只显示一个分区）
     //    ⚠️ 判定必须用 **offsetParent**（真实可见性），不能用 innerText ——
     //       innerText 会排除 display:none 的内容，而分区切换后其他分区正是隐藏的，
     //       用它会导致「切到 A 分区后检查 B 分区控件 → 全部报缺失」的**假失败**。
-    const sections = ['pipeline', 'candidates', 'extract', 'vector', 'api', 'prompts', 'jailbreak'];
-    const LABELS = { pipeline: '执行管线', candidates: '候选标签池', extract: 'AI 提取设置', vector: '本地向量', api: 'API 引擎', prompts: '系统提示词库', jailbreak: '强制破限' };
+    const sections = ['pipeline', 'candidates', 'extract', 'vector', 'api', 'prompts'];
+    const LABELS = { pipeline: '执行管线', candidates: '候选标签池', extract: 'AI 提取设置', vector: '本地向量', api: 'API 引擎', prompts: '系统提示词' };
     // 每个分区的「特征控件」选择器（用于确认右内容区确实换成了该分区）
     const FEATURES = {
         pipeline: 'button',
@@ -109,8 +111,7 @@ const info = (n, d = '') => console.log(`ℹ️  ${n}${d ? '  → ' + d : ''}`);
         extract: 'textarea[placeholder*="性格特征"]',
         vector: 'input[type=checkbox]',
         api: 'input[placeholder*="127.0.0.1"]',
-        prompts: 'button',
-        jailbreak: 'textarea[placeholder*="破限"]'
+        prompts: 'button'
     };
 
     /** 该分区特征控件是否**真实可见**（offsetParent 非 null 且未被祖先 display:none 隐藏） */
@@ -133,7 +134,7 @@ const info = (n, d = '') => console.log(`ℹ️  ${n}${d ? '  → ' + d : ''}`);
         switchResults.push({ k, clicked, ...v });
     }
     const allSwitchable = switchResults.every(r => r.clicked && r.visible > 0);
-    check('7 个分区逐个切换后特征控件均可见', allSwitchable,
+    check('6 个分区逐个切换后特征控件均可见', allSwitchable,
         switchResults.filter(r => !r.clicked || r.visible === 0).map(r => `${r.k}(${r.visible}/${r.total})`).join(' | ') || '全部可见');
 
     // ④ 「管理规则表」只出现一处（去重）—— 只统计**可见**的按钮
@@ -155,24 +156,23 @@ const info = (n, d = '') => console.log(`ℹ️  ${n}${d ? '  → ' + d : ''}`);
     // ⑤ 业务控件齐全（布局重构不得弄丢功能）—— 逐个切到所属分区再检查
     const controls = await evaluate(`(() => {
         const vis = (sel) => [...document.querySelectorAll(sel)].some(el => el.offsetParent !== null);
-        const app = document.querySelector('#app').__vue_app__;
-        const ctx = app._instance.provides.appCtx;
+        // ⚠️ 不再直取 appCtx（prod 下 `_instance` 为 null；dev 请走 window.__jskDiag）—— 见 chain-v2 探针的实测记录
         return {
             candidateInput: !!document.querySelector('input[placeholder*="候选标签"]'),
             apiEndpoint: !!document.querySelector('input[placeholder*="127.0.0.1"]'),
             apiKey: !!document.querySelector('input[type=password]'),
-            jailbreakArea: !!document.querySelector('textarea[placeholder*="破限"]'),
-            // 三层开关 / 预设库 / 候选池 在 DOM 里存在即可（分区切换靠 v-show，DOM 始终在）
+            jailbreakArea: (document.body.textContent || '').includes('启用强制破限'),
+            // 三层开关 / 提示词链路 / 候选池 在 DOM 里存在即可（分区切换靠 v-show，DOM 始终在）
             threeLayers: ['① 规则匹配', '② 本地向量', '③ LLM 兜底'].every(x => (document.body.textContent || '').includes(x)),
-            promptsPresets: (document.body.textContent || '').includes('预设库'),
+            promptsChain: ['系统级微调全局提示词', '预设套用', '每请求打包卡数'].every(x => (document.body.textContent || '').includes(x)),
             checkboxCount: document.querySelectorAll('input[type=checkbox]').length
         };
     })()`);
     check('候选池手动输入框存在', controls.candidateInput);
     check('API Endpoint / Key 字段存在', controls.apiEndpoint && controls.apiKey);
-    check('破限区存在', controls.jailbreakArea);
+    check('破限栏存在（已并入系统提示词页）', controls.jailbreakArea);
     check('三层开关齐全（DOM 内）', controls.threeLayers);
-    check('系统提示词预设库存在（DOM 内）', controls.promptsPresets);
+    check('提示词链路控件存在（DOM 内）', controls.promptsChain);
     info('页面复选框总数', String(controls.checkboxCount));
 
     // ⑥ 无渲染期错误

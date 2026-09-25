@@ -34,7 +34,7 @@
 | 当前版本 | **v2.2.13**（已发布：GitHub Release + OTA 已验证） |
 | 当前分支 | 本地 `master`（与 origin 同步） |
 | 构建产物 | `sillytavern-card-manager-<版本>.exe` + `latest.yml` + `.exe.blockmap` + zip 绿色版 |
-| 测试 | `npm test` → 733 用例全绿（59 个测试文件） |
+| 测试 | `npm test` → 742 用例全绿（60 个测试文件） |
 | 大库基准 | 11,186 卡 / 9.76GB（日常库 75 张；2 万卡副本由脚本现造） |
 
 ---

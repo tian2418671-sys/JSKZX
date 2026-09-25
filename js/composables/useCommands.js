@@ -165,13 +165,14 @@ export function registerAppCommands(registry, ctx) {
             tooltip: '删除侧边栏当前选中的分组（不删卡片，组内卡片归入未分类；有二次确认）',
             run: () => ctx.deleteCustomCategory(v(ctx.currentCategoryKey))
         },
-        // 🆕 自动分组（S1~S4）：按「分组收纳条件」把未分类卡片移进同名文件夹（先预览、后执行、可回滚）
+        // 🆕 自动分组（S1~S4）：按「分组收纳条件」把未分类资产移进同名文件夹（先预览、后执行、可回滚）
         //    ⚠️ sectionTitle 挂在本条（它成为该组第一条）——「组内第一条」的声明才生效（commandRegistry 只认第一条）
+        //    🗂️ S4（2026-09-25）：入口**二合一按视图分发**——角色卡视图 = 卡片自动分组；世界书视图 = 世界书自动分组
         {
             id: 'tag.autoGroup', title: '🗂️ 自动分组（收纳规则）…', category: '分组',
             menu: 'groups', section: 2, order: 5, sectionTitle: '🗂️ 收纳与归类', extraClass: 'hover:bg-sky-600',
-            tooltip: '按分组声明的收纳条件把未分类卡片移进同名分组文件夹：只读预览 → 勾选执行 → 一键回滚（默认不碰已手动分组的卡）',
-            run: () => ctx.openAutoGroupModal()
+            tooltip: '按分组声明的收纳条件把未分类的卡片/世界书移进同名分组文件夹（按当前视图自动选择对象；只读预览 → 勾选执行 → 一键回滚）',
+            run: () => ctx.openAutoGroupEntry()
         },
         // 🆕 清理空分组（DF-16）：0 卡片的空组（自定义/预设）批量清（含空文件夹；预设可恢复）
         {

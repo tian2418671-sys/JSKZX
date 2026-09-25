@@ -9,10 +9,11 @@
 > 落地位置：`js/utils/llmPromptRoles.js`（纯函数层）、`js/composables/useAITools.js`（引擎接线）、
 > `js/components/AITagModal.vue`（分角色五小页签 UI + 状态徽标 + 连通性测试按钮）。
 > 单测：`test/llmPromptRoles.test.mjs`（**70 条**，全绿）。
-> **最后更新**：2026-09-24
+> **最后更新**：2026-09-25（勘误：§八 页签数 / 单测数与落地实况对齐）
 > **相关文档**：[`打标三层开关-P1实现规格.md`](打标三层开关-P1实现规格.md)（已落地）、
 > [`../bugs/BUG-AI打标与标签.md`](../../bugs/BUG-AI打标与标签.md)（AI-01~09 历史缺陷，本次新增 AI-09）、
-> [`AI打标窗口-UI重构-实现规格.md`](AI打标窗口-UI重构-实现规格.md)（已落地的布局重构）
+> [`AI打标窗口-UI重构-实现规格.md`](AI打标窗口-UI重构-实现规格.md)（已落地的布局重构）、
+> ✅ **后续改造（已落地，2026-09-25）**：[`AI打标-提示词改造与批量提量方案.md`](AI打标-提示词改造与批量提量方案.md)（**已迭代本文件的五小页签 UI 与 `cotMode`** —— 界面改为单套链路）
 
 ---
 
@@ -247,11 +248,11 @@ R1 只动 `useAITools.js`，**可与布局重构并行**。
 | 文件 | 锚点 | 落地状态 |
 | --- | --- | --- |
 | `js/composables/useAITools.js` | `buildTaggingSystemPrompt`、`promptText` 组装段、`extractReplyContent` 调用后的解析段、`systemPromptPresets` 相关 CRUD、`getCurrentSystemPromptContent` | ✅ 已改 |
-| `js/components/AITagModal.vue` | 系统提示词预设区（已改为四小页签）、执行管线区状态条 | ✅ 已改 |
+| `js/components/AITagModal.vue` | 系统提示词预设区（已改为**五小页签**：System / Assistant / User / 预填充 / 思维链）、执行管线区状态条 | ✅ 已改 |
 | `js/composables/useConfigPersistence.js` | `systemPromptPresets` 整体序列化 | ✅ **无需改动**（整数组 stringify） |
 | `main.js` | `chat:send` | ✅ **无需改动**（原样透传 messages） |
 | `js/utils/llmPromptRoles.js` | **新增**纯函数层 | ✅ 新建 |
-| `test/llmPromptRoles.test.mjs` | **新增** 47 条单测 | ✅ 新建 |
+| `test/llmPromptRoles.test.mjs` | **新增 70 条单测**（第一批 47 + 思维链/连通性批 23；已实跑核对 70/70 全绿） | ✅ 新建 |
 
 ---
 

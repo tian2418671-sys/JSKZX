@@ -14,6 +14,7 @@
 import { ref } from 'vue';
 import { normalizeTagFunnel, normalizeDisabledRules } from '../utils/tagFunnel.js'; // 🏷️ P1：三层开关 / 关闭清单归一化（落盘前收敛脏值）
 import { normalizeGroupProfiles, normalizeAutoGroupLastRun } from '../utils/autoGroup.js'; // 🗂️ 自动分组：分组档案 / 移动日志归一化（落盘前收敛脏值）
+import { normalizeWbGroupProfiles, normalizeAutoGroupLastRun as normalizeWbAutoGroupLastRun } from '../utils/wbAutoGroup.js'; // 🗂️ S4：世界书自动分组归一化
 
 export function useConfigPersistence({
     // —— 唯一权威源（App.vue 顶层持有） ——
@@ -26,12 +27,16 @@ export function useConfigPersistence({
     autoTagRules, customKeywords, autoTagDisabledRules, tagFunnel,
     // —— 收集源：自动分组（分组档案 + 最近一次移动日志；S1~S4） ——
     autoGroupProfiles, autoGroupLastRun,
+    // —— 收集源：世界书自动分组（S4；同口径） ——
+    wbAutoGroupProfiles, wbAutoGroupLastRun,
     // —— 收集源：API 配置 ——
     apiEndpoint, apiKey, apiModel, apiType,
     // —— 收集源：UI 状态 ——
     theme, appSettings, sanitizeImportedTags, autoTagOnImport, snapshotConfig, localCategoryMap,
     sidebarWidth, viewMode, isCompactMode, sortBy,
-    systemPromptPresets, lastWorldbookDirPath, lastPresetDirPath, wbCategoryMap, wbTagMap,
+    llmRolePrompts, tagPackSize, tagSkipTagged, tagResume, lastWorldbookDirPath, lastPresetDirPath, wbCategoryMap, wbTagMap,
+    // 🏷️ S2（2026-09-25）：候选池开关 / 自由提取 / 候选池本体（随 ui 段落盘；恢复在 App.vue loadAppConfig）
+    useCandidatePool, enableAIExtraction, aiCandidateTags,
     // —— 收集源：导入时间映射（卡片首次入库时刻持久化） ——
     cardImportTimes,
     // —— 收集源：预设缝合中心「常用条目库」（🧵 自定义条目复用） ——
@@ -92,7 +97,19 @@ export function useConfigPersistence({
                 viewMode: viewMode.value,
                 isCompactMode: isCompactMode.value,
                 sortBy: sortBy.value,
-                systemPromptPresets: JSON.parse(JSON.stringify(Array.isArray(systemPromptPresets.value) ? systemPromptPresets.value : [])),
+                // 🧠 第二批改造：单套提示词链路（system / user / prefill）+ 每请求打包卡数
+                llmRolePrompts: JSON.parse(JSON.stringify((llmRolePrompts && llmRolePrompts.value) || { system: '', user: '', prefill: '' })),
+                tagPackSize: Math.min(10, Math.max(1, Number((tagPackSize && tagPackSize.value) || 1) || 1)),
+                // 📌 断点续跑账本（null = 无未完成任务）
+                tagResume: (tagResume && tagResume.value) ? JSON.parse(JSON.stringify(tagResume.value)) : null,
+                // ⏭️ 增量模式：跳过已打标卡（Q7）
+                tagSkipTagged: !!(tagSkipTagged && tagSkipTagged.value),
+                // 🏷️ S2（2026-09-25）：候选池三状态 —— 池本体持久化以支撑「产出回池」跨重启保留
+                candidatePoolEnabled: (useCandidatePool && typeof useCandidatePool.value === 'boolean') ? useCandidatePool.value : true,
+                enableAIExtraction: (enableAIExtraction && typeof enableAIExtraction.value === 'boolean') ? enableAIExtraction.value : true,
+                aiCandidateTags: JSON.parse(JSON.stringify((aiCandidateTags && Array.isArray(aiCandidateTags.value)) ? aiCandidateTags.value : [])),
+                // 📦 旧「预设库」数据：只保留回滚用（界面已不再读写；新数据进 llmRolePrompts）
+                systemPromptPresets: JSON.parse(JSON.stringify((appConfig.value.ui && Array.isArray(appConfig.value.ui.systemPromptPresets)) ? appConfig.value.ui.systemPromptPresets : [])),
                 lastWorldbookDirPath: lastWorldbookDirPath.value || '',
                 lastPresetDirPath: lastPresetDirPath.value || '',
                 wbCategoryMap: JSON.parse(JSON.stringify(wbCategoryMap.value || {})),

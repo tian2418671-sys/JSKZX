@@ -407,7 +407,19 @@
                             class="flex-1 h-8 flex items-center justify-center gap-1 rounded-lg text-xs font-bold transition bg-zinc-800 hover:bg-blue-600 text-blue-400 hover:text-white border border-blue-500/30">
                         🔎 全库
                     </button>
-                    <button @click="showWbAdvanced = !showWbAdvanced"
+                    <!-- 🗂️ S4（2026-09-25）：世界书自动分组（收纳规则 + 预览 + 可回滚；物理移动文件） -->
+                    <button @click="openWbAutoGroupModal" title="世界书自动分组（先预览、可回滚；物理移动到子文件夹）"
+                            class="h-8 w-8 flex items-center justify-center rounded-lg transition shrink-0 bg-zinc-800 text-amber-400 hover:bg-amber-600 hover:text-white border border-amber-500/30">
+                        🗂️
+                    </button>
+                    <!-- 📊 统计（折叠浮层，2026-09-25）：不占常驻高度；与 ▾ 工具区互斥；点外部即关 -->
+                    <button @click="toggleWbStats"
+                            class="h-8 w-8 flex items-center justify-center rounded-lg transition shrink-0"
+                            :class="showWbStats ? 'bg-sky-600 text-white' : 'bg-zinc-800 text-zinc-400 hover:text-zinc-200 border border-zinc-700/50'"
+                            :title="showWbStats ? '收起世界书库统计' : '展开世界书库统计（本/词条/Token/常驻/触发/均条）'">
+                        📊
+                    </button>
+                    <button @click="toggleWbAdvanced"
                             class="h-8 w-8 flex items-center justify-center rounded-lg transition shrink-0"
                             :class="showWbAdvanced ? 'bg-emerald-600 text-white' : 'bg-zinc-800 text-zinc-400 hover:text-zinc-200 border border-zinc-700/50'"
                             :title="showWbAdvanced ? '收起导入/工具区' : '展开导入/工具区'">
@@ -507,35 +519,46 @@
                         <button @click="wbFilterType = 'empty'" :class="wbFilterType === 'empty' ? 'bg-amber-600 text-white' : 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700'" class="h-6 px-2 inline-flex items-center rounded-md border border-zinc-700 text-[10px]">空书</button>
                     </div>
                 </div>
+
+                <!-- 📊 世界书库统计（折叠浮层，2026-09-25）：行2 的 📊 按钮展开——
+                     不占常驻高度（列表高度恒定）；与高级工具区互斥；点外部即关。 -->
+                <div v-if="showWbStats"
+                     class="sb-popover absolute left-2 right-2 top-full mt-1.5 z-40 rounded-xl border border-zinc-700 bg-zinc-900 shadow-2xl p-2.5">
+                    <div class="flex items-center justify-between mb-2">
+                        <span class="text-[11px] font-bold text-zinc-300">📊 世界书库统计</span>
+                        <button @click="showWbStats = false" class="text-zinc-500 hover:text-white text-xs px-1 transition" title="收起（点击外部任意处也可关闭）">✕</button>
+                    </div>
+                    <div class="grid grid-cols-3 gap-1.5">
+                        <div class="bg-zinc-800/50 border border-zinc-700/40 rounded-md px-2 py-1 flex items-center justify-between gap-1" title="世界书总数">
+                            <span class="text-[10px] text-zinc-500">📚 本</span>
+                            <span class="text-[11px] font-bold text-amber-400 font-mono">{{ wbStats.bookCount }}</span>
+                        </div>
+                        <div class="bg-zinc-800/50 border border-zinc-700/40 rounded-md px-2 py-1 flex items-center justify-between gap-1" title="词条总数">
+                            <span class="text-[10px] text-zinc-500">📄 词条</span>
+                            <span class="text-[11px] font-bold text-amber-400 font-mono">{{ wbStats.entryCount }}</span>
+                        </div>
+                        <div class="bg-zinc-800/50 border border-zinc-700/40 rounded-md px-2 py-1 flex items-center justify-between gap-1" title="Token 总量">
+                            <span class="text-[10px] text-zinc-500">⚡ 总量</span>
+                            <span class="text-[11px] font-bold text-amber-400 font-mono">{{ fmtTokens(wbStats.tokenTotal) }}</span>
+                        </div>
+                        <div class="bg-zinc-800/50 border border-zinc-700/40 rounded-md px-2 py-1 flex items-center justify-between gap-1" title="常驻词条数">
+                            <span class="text-[10px] text-zinc-500">🟣 常驻</span>
+                            <span class="text-[11px] font-bold text-emerald-400 font-mono">{{ wbStats.constantCount }}</span>
+                        </div>
+                        <div class="bg-zinc-800/50 border border-zinc-700/40 rounded-md px-2 py-1 flex items-center justify-between gap-1" title="有触发词的词条占比">
+                            <span class="text-[10px] text-zinc-500">🔑 触发</span>
+                            <span class="text-[11px] font-bold text-sky-400 font-mono">{{ wbStats.keyCoverage }}%</span>
+                        </div>
+                        <div class="bg-zinc-800/50 border border-zinc-700/40 rounded-md px-2 py-1 flex items-center justify-between gap-1" title="平均每本词条数">
+                            <span class="text-[10px] text-zinc-500">📊 均条</span>
+                            <span class="text-[11px] font-bold text-zinc-300 font-mono">{{ wbStats.bookCount ? Math.round(wbStats.entryCount / wbStats.bookCount) : 0 }}</span>
+                        </div>
+                    </div>
+                </div>
             </div>
 
-            <!-- 📊 世界书库统计（3x2 网格小卡，Token 已格式化） -->
-            <div class="px-3 py-2 border-b border-zinc-800 bg-zinc-900/60 shrink-0 grid grid-cols-3 gap-1.5">
-                <div class="bg-zinc-800/50 border border-zinc-700/40 rounded-md px-2 py-1 flex items-center justify-between gap-1" title="世界书总数">
-                    <span class="text-[10px] text-zinc-500">📚 本</span>
-                    <span class="text-[11px] font-bold text-amber-400 font-mono">{{ wbStats.bookCount }}</span>
-                </div>
-                <div class="bg-zinc-800/50 border border-zinc-700/40 rounded-md px-2 py-1 flex items-center justify-between gap-1" title="词条总数">
-                    <span class="text-[10px] text-zinc-500">📄 词条</span>
-                    <span class="text-[11px] font-bold text-amber-400 font-mono">{{ wbStats.entryCount }}</span>
-                </div>
-                <div class="bg-zinc-800/50 border border-zinc-700/40 rounded-md px-2 py-1 flex items-center justify-between gap-1" title="Token 总量">
-                    <span class="text-[10px] text-zinc-500">⚡ 总量</span>
-                    <span class="text-[11px] font-bold text-amber-400 font-mono">{{ fmtTokens(wbStats.tokenTotal) }}</span>
-                </div>
-                <div class="bg-zinc-800/50 border border-zinc-700/40 rounded-md px-2 py-1 flex items-center justify-between gap-1" title="常驻词条数">
-                    <span class="text-[10px] text-zinc-500">🟣 常驻</span>
-                    <span class="text-[11px] font-bold text-emerald-400 font-mono">{{ wbStats.constantCount }}</span>
-                </div>
-                <div class="bg-zinc-800/50 border border-zinc-700/40 rounded-md px-2 py-1 flex items-center justify-between gap-1" title="有触发词的词条占比">
-                    <span class="text-[10px] text-zinc-500">🔑 触发</span>
-                    <span class="text-[11px] font-bold text-sky-400 font-mono">{{ wbStats.keyCoverage }}%</span>
-                </div>
-                <div class="bg-zinc-800/50 border border-zinc-700/40 rounded-md px-2 py-1 flex items-center justify-between gap-1" title="平均每本词条数">
-                    <span class="text-[10px] text-zinc-500">📊 均条</span>
-                    <span class="text-[11px] font-bold text-zinc-300 font-mono">{{ wbStats.bookCount ? Math.round(wbStats.entryCount / wbStats.bookCount) : 0 }}</span>
-                </div>
-            </div>
+            <!-- 📊 世界书库统计已改为**折叠浮层**（2026-09-25）——见搜索区内的 sb-popover（行2 的 📊 按钮展开）；
+                 原常驻 3x2 网格删除，列表恢复全高。 -->
 
             <!-- 世界书列表（筛选后） -->
             <div class="flex-1 overflow-y-auto custom-scrollbar p-2 space-y-1.5">
@@ -571,6 +594,11 @@
                                             class="px-1.5 py-0.5 text-[10px] bg-zinc-700/50 hover:bg-blue-600/80 text-zinc-300 hover:text-white rounded transition whitespace-nowrap">
                                         ✏️
                                     </button>
+                                    <!-- 🏷️ S1（2026-09-25）：标签编辑入口 -->
+                                    <button @click.stop="openWbTagEditor(wb)" title="编辑标签"
+                                            class="px-1.5 py-0.5 text-[10px] bg-zinc-700/50 hover:bg-amber-600/80 text-zinc-300 hover:text-white rounded transition whitespace-nowrap">
+                                        🏷️
+                                    </button>
                                     <button @click.stop="duplicateWorldbook(wb)" title="复制为副本"
                                             class="px-1.5 py-0.5 text-[10px] bg-zinc-700/50 hover:bg-emerald-600/80 text-zinc-300 hover:text-white rounded transition whitespace-nowrap">
                                         📋
@@ -584,6 +612,13 @@
                         </div>
                     </div>
                     <div class="text-[10px] opacity-60 truncate">📄 {{ wb.name }}</div>
+                    <!-- 🏷️ S1（2026-09-25）：标签 chips（与卡片列表「#标签」同款风格）—— 点击直接按该标签筛选 -->
+                    <div v-if="getWbTags(wb).length" class="flex items-center gap-1 flex-wrap leading-none">
+                        <span v-for="tag in getWbTags(wb)" :key="tag"
+                              @click.stop="toggleWbTagFilter(tag)"
+                              class="px-1.5 py-0.5 rounded text-[9px] truncate max-w-[100px] bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 cursor-pointer hover:bg-sky-600 hover:text-white hover:border-sky-500 transition"
+                              :title="`点击按「${tag}」筛选`">#{{ tag }}</span>
+                    </div>
                 </div>
 
                 <!-- 空状态提示 -->
@@ -787,6 +822,17 @@ export default {
 
         // ✅ [世界书模式] 顶部高级功能区折叠面板（URL导入/目录/分组/筛选收进面板，与角色卡模式一致）
         const showWbAdvanced = ref(false);
+        // 📊 [世界书模式] 统计折叠浮层（2026-09-25 用户要求：常驻 3x2 网格 → 折叠 + 浮空）
+        //    与高级工具区**同位置互斥**（同时只显示一个）；点外部即关（复用 onDocPointerDown）。
+        const showWbStats = ref(false);
+        const toggleWbStats = () => {
+            showWbStats.value = !showWbStats.value;
+            if (showWbStats.value) showWbAdvanced.value = false;
+        };
+        const toggleWbAdvanced = () => {
+            showWbAdvanced.value = !showWbAdvanced.value;
+            if (showWbAdvanced.value) showWbStats.value = false;
+        };
 
         // 📄 [每页显示数量] 角色卡库分页已有（useSearch）；世界书/预设/插件三库的页码状态在此。
         //    每页数量为全局共享（ctx.itemsPerPage，localStorage 持久化，侧栏各库选择器联动）
@@ -1008,11 +1054,12 @@ export default {
         //    为什么不用透明遮罩：遮罩是 fixed inset-0，会盖住左侧 Dock 与全局按钮 ⇒
         //    用户浮层开着时点 Dock 切库会“没反应”（要再点一次）。改用文档捕获监听，无阻挡。
         const onDocPointerDown = (e) => {
-            if (!showAdvancedFilters.value && !showWbAdvanced.value) return;
+            if (!showAdvancedFilters.value && !showWbAdvanced.value && !showWbStats.value) return;
             const t = e.target;
             if (t && t.closest && t.closest('.sb-popover, .sb-searchzone, .sb-dock')) return;
             showAdvancedFilters.value = false;
             showWbAdvanced.value = false;
+            showWbStats.value = false;
         };
         onMounted(() => document.addEventListener('pointerdown', onDocPointerDown, true));
         onUnmounted(() => document.removeEventListener('pointerdown', onDocPointerDown, true));
@@ -1022,6 +1069,7 @@ export default {
             showAdvancedFilters,
             hasActiveFilters,
             showWbAdvanced,
+            showWbStats, toggleWbStats, toggleWbAdvanced,
             handleSortChange,
             modeCountText,
             quickCategoryChips,
@@ -1179,6 +1227,7 @@ export default {
             //    进度条已移入查重弹窗（2026-09-22 设计修正），侧栏不再显示扫描进度。
             openWbMergeModal: ctx.openWbMergeModal,
             openGlobalEntrySearch: ctx.openGlobalEntrySearch,
+            openWbAutoGroupModal: ctx.openWbAutoGroupModal,
             importWbFromJsonl: ctx.importWbFromJsonl,
             exportWorldbooksBatch: ctx.exportWorldbooksBatch,
             wbStats: ctx.wbStats,
@@ -1200,6 +1249,7 @@ export default {
             wbDisplayName: ctx.wbDisplayName,
             selectWorldbook: ctx.selectWorldbook,
             openWbContextMenu: ctx.openWbContextMenu,
+            openWbTagEditor: ctx.openWbTagEditor,
             openWbInFolder: ctx.openWbInFolder,
             renameWorldbook: ctx.renameWorldbook,
             duplicateWorldbook: ctx.duplicateWorldbook,

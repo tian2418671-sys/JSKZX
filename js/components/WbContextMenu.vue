@@ -23,6 +23,14 @@
             <button @click="$emit('rename')" class="w-full text-left px-3 py-2 hover:bg-blue-600 hover:text-white flex items-center gap-2 transition-colors">
                 <span class="text-sm">✏️</span> 重命名世界书
             </button>
+            <!-- 🏷️ S1（2026-09-25）：标签编辑入口（标签存配置层，不写入世界书文件） -->
+            <button @click="$emit('edit-tags')" class="w-full text-left px-3 py-2 hover:bg-amber-600 hover:text-white flex items-center gap-2 transition-colors">
+                <span class="text-sm">🏷️</span> 编辑标签
+            </button>
+            <!-- 🤖 S3（2026-09-25）：对该书 AI 智能打标（统一入口按视图分发的右键快捷通道） -->
+            <button @click="$emit('ai-tag')" class="w-full text-left px-3 py-2 hover:bg-amber-600 hover:text-white flex items-center gap-2 transition-colors">
+                <span class="text-sm">🤖</span> AI 打标
+            </button>
             <button @click="$emit('duplicate')" class="w-full text-left px-3 py-2 hover:bg-emerald-600 hover:text-white flex items-center gap-2 transition-colors">
                 <span class="text-sm">📋</span> 复制为副本
             </button>
@@ -48,6 +56,6 @@ export default {
         y: { type: Number, default: 0 },
         wb: { type: Object, default: null }
     },
-    emits: ['open-folder', 'rename', 'duplicate', 'move-group', 'delete']
+    emits: ['open-folder', 'rename', 'edit-tags', 'ai-tag', 'duplicate', 'move-group', 'delete']
 };
 </script>

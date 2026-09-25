@@ -1,13 +1,14 @@
 /**
- * 🧠 LLM 层「提示词分角色 + 结构化输出截取」单测（方案 R1 + R2）
+ * 🧠 LLM 层「单套提示词链路 + 结构化输出截取」单测（第二批改造 · D1~D14）
  *
  * 覆盖：
- *  · `isLlmOnlyPlan`     —— 启用条件（①规则关 且 ②向量关 且 ③LLM开）
- *  · `normalizePromptPreset` / `normalizePromptPresets` —— 旧 `content` → `system` 迁移
- *  · `hasRoleFields`     —— 是否用了副字段
- *  · `buildLlmMessages`  —— 消息顺序（system+破限 / user / assistant / prefill）
+ *  · `isLlmOnlyPlan`          —— 启用条件（①规则关 且 ②向量关 且 ③LLM开）
+ *  · `normalizeRolePrompts`   —— 单套链路（system / user / prefill）归一化
+ *  · `migrateLegacyPresets`   —— 旧「预设库」→ 单套链路迁移（兜底默认文案 / 预填充）
+ *  · `resolveSystemVariantId` —— System 预设套用变体识别（standard / deep / brief / custom）
+ *  · `buildLlmMessages`       —— 消息顺序（system+破限 / user / prefill）
  *  · `willUsePrefill`
- *  · `parseStructuredTags` —— 三层降级（含**思考型模型思维链污染**用例）
+ *  · `parseStructuredTags`    —— 三层降级（含**思考型模型思维链污染**用例）
  *  · `outputFormatRule`
  */
 import { test, describe } from 'node:test';
@@ -15,10 +16,11 @@ import assert from 'node:assert/strict';
 
 import {
     TAG_WRAPPER, TAG_WRAPPER_ALT, DEFAULT_PREFILL,
-    isLlmOnlyPlan, normalizePromptPreset, normalizePromptPresets, hasRoleFields,
+    isLlmOnlyPlan, normalizeRolePrompts, migrateLegacyPresets,
+    DEFAULT_SYSTEM_PROMPT, SYSTEM_PROMPT_VARIANTS, resolveSystemVariantId,
     buildLlmMessages, willUsePrefill, parseStructuredTags, outputFormatRule,
-    DEFAULT_COT_PROMPT, COT_MODE_DEFAULT, COT_MODE_OFF, COT_MODE_CUSTOM,
-    resolveCotPrompt, willUseCot, stripThinkingBlocks
+    packedOutputRule, parsePackedTags, stripThinkingBlocks, sanitizeTagList,
+    composeTagPromptHead, splitTextSegments
 } from '../js/utils/llmPromptRoles.js';
 
 // ═══════════════════════════════════════════════════════════════
@@ -45,141 +47,120 @@ describe('isLlmOnlyPlan — 仅「①关 ②关 ③开」才为真', () => {
 });
 
 // ═══════════════════════════════════════════════════════════════
-// 📝 预设归一化（向后兼容）
+// 📝 单套链路归一化 + 旧预设库迁移
 // ═══════════════════════════════════════════════════════════════
-describe('normalizePromptPreset — 旧 content 自动迁移', () => {
-    test('旧预设只有 content → system 拿到 content，且 content 保留', () => {
-        const p = normalizePromptPreset({ id: 'a', name: '旧', content: '老指令' });
-        assert.equal(p.system, '老指令');
-        assert.equal(p.content, '老指令'); // 旧字段保留，降级不丢数据
-        assert.equal(p.assistant, '');
-        assert.equal(p.user, '');
-        assert.equal(p.prefill, '');
-        assert.equal(p.cotMode, COT_MODE_DEFAULT); // 🧠 旧预设默认走内置思维链
-        assert.equal(p.cot, '');
+describe('normalizeRolePrompts — 单套链路', () => {
+    test('正常对象 → 原样保留三个字段', () => {
+        const p = normalizeRolePrompts({ system: 'S', user: 'U', prefill: '<tags>[' });
+        assert.deepEqual(p, { system: 'S', user: 'U', prefill: '<tags>[' });
     });
-    test('新字段优先（system 非空时不被 content 覆盖）', () => {
-        const p = normalizePromptPreset({ system: '新的', content: '旧的' });
-        assert.equal(p.system, '新的');
-        assert.equal(p.content, '旧的'); // content 原样保留
+    test('缺失 / 脏值 → 空字符串（不抛错）', () => {
+        assert.deepEqual(normalizeRolePrompts(null), { system: '', user: '', prefill: '' });
+        assert.deepEqual(normalizeRolePrompts('x'), { system: '', user: '', prefill: '' });
+        assert.deepEqual(normalizeRolePrompts({ system: 123, user: null, prefill: undefined }), { system: '', user: '', prefill: '' });
     });
-    test('缺失字段有安全默认（不抛错）', () => {
-        const p = normalizePromptPreset({});
-        assert.equal(p.id, '');
-        assert.equal(p.name, '未命名提示词');
-        assert.equal(p.expanded, true);
-        assert.equal(p.system, '');
-    });
-    test('null / 非对象 → 安全默认', () => {
-        assert.equal(normalizePromptPreset(null).system, '');
-        assert.equal(normalizePromptPreset('x').system, '');
-    });
-    test('normalizePromptPresets 非数组 → 空数组', () => {
-        assert.deepEqual(normalizePromptPresets(null), []);
-        assert.deepEqual(normalizePromptPresets('x'), []);
-    });
-    test('normalizePromptPresets 逐条迁移', () => {
-        const list = normalizePromptPresets([{ content: 'a' }, { system: 'b' }]);
-        assert.equal(list.length, 2);
-        assert.equal(list[0].system, 'a');
-        assert.equal(list[1].system, 'b');
+    test('⚠️ prefill 为空串 = 关闭预填充（不是「用默认」）', () => {
+        assert.equal(normalizeRolePrompts({ prefill: '' }).prefill, '');
     });
 });
 
-describe('hasRoleFields — 是否使用了副字段', () => {
-    test('只有 content/system → false', () => {
-        assert.equal(hasRoleFields({ content: 'x' }), false);
-        assert.equal(hasRoleFields({ system: 'x' }), false);
+describe('migrateLegacyPresets — 旧预设库 → 单套链路', () => {
+    test('取第一条的 system（无则 content）；user / prefill 照搬', () => {
+        const r = migrateLegacyPresets([
+            { system: '主要指令', user: '任务', prefill: '<tags>[' },
+            { system: '第二条不会用' }
+        ]);
+        assert.equal(r.system, '主要指令');
+        assert.equal(r.user, '任务');
+        assert.equal(r.prefill, '<tags>[');
     });
-    test('任一为空白字符串 → false（trim 后判定）', () => {
-        assert.equal(hasRoleFields({ system: 'x', assistant: '   ' }), false);
+    test('旧预设只有 content → 迁移到 system（保底）', () => {
+        const r = migrateLegacyPresets([{ content: '老指令' }]);
+        assert.equal(r.system, '老指令');
+        assert.equal(r.prefill, DEFAULT_PREFILL); // 空 → 默认 <tags>[
     });
-    test('assistant 非空 → true', () => {
-        assert.equal(hasRoleFields({ system: 'x', assistant: '示例' }), true);
+    test('空 / 非数组 → 新默认文案 + 默认预填充', () => {
+        for (const input of [[], null, 'x', undefined]) {
+            const r = migrateLegacyPresets(input);
+            assert.equal(r.system, DEFAULT_SYSTEM_PROMPT);
+            assert.equal(r.user, '');
+            assert.equal(r.prefill, DEFAULT_PREFILL);
+        }
     });
-    test('user / prefill 非空 → true', () => {
-        assert.equal(hasRoleFields({ user: '任务' }), true);
-        assert.equal(hasRoleFields({ prefill: '<tags>[' }), true);
+    test('空白 system / content → 回退新默认文案', () => {
+        assert.equal(migrateLegacyPresets([{ system: '   ' }]).system, DEFAULT_SYSTEM_PROMPT);
+        assert.equal(migrateLegacyPresets([{ content: '' }]).system, DEFAULT_SYSTEM_PROMPT);
     });
-    test('⚠️ 思维链默认版不算「副字段」（它是内置默认，非用户填写）', () => {
-        assert.equal(hasRoleFields({ system: 'x', cotMode: COT_MODE_DEFAULT }), false);
-        assert.equal(hasRoleFields({ system: 'x', cotMode: COT_MODE_CUSTOM, cot: '自定义' }), false);
+});
+
+describe('System 预设套用 — 变体与识别', () => {
+    test('内置 3 个变体，standard 即默认文案', () => {
+        assert.equal(SYSTEM_PROMPT_VARIANTS.length, 3);
+        assert.equal(SYSTEM_PROMPT_VARIANTS[0].id, 'standard');
+        assert.equal(SYSTEM_PROMPT_VARIANTS[0].content, DEFAULT_SYSTEM_PROMPT);
+    });
+    test('resolveSystemVariantId：命中变体 → 对应 id；否则 custom', () => {
+        assert.equal(resolveSystemVariantId(DEFAULT_SYSTEM_PROMPT), 'standard');
+        assert.equal(resolveSystemVariantId(SYSTEM_PROMPT_VARIANTS[1].content), 'deep');
+        assert.equal(resolveSystemVariantId(SYSTEM_PROMPT_VARIANTS[2].content), 'brief');
+        assert.equal(resolveSystemVariantId('我自己写的内容'), 'custom');
+        assert.equal(resolveSystemVariantId(''), 'custom');
+        assert.equal(resolveSystemVariantId(null), 'custom');
+    });
+    test('默认文案包含真实性与第 5 条推理句', () => {
+        assert.ok(DEFAULT_SYSTEM_PROMPT.includes('不脑补'));
+        assert.ok(DEFAULT_SYSTEM_PROMPT.includes('大类/子类'));
+        assert.ok(DEFAULT_SYSTEM_PROMPT.includes('输出前先在内部完成推理'));
     });
 });
 
 // ═══════════════════════════════════════════════════════════════
-// 🧩 消息组装
+// 🧩 消息组装（单套链路）
 // ═══════════════════════════════════════════════════════════════
-describe('buildLlmMessages — 分角色消息顺序', () => {
-    test('顺序：system → user → assistant(示例) → assistant(思维链) → assistant(预填充)', () => {
+describe('buildLlmMessages — 单套链路消息顺序', () => {
+    test('顺序：system → user → assistant(预填充)（破限拼在 system 末尾）', () => {
         const msgs = buildLlmMessages({
-            preset: { system: 'S', assistant: 'A', user: 'U', prefill: '<tags>[', cotMode: COT_MODE_DEFAULT },
+            rolePrompts: { system: 'S', user: 'U', prefill: '<tags>[' },
+            jailbreak: '破限词',
             defaultUser: '默认任务'
         });
-        assert.deepEqual(msgs.map(m => m.role), ['system', 'user', 'assistant', 'assistant', 'assistant']);
-        assert.equal(msgs[0].content, 'S');
-        assert.equal(msgs[1].content, 'U'); // 预设 user 优先
-        assert.equal(msgs[2].content, 'A');
-        assert.equal(msgs[3].content, DEFAULT_COT_PROMPT); // 🧠 思维链
-        assert.equal(msgs[4].content, '<tags>[');         // ⚡ 预填充放最后
+        assert.deepEqual(msgs.map(m => m.role), ['system', 'user', 'assistant']);
+        assert.equal(msgs[0].content, 'S\n\n破限词'); // 破限在 system 末尾（注意力权重最高）
+        assert.equal(msgs[1].content, 'U');          // 预设 user 优先
+        assert.equal(msgs[2].content, '<tags>[');    // 预填充放最后
     });
-    test('⚠️ 所有 assistant 消息必须排在 user 之后（Anthropic 硬要求）', () => {
+    test('预设 user 留空 → 用 defaultUser', () => {
+        const msgs = buildLlmMessages({ rolePrompts: { system: 'S', prefill: '' }, defaultUser: '默认任务' });
+        assert.equal(msgs[1].content, '默认任务');
+    });
+    test('破限为空白 → 不追加（也不产生多余换行）', () => {
+        const msgs = buildLlmMessages({ rolePrompts: { system: 'S' }, jailbreak: '   ', defaultUser: 'U' });
+        assert.equal(msgs[0].content, 'S');
+    });
+    test('usePrefill=false → 不含预填充（降级第二级）', () => {
         const msgs = buildLlmMessages({
-            preset: { system: 'S', assistant: 'A', prefill: '<tags>[', cotMode: COT_MODE_DEFAULT },
+            rolePrompts: { system: 'S', prefill: '<tags>[' },
+            defaultUser: 'U', usePrefill: false
+        });
+        assert.deepEqual(msgs.map(m => m.role), ['system', 'user']);
+    });
+    test('⚠️ 预填充（assistant）必须排在 user 之后（Anthropic 硬要求）', () => {
+        const msgs = buildLlmMessages({
+            rolePrompts: { system: 'S', prefill: '<tags>[' },
             defaultUser: 'U'
         });
         const firstNonSystem = msgs.find(m => m.role !== 'system');
-        assert.equal(firstNonSystem.role, 'user', '第一条非 system 消息必须是 user，否则 Anthropic 报错');
+        assert.equal(firstNonSystem.role, 'user');
         const roles = msgs.map(m => m.role);
         assert.equal(roles.indexOf('user') < roles.indexOf('assistant'), true);
     });
-    test('预设 user 留空 → 用 defaultUser', () => {
-        const msgs = buildLlmMessages({ preset: { system: 'S', cotMode: COT_MODE_OFF }, defaultUser: '默认任务' });
-        assert.equal(msgs[1].content, '默认任务');
-    });
-    test('破限追加到 system 最末尾（注意力权重最高）', () => {
-        const msgs = buildLlmMessages({ preset: { system: 'S', cotMode: COT_MODE_OFF }, jailbreak: '破限词', defaultUser: 'U' });
-        assert.equal(msgs[0].content, 'S\n\n破限词');
-        assert.equal(msgs[0].role, 'system');
-    });
-    test('破限为空白 → 不追加（也不产生多余换行）', () => {
-        const msgs = buildLlmMessages({ preset: { system: 'S', cotMode: COT_MODE_OFF }, jailbreak: '   ', defaultUser: 'U' });
-        assert.equal(msgs[0].content, 'S');
-    });
-    test('usePrefill=false → 不含预填充（但 assistant / 思维链仍在）', () => {
-        const msgs = buildLlmMessages({
-            preset: { system: 'S', assistant: 'A', prefill: '<tags>[', cotMode: COT_MODE_DEFAULT },
-            defaultUser: 'U', usePrefill: false
-        });
-        assert.deepEqual(msgs.map(m => m.role), ['system', 'user', 'assistant', 'assistant']);
-        assert.equal(msgs[2].content, 'A');
-        assert.equal(msgs[3].content, DEFAULT_COT_PROMPT);
-    });
-    test('useCot=false → 不含思维链（预填充仍在）', () => {
-        const msgs = buildLlmMessages({
-            preset: { system: 'S', prefill: '<tags>[', cotMode: COT_MODE_DEFAULT },
-            defaultUser: 'U', useCot: false
-        });
-        assert.deepEqual(msgs.map(m => m.role), ['system', 'user', 'assistant']);
-        assert.equal(msgs[2].content, '<tags>[');
-    });
-    test('usePrefill=false 且 useCot=false → 退化为 system + user（降级阶梯末档）', () => {
-        const msgs = buildLlmMessages({
-            preset: { system: 'S', assistant: 'A', prefill: '<tags>[', cotMode: COT_MODE_DEFAULT },
-            defaultUser: 'U', usePrefill: false, useCot: false
-        });
-        assert.deepEqual(msgs.map(m => m.role), ['system', 'user', 'assistant']);
-        assert.equal(msgs[2].content, 'A');
-    });
-    test('旧预设（只有 content）→ 迁移到 system；思维链默认版生效', () => {
-        const msgs = buildLlmMessages({ preset: { content: '老指令' }, defaultUser: 'U' });
-        assert.deepEqual(msgs.map(m => m.role), ['system', 'user', 'assistant']);
-        assert.equal(msgs[0].content, '老指令');
-        assert.equal(msgs[2].content, DEFAULT_COT_PROMPT);
-    });
     test('system 与 defaultUser 均空 → 只返回必要消息（不产生空消息）', () => {
-        const msgs = buildLlmMessages({ preset: { cotMode: COT_MODE_OFF }, defaultUser: '' });
+        const msgs = buildLlmMessages({ rolePrompts: { prefill: '' }, defaultUser: '' });
         assert.deepEqual(msgs, []);
+    });
+    test('只有 system 为空但 user 有内容 → 不产生空 system 消息', () => {
+        const msgs = buildLlmMessages({ rolePrompts: { system: '', user: 'U', prefill: '' } });
+        assert.deepEqual(msgs.map(m => m.role), ['user']);
     });
     test('无参调用不抛错', () => {
         assert.equal(Array.isArray(buildLlmMessages()), true);
@@ -199,45 +180,7 @@ describe('willUsePrefill — 是否实际会用到预填充', () => {
 });
 
 // ═══════════════════════════════════════════════════════════════
-// 🧠 思维链（CoT）模式
-// ═══════════════════════════════════════════════════════════════
-describe('resolveCotPrompt — 三档模式（默认 / 自定义 / 关闭）', () => {
-    test('旧预设无 cotMode → 默认走内置默认版（用户指定为默认）', () => {
-        assert.equal(resolveCotPrompt({ system: 'S' }), DEFAULT_COT_PROMPT);
-        assert.equal(normalizePromptPreset({ system: 'S' }).cotMode, COT_MODE_DEFAULT);
-    });
-    test('cotMode=default → 内置默认版（不受 preset.cot 影响）', () => {
-        assert.equal(resolveCotPrompt({ cotMode: COT_MODE_DEFAULT, cot: '我自己的' }), DEFAULT_COT_PROMPT);
-    });
-    test('cotMode=custom + 有内容 → 用自定义', () => {
-        assert.equal(resolveCotPrompt({ cotMode: COT_MODE_CUSTOM, cot: '我自己的思维链' }), '我自己的思维链');
-    });
-    test('cotMode=custom 但内容为空 → 回退默认版（不静默失效）', () => {
-        assert.equal(resolveCotPrompt({ cotMode: COT_MODE_CUSTOM, cot: '   ' }), DEFAULT_COT_PROMPT);
-        assert.equal(resolveCotPrompt({ cotMode: COT_MODE_CUSTOM }), DEFAULT_COT_PROMPT);
-    });
-    test('cotMode=off → 空字符串（不注入）', () => {
-        assert.equal(resolveCotPrompt({ cotMode: COT_MODE_OFF, cot: '写了也不生效' }), '');
-    });
-    test('非法 cotMode 值 → 归为默认版', () => {
-        assert.equal(resolveCotPrompt({ cotMode: 'garbage' }), DEFAULT_COT_PROMPT);
-        assert.equal(normalizePromptPreset({ cotMode: 'garbage' }).cotMode, COT_MODE_DEFAULT);
-    });
-    test('willUseCot 与 resolveCotPrompt 一致', () => {
-        assert.equal(willUseCot({ cotMode: COT_MODE_OFF }), false);
-        assert.equal(willUseCot({ cotMode: COT_MODE_DEFAULT }), true);
-        assert.equal(willUseCot({}), true);
-    });
-    test('默认版内容同时含「思维链引导」与「破限」两个要素', () => {
-        assert.ok(DEFAULT_COT_PROMPT.includes('推理'), '应含推理引导');
-        assert.ok(DEFAULT_COT_PROMPT.includes('虚构'), '应含虚构/破限声明');
-        assert.ok(DEFAULT_COT_PROMPT.includes('不要输出'), '应明确要求不输出推理过程');
-        assert.ok(DEFAULT_COT_PROMPT.includes(`<${TAG_WRAPPER}>`), '应写死最终输出格式');
-    });
-});
-
-// ═══════════════════════════════════════════════════════════════
-// 🧹 思考块剥离
+//  思考块剥离
 // ═══════════════════════════════════════════════════════════════
 describe('stripThinkingBlocks — 剥思考块', () => {
     test('英文 <thinking> 块', () => {
@@ -443,5 +386,258 @@ describe('outputFormatRule — 结构化 / 普通两种口径', () => {
         assert.equal(TAG_WRAPPER, 'tags');
         assert.equal(TAG_WRAPPER_ALT, '标签');
         assert.equal(DEFAULT_PREFILL, '<tags>[');
+    });
+});
+
+// ═══════════════════════════════════════════════════════════════
+// 📦 打包（多卡请求）解析
+// ═══════════════════════════════════════════════════════════════
+describe('packedOutputRule — 多卡输出格式要求', () => {
+    test('含数量与编号约定（1 开始）', () => {
+        const s = packedOutputRule(5);
+        assert.ok(s.includes('5 张卡片'));
+        assert.ok(s.includes('从 1 开始'));
+        assert.ok(s.includes(`<${TAG_WRAPPER}>`));
+    });
+    test('非法数量兜底为 1', () => {
+        assert.ok(packedOutputRule(0).includes('1 张卡片'));
+        assert.ok(packedOutputRule(null).includes('1 张卡片'));
+    });
+});
+
+describe('parsePackedTags — 对象形态', () => {
+    test('标准对象输出 → 逐卡映射', () => {
+        const r = parsePackedTags('<tags>{"1": ["奇幻","骑士"], "2": ["日常"]}</tags>');
+        assert.equal(r.ok, true);
+        assert.deepEqual(r.map['1'], ['奇幻', '骑士']);
+        assert.deepEqual(r.map['2'], ['日常']);
+    });
+    test('带解释文字 / 代码围栏 → 仍能解析', () => {
+        const r = parsePackedTags('好的：\n```json\n<tags>{"1":["a"],"2":["b"]}</tags>\n```\n以上。');
+        assert.equal(r.ok, true);
+        assert.deepEqual(r.map['2'], ['b']);
+    });
+    test('裸对象（无 <tags> 包裹）→ 兜底解析', () => {
+        const r = parsePackedTags('{"1": ["a"], "2": ["b"]}');
+        assert.equal(r.ok, true);
+        assert.deepEqual(r.map['1'], ['a']);
+    });
+    test('思考块里的示例对象不污染（取最后一个有效包裹）', () => {
+        const raw = '让我想想…示例 <tags>{"1": ["示例"]}</tags>\n最终结果：\n<tags>{"1": ["真结果"], "2": ["b"]}</tags>';
+        const r = parsePackedTags(raw);
+        assert.equal(r.ok, true);
+        assert.deepEqual(r.map['1'], ['真结果']);
+    });
+    test('字符串值 / 嵌套数组 → 统一成字符串数组', () => {
+        const r = parsePackedTags('<tags>{"1": "单标签", "2": [["嵌套"]]}</tags>');
+        assert.deepEqual(r.map['1'], ['单标签']);
+        assert.deepEqual(r.map['2'], ['嵌套']);
+    });
+});
+
+describe('parsePackedTags — 数组的数组 / 异常', () => {
+    test('数组的数组 → 按序号映射（1 开始）', () => {
+        const r = parsePackedTags('<tags>[["a","b"], ["c"]]</tags>');
+        assert.equal(r.ok, true);
+        assert.deepEqual(r.map['1'], ['a', 'b']);
+        assert.deepEqual(r.map['2'], ['c']);
+    });
+    test('单卡数组（非打包格式）→ 不误判为打包结果', () => {
+        const r = parsePackedTags('<tags>["a","b"]</tags>');
+        assert.equal(r.ok, false);
+    });
+    test('空 / null → ok=false（不抛错）', () => {
+        assert.equal(parsePackedTags('').ok, false);
+        assert.equal(parsePackedTags(null).ok, false);
+    });
+    test('无 JSON → ok=false', () => {
+        assert.equal(parsePackedTags('完全不是 JSON').ok, false);
+    });
+});
+
+// ═══════════════════════════════════════════════════════════════
+// 🧽 AI-10：兜底拆分清理（sanitizeTagList + 层③真实脏输出回归）
+// ═══════════════════════════════════════════════════════════════
+describe('sanitizeTagList — 标签统一清洗（AI-10）', () => {
+    test('剥 <tags>/</tags> 标记（独立项 / 内嵌残留）', () => {
+        assert.deepEqual(
+            sanitizeTagList(['现代/都市', '</tags>', '教程/指南 </tags>', '<tags>', '  ']),
+            ['现代/都市', '教程/指南']
+        );
+    });
+    test('剥中英文引号与方括号', () => {
+        assert.deepEqual(
+            sanitizeTagList(['“奇幻/异世界”', '"公路片"', '[召唤/勇者]', "'傲娇/JK'"]),
+            ['奇幻/异世界', '公路片', '召唤/勇者', '傲娇/JK']
+        );
+    });
+    test('折叠中文字间空格与斜杠两侧空格', () => {
+        assert.deepEqual(
+            sanitizeTagList(['现代/都 市', '温柔/ 体贴', '温 柔']),
+            ['现代/都市', '温柔/体贴', '温柔']
+        );
+    });
+    test('剥行首列表符与编号（- * • · / 1. / 2、）', () => {
+        assert.deepEqual(
+            sanitizeTagList(['- 奇幻', '* 骑士', '• 都市', '1. 日常', '2、校园']),
+            ['奇幻', '骑士', '都市', '日常', '校园']
+        );
+    });
+    test('空白变形归一：NBSP / 全角空格 / 零宽 / Tab', () => {
+        assert.deepEqual(
+            sanitizeTagList(['现代/都\u00a0市', '温\u3000柔', '奇\u200b幻', '日\t常']),
+            ['现代/都市', '温柔', '奇幻', '日常']
+        );
+    });
+    test('剥 Markdown 粗斜体与全角引号变体（「」『』）', () => {
+        assert.deepEqual(
+            sanitizeTagList(['**奇幻**', '_骑士_', '「都市」', '『日常』']),
+            ['奇幻', '骑士', '都市', '日常']
+        );
+    });
+    test('剥首尾残留标点（不误伤 v1.2 类）', () => {
+        assert.deepEqual(
+            sanitizeTagList(['、奇幻、', '，骑士。', 'v1.2', '日常；']),
+            ['奇幻', '骑士', 'v1.2', '日常']
+        );
+    });
+    test('项级门槛：纯数字与超长项（疑似解释文字）丢弃', () => {
+        assert.deepEqual(
+            sanitizeTagList(['奇幻', '1', '这是一段很长的解释文字'.repeat(4), '骑士']),
+            ['奇幻', '骑士']
+        );
+    });
+    test('去重（保序）+ 丢空项', () => {
+        assert.deepEqual(sanitizeTagList(['A', 'B', 'A', '', null, '  ', 'B']), ['A', 'B']);
+    });
+    test('英文标签的空格不被误伤（Sci-Fi (科幻)）', () => {
+        assert.deepEqual(sanitizeTagList(['Sci-Fi (科幻)', 'Romance (恋爱)']), ['Sci-Fi (科幻)', 'Romance (恋爱)']);
+    });
+});
+
+describe('parseStructuredTags — 第③层兜底的真实脏输出（AI-10 回归）', () => {
+    test('顿号列表 + 尾部 </tags>（gemini 假流式真实输出形态）', () => {
+        const r = parseStructuredTags('现代/都市、熟女/人妻、救赎/补偿、</tags>');
+        assert.equal(r.ok, true);
+        assert.equal(r.layer, 3);
+        assert.deepEqual(r.tags, ['现代/都市', '熟女/人妻', '救赎/补偿']);
+    });
+    test('无分隔符内嵌标记：教程/指南</tags>', () => {
+        const r = parseStructuredTags('工具/实用、系统/辅助、教程/指南</tags>');
+        assert.deepEqual(r.tags, ['工具/实用', '系统/辅助', '教程/指南']);
+    });
+    test('中文引号 + 中文字间空格混合', () => {
+        const r = parseStructuredTags('“奇幻/异世界”、“公路片”、现代/都 市');
+        assert.deepEqual(r.tags, ['奇幻/异世界', '公路片', '现代/都市']);
+    });
+    test('包裹内纯文本 + 尾逗号 → 层①-b 命中且清洗', () => {
+        const r = parseStructuredTags('<tags>奇幻、骑士、</tags>');
+        assert.equal(r.ok, true);
+        assert.equal(r.layer, 1);
+        assert.deepEqual(r.tags, ['奇幻', '骑士']);
+    });
+});
+
+describe('parseStructuredTags — 预填充拼接（2026-09-25 根治）', () => {
+    test('模型按 JSON 续写 → 拼回 `<tags>[` 后层①-a 命中（不再落③）', () => {
+        const r = parseStructuredTags('"奇幻","骑士"]</tags>', { prefill: '<tags>[' });
+        assert.equal(r.ok, true);
+        assert.equal(r.layer, 1);
+        assert.deepEqual(r.tags, ['奇幻', '骑士']);
+    });
+    test('模型写顿号文本续写 → 拼回后层①-b 命中且清洗干净', () => {
+        const r = parseStructuredTags('现代/都 市、熟女/人妻、</tags>', { prefill: '<tags>[' });
+        assert.equal(r.ok, true);
+        assert.equal(r.layer, 1);
+        assert.deepEqual(r.tags, ['现代/都市', '熟女/人妻']);
+    });
+    test('原文已含完整包裹 → 不拼接，保持既有行为（仍是①）', () => {
+        const r = parseStructuredTags('<tags>["a","b"]</tags>', { prefill: '<tags>[' });
+        assert.equal(r.layer, 1);
+        assert.deepEqual(r.tags, ['a', 'b']);
+    });
+    test('不传 prefill → 行为与旧版一致（回归保护，仍走③兜底）', () => {
+        const r = parseStructuredTags('现代/都市、救赎/补偿、</tags>');
+        assert.equal(r.layer, 3);
+        assert.deepEqual(r.tags, ['现代/都市', '救赎/补偿']);
+    });
+    test('空回复 → ok=false（不拼接不报错）', () => {
+        const r = parseStructuredTags('', { prefill: '<tags>[' });
+        assert.equal(r.ok, false);
+    });
+});
+
+// ═══════════════════════════════════════════════════════════════
+// 🏷️ S2（2026-09-25）：composeTagPromptHead —— 候选池开关 / 联动矩阵（卡版与世界书版共用）
+// ═══════════════════════════════════════════════════════════════
+describe('composeTagPromptHead — 池开关 / 自由提取 / 附加要求', () => {
+    test('池开 + 自由提取开 → 池段落 + 宽松规则（现状默认）', () => {
+        const h = composeTagPromptHead({ poolTags: ['a', 'b'], poolEnabled: true, enableExtraction: true, customPrompt: '' });
+        assert.ok(h.includes('【标签候选池】：[a, b]'));
+        assert.ok(h.includes('优先从候选池'));
+        assert.ok(!h.includes('严格限制'));
+    });
+    test('池开 + 自由提取关 → 池段落 + 严格规则（现状）', () => {
+        const h = composeTagPromptHead({ poolTags: ['a'], poolEnabled: true, enableExtraction: false, customPrompt: '' });
+        assert.ok(h.includes('【标签候选池】：[a]'));
+        assert.ok(h.includes('严格限制规则'));
+        assert.ok(h.includes('绝对只能'));
+    });
+    test('池关 → **不输出**池段落、也不输出任意规则（LLM 完全自由）', () => {
+        const h = composeTagPromptHead({ poolTags: ['a', 'b'], poolEnabled: false, enableExtraction: true, customPrompt: '' });
+        assert.ok(!h.includes('【标签候选池】'));
+        assert.ok(!h.includes('【规则】'));
+        assert.ok(!h.includes('严格限制'));
+        assert.equal(h, '');
+    });
+    test('池关 + 附加要求 → 只保留附加要求（与池无关）', () => {
+        const h = composeTagPromptHead({ poolTags: ['a'], poolEnabled: false, enableExtraction: false, customPrompt: '重点分析性格' });
+        assert.ok(!h.includes('【标签候选池】'));
+        assert.ok(h.includes('【附加要求】：重点分析性格'));
+    });
+    test('池开但池空 → 不输出池段落（规则仍输出）', () => {
+        const h = composeTagPromptHead({ poolTags: [], poolEnabled: true, enableExtraction: true, customPrompt: '' });
+        assert.ok(!h.includes('【标签候选池】'));
+        assert.ok(h.includes('优先从候选池'));
+    });
+    test('poolEnabled 缺省 → 按开处理（老调用方零回归）', () => {
+        const h = composeTagPromptHead({ poolTags: ['x'], enableExtraction: true });
+        assert.ok(h.includes('【标签候选池】：[x]'));
+    });
+    test('空参数 / undefined → 不抛错（默认：池开 + 宽松规则）', () => {
+        const h = composeTagPromptHead();
+        assert.ok(typeof h === 'string');
+        assert.ok(h.includes('【规则】'));
+        assert.ok(!h.includes('严格限制'));
+        assert.equal(composeTagPromptHead({}), composeTagPromptHead());
+    });
+});
+
+// ═══════════════════════════════════════════════════════════════
+// ✂️ S3（2026-09-25）：splitTextSegments —— 长材料分段（卡版与世界书版共用）
+// ═══════════════════════════════════════════════════════════════
+describe('splitTextSegments — 按段落边界切段', () => {
+    test('短文本 → 单段', () => {
+        assert.deepEqual(splitTextSegments('hello', 100), ['hello']);
+    });
+    test('按空行切分：每段不超限', () => {
+        const p = (c, n) => c.repeat(n);
+        const text = `${p('a', 150)}\n\n${p('b', 150)}\n\n${p('c', 150)}`;
+        const segs = splitTextSegments(text, 200);
+        assert.equal(segs.length, 3);
+        assert.ok(segs.every(s => s.length <= 200));
+    });
+    test('超长无空行 → 硬切不丢内容', () => {
+        const text = 'x'.repeat(500);
+        const segs = splitTextSegments(text, 200);
+        assert.deepEqual(segs, ['x'.repeat(200), 'x'.repeat(200), 'x'.repeat(100)]);
+    });
+    test('空文本 → 空数组', () => {
+        assert.deepEqual(splitTextSegments('', 100), []);
+        assert.deepEqual(splitTextSegments(null, 100), []);
+    });
+    test('最大长度下限保护（过小值被抬到 200，防段数爆炸）', () => {
+        const segs = splitTextSegments('y'.repeat(300), 1);
+        assert.ok(segs.length <= 2);
     });
 });

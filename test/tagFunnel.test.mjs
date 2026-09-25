@@ -176,3 +176,49 @@ test('formatFunnelBadge：生成状态短标签', () => {
     assert.strictEqual(formatFunnelBadge({ rule: false, vector: true, llm: false }), '规则✗ 向量✓ AI✗');
     assert.strictEqual(formatFunnelBadge(undefined), '规则✓ 向量✗ AI✓');
 });
+
+// ═══════════════════════════════════════════════════════════
+// 🏷️ S2（2026-09-25）：候选池开关关闭 → ② 向量层跳过
+//    为什么必须跳过：向量层的标签源就是候选池（batchMatch(payloads, aiCandidateTags)）
+// ═══════════════════════════════════════════════════════════
+
+test('resolveFunnelPlan：池关 → ② 必须跳过且给出原因（即使模型就绪 + 池非空）', () => {
+    const p = resolveFunnelPlan({
+        funnel: { rule: false, vector: true, llm: true },
+        vectorReady: true, hasCandidateTags: true, hasApiConfig: true,
+        poolDisabled: true
+    });
+    assert.strictEqual(p.vector, false);
+    assert.ok(String(p.skip.vector).includes('候选池已关闭'));
+    // ③ 不受池开关影响（池关 = LLM 自由打标，LLM 照跑）
+    assert.strictEqual(p.llm, true);
+});
+
+test('resolveFunnelPlan：池关不影响①（层间不得互相短路）', () => {
+    const p = resolveFunnelPlan({
+        funnel: { rule: true, vector: true, llm: true },
+        vectorReady: true, hasCandidateTags: true, hasApiConfig: true,
+        poolDisabled: true
+    });
+    assert.strictEqual(p.rule, true);
+    assert.strictEqual(p.vector, false);
+    assert.strictEqual(p.llm, true);
+});
+
+test('resolveFunnelPlan：poolDisabled 缺省（老调用方）→ 与改动前行为一致', () => {
+    const p = resolveFunnelPlan({
+        funnel: { rule: false, vector: true, llm: true },
+        vectorReady: true, hasCandidateTags: true, hasApiConfig: true
+    });
+    assert.strictEqual(p.vector, true);
+    assert.strictEqual(p.skip.vector, undefined);
+});
+
+test('resolveFunnelPlan：池关优先于「模型未就绪」给出原因（原因不误导）', () => {
+    const p = resolveFunnelPlan({
+        funnel: { rule: false, vector: true, llm: true },
+        vectorReady: false, hasCandidateTags: true, hasApiConfig: true,
+        poolDisabled: true
+    });
+    assert.ok(String(p.skip.vector).includes('候选池已关闭'));
+});

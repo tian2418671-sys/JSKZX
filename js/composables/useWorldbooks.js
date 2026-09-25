@@ -670,7 +670,7 @@ export function useWorldbooks({
                 if (res && res.success) {
                     wb.path = newPath;
                     wb.name = safeFileName;
-                    migrateWbCategoryKey(prevKey, wb.path); // 分组键随文件路径迁移
+                    migrateWbPathKeys(prevKey, wb.path); // 🏷️ S4：分组 + 标签键随文件路径迁移（铁律 6）
                     addLog(`📝 已重命名世界书: ${oldName} → ${finalName}`, 'success');
                     nativeAlert(`✏️ 重命名成功！\n新名称: ${finalName}\n文件已同步改名为: ${safeFileName}`, 'info');
                 } else {
@@ -681,7 +681,7 @@ export function useWorldbooks({
         } else {
             // 内存书（本次会话导入但未落盘）：仅同步显示文件名
             wb.name = safeFileName;
-            migrateWbCategoryKey(prevKey, wb.name); // 分组键随文件名迁移
+            migrateWbPathKeys(prevKey, wb.name); // 🏷️ S4：分组 + 标签键随文件名迁移
             addLog(`📝 已重命名世界书: ${oldName} → ${finalName}`, 'success');
         }
     };
@@ -857,8 +857,11 @@ export function useWorldbooks({
         worldbooks.value.push(newWb);
         triggerRef(worldbooks); // shallowRef：手动触发响应式
         // 继承源书分组并持久化（副本默认归入源书所在分组）
+        // 🏷️ S4：物理分组为唯一标准——副本与源书同目录即**自然继承**分组；
+        //    仅当副本落到了其他目录（用户改选保存位置）才需要虚拟映射兜底（迁移期兼容）。
         const srcCat = getWbCategory(wb);
-        if (srcCat && srcCat.trim() !== '') {
+        const srcFolder = wbFolderGroupOf(wb);
+        if (srcCat && srcCat.trim() !== '' && srcCat !== WB_CAT_DEFAULT && wbFolderGroupOf(newWb) !== srcFolder) {
             newWb.category = srcCat;
             const key = newWb.path || newWb.name || '';
             if (key) {
@@ -921,15 +924,180 @@ export function useWorldbooks({
         }
     };
 
-    // 获取世界书分组：wb.category → 持久化映射 → '默认'
+    // ═══════════════════════════════════════════════════════════════
+    // 📁 S4（2026-09-25）：世界书**物理分组**（Q6 甲：物理文件夹为唯一标准）
+    // ───────────────────────────────────────────────────────────────
+    // 口径（用户拍板 · 方案 §二D）：
+    //   · 扫描时由**相对路径**推导分组（一级子文件夹名 = 分组名；库根 = 无分组 → 显示「默认」）
+    //   · `wbCategoryMap` 迁移期保留**兼容读取**；迁移助手把存量虚拟分组物理化后清空
+    //   · 移动 / 改名 / 解散全部为**物理操作**（wb:rename / fs:renameGroupFolder / fs:deleteEmptyGroupFolder）
+    //   · 移动必须迁移按 path 派生的键（wbTagMap / wbCategoryMap）——铁律 6
+    // ═══════════════════════════════════════════════════════════════
+
+    /** 路径分隔符归一（比较用） */
+    const normWbSep = (p) => String(p || '').replace(/\\/g, '/').replace(/\/+$/, '');
+
+    /** 分组名 → 文件夹名（与主进程 `fs:*` 净化规则逐字一致，防预览/执行不一致） */
+    const sanitizeWbFolderName = (name) => String(name == null ? '' : name).replace(/[\\/:*?"<>|]/g, '_').trim();
+
+    /**
+     * 世界书在库内的物理**一级文件夹名**：
+     *   ''    = 在库根（未分组）；null = 无库根 / 不在当前库内（外部路径，分组推导不适用）
+     */
+    const wbFolderGroupOf = (wb) => {
+        const root = normWbSep(lastWorldbookDirPath && lastWorldbookDirPath.value);
+        const p = normWbSep(wb && wb.path);
+        if (!root || !p) return null;
+        if (p === root) return '';
+        if (!p.startsWith(root + '/')) return null;
+        const rest = p.slice(root.length + 1);
+        const segs = rest.split('/');
+        return segs.length >= 2 ? segs[0] : '';
+    };
+
+    /** 迁移**按路径派生**的全部持久化键（分组 + 标签）—— 移动/改名共用，缺一不可（铁律 6） */
+    const migrateWbPathKeys = (oldKey, newKey) => {
+        if (!oldKey || !newKey || oldKey === newKey) return;
+        // 分组键
+        if (wbCategoryMap.value[oldKey] !== undefined) {
+            wbCategoryMap.value[newKey] = wbCategoryMap.value[oldKey];
+            delete wbCategoryMap.value[oldKey];
+        }
+        // 🏷️ 标签键（A2 遗留缺口：此前改名只迁分组、标签键会丢——S4 一并修）
+        if (wbTagMap && wbTagMap.value && wbTagMap.value[oldKey] !== undefined) {
+            wbTagMap.value[newKey] = wbTagMap.value[oldKey];
+            delete wbTagMap.value[oldKey];
+        }
+        saveWbCategoriesMap();
+    };
+
+    // 获取世界书分组：**物理一级目录**（甲）→ `wbCategoryMap` 兼容 → '默认'
+    // 🏷️ S4 改造说明：与旧版（内存 category → map → '默认'）的顺序不同 ——
+    //    物理文件夹为唯一标准；map 仅服务「迁移完成前」的存量虚拟分组（迁移助手会清空它）。
     const getWbCategory = (wb) => {
-        if (!wb) return '默认';
-        if (wb.category && wb.category.trim() !== '') return wb.category.trim();
+        if (!wb) return WB_CAT_DEFAULT;
+        const folder = wbFolderGroupOf(wb);
+        if (folder) return folder; // 物理已分组 → 它说话（即使 map 还有陈旧值）
         const key = wb.path || wb.name || '';
         if (key && wbCategoryMap.value[key] && wbCategoryMap.value[key].trim() !== '') {
-            return wbCategoryMap.value[key].trim();
+            return wbCategoryMap.value[key].trim(); // 过渡期兼容：物理未分组但有虚拟映射
         }
-        return '默认';
+        return WB_CAT_DEFAULT;
+    };
+
+    /**
+     * 🚚 S4（核心原语）：把世界书物理移动到目标分组文件夹（根 = 移回库根）。
+     * 含：目标夹创建（幂等）→ wb:rename → 同名冲突自动后缀 → 键迁移（分组+标签）→ 响应式触发。
+     * @param {object} wb 世界书对象
+     * @param {string} groupName 目标分组名（'默认'/'全部'/空 = 库根）
+     * @returns {Promise<boolean>} 是否成功（已在目标位置也算成功）
+     */
+    const moveWbToFolder = async (wb, groupName) => {
+        if (!wb) return false;
+        if (!wb.path) {
+            nativeAlert('该世界书尚无本地文件（内存导入），无法物理移动。可先「💾 落盘」再移动。', 'warning');
+            return false;
+        }
+        const root = (lastWorldbookDirPath && lastWorldbookDirPath.value) || '';
+        if (!root) { nativeAlert('未设置世界书目录，无法物理移动。', 'warning'); return false; }
+        if (!window.electronAPI || typeof window.electronAPI.renameWorldbookFile !== 'function') {
+            nativeAlert('当前环境不支持物理移动。', 'warning');
+            return false;
+        }
+        const isRootTarget = !groupName || groupName === WB_CAT_DEFAULT || groupName === WB_CAT_ALL;
+        const safe = isRootTarget ? '' : sanitizeWbFolderName(groupName);
+        if (!isRootTarget && !safe) { nativeAlert('分组名无效。', 'warning'); return false; }
+
+        // 已在目标位置 → 幂等成功
+        const cur = wbFolderGroupOf(wb);
+        if (isRootTarget ? !cur : cur === safe) return true;
+
+        try {
+            if (!isRootTarget && typeof window.electronAPI.createGroupFolder === 'function') {
+                const mk = await window.electronAPI.createGroupFolder({ libraryPath: root, groupName: safe });
+                if (!mk || !mk.success) {
+                    addLog(`⚠️ 创建分组文件夹失败: ${(mk && mk.error) || '未知错误'}`, 'warning');
+                    return false;
+                }
+            }
+            const oldPath = wb.path; // 键迁移的旧键基准
+            const sep = oldPath.includes('\\') ? '\\' : '/';
+            const fileName = oldPath.split(/[\\/]/).pop();
+            const targetDir = isRootTarget ? root : `${root}${sep}${safe}`;
+            let newPath = `${targetDir}${sep}${fileName}`;
+
+            let res = await window.electronAPI.renameWorldbookFile({ oldPath, newPath });
+            // 同名冲突：目标已存在 → 追加「_移动_时间戳」后缀重试（对齐卡片 moveCardToGroup 行为，绝不覆盖）
+            if (!res || !res.success) {
+                const errText = String((res && res.error) || '');
+                if (/已存在/.test(errText)) {
+                    const base = fileName.replace(/\.json$/i, '');
+                    newPath = `${targetDir}${sep}${base}_移动_${Date.now()}.json`;
+                    res = await window.electronAPI.renameWorldbookFile({ oldPath, newPath });
+                }
+            }
+            if (!res || !res.success) {
+                addLog(`⚠️ 移动失败: ${(res && res.error) || '未知错误'}`, 'warning');
+                return false;
+            }
+
+            // 更新内存对象 + 键迁移（分组 + 标签）
+            wb.path = newPath;
+            wb.name = newPath.split(/[\\/]/).pop();
+            // 物理化后清掉该书的虚拟映射残留（物理已是唯一标准）
+            const oldKeyCat = oldPath || wb.name;
+            if (wbCategoryMap.value[oldKeyCat] !== undefined) delete wbCategoryMap.value[oldKeyCat];
+            migrateWbPathKeys(oldKeyCat, newPath);
+            triggerRef(worldbooks); // shallowRef：path 变更手动触发响应式
+            return true;
+        } catch (e) {
+            addLog(`⚠️ 移动异常: ${e.message}`, 'warning');
+            return false;
+        }
+    };
+
+    /**
+     * 📦 S4：把存量**虚拟分组**（wbCategoryMap）一次性物理化，随后清空映射表。
+     * 入口：🗂️ 世界书自动分组窗口「📋 收纳规则」页底部（迁移助手）。
+     * @param {{skipConfirm?:boolean}} [opts] `skipConfirm=true` 仅 dev 端到端验收使用（不弹窗）
+     */
+    const migrateVirtualGroupsToFolders = async (opts = {}) => {
+        const quiet = !!(opts && opts.skipConfirm); // ⚠️ 仅 dev 端到端验收使用；产品路径永远走确认框
+        const entries = Object.entries(wbCategoryMap.value || {})
+            .filter(([, v]) => v && String(v).trim() && String(v).trim() !== WB_CAT_DEFAULT);
+        if (!entries.length) {
+            if (!quiet) nativeAlert('没有需要迁移的虚拟分组记录（wbCategoryMap 为空或仅「默认」）。', 'info');
+            else console.log('[S4·e2e] 迁移：无记录');
+            return { moved: 0, failed: 0 };
+        }
+        if (!quiet) {
+            const ok = await confirmDialog(
+                `将把 ${entries.length} 条虚拟分组记录**物理化**：\n`
+                + `对应世界书会被移动到同名子文件夹（资源管理器可见），完成后清空虚拟映射表。\n\n`
+                + `仅涉及文件位置移动，不改任何世界书内容。是否继续？`
+            );
+            if (!ok) return { moved: 0, failed: 0 };
+        }
+        let moved = 0;
+        let failed = 0;
+        const byKey = new Map();
+        for (const wb of worldbooks.value) {
+            if (wb && wb.path) byKey.set(wb.path, wb);
+            if (wb && wb.name && !byKey.has(wb.name)) byKey.set(wb.name, wb);
+        }
+        for (const [key, group] of entries) {
+            const wb = byKey.get(key);
+            if (!wb) continue; // 书已不在（被删/改名）→ 跳过，清映射时一并消失
+            const okMove = await moveWbToFolder(wb, String(group).trim());
+            if (okMove) moved++; else failed++;
+        }
+        // 清空映射表（含失败项：物理状态即真相；失败项会自然回落「默认」，不会丢书）
+        wbCategoryMap.value = {};
+        saveWbCategoriesMap();
+        addLog(`📦 虚拟分组迁移：移动 ${moved} 本${failed ? `，失败 ${failed} 本` : ''}（映射表已清空）`, failed ? 'warning' : 'success');
+        if (quiet) console.log('[S4·e2e] 虚拟分组迁移完成', JSON.stringify({ moved, failed }));
+        else nativeAlert(`📦 虚拟分组已物理化：成功移动 ${moved} 本${failed ? `，${failed} 本失败（保持原位）` : ''}。`, failed ? 'warning' : 'info');
+        return { moved, failed };
     };
 
     // 1. 自动提取所有分组（Set 去重；'默认' 始终保留；无书的分类自动消失）
@@ -974,6 +1142,11 @@ export function useWorldbooks({
             if (next.length) wbTagMap.value[key] = next;
             else delete wbTagMap.value[key];      // 空数组不留残key（防配置膨胀）
         }
+        // 📌 S1（2026-09-25）：`wb.tags` 在 shallowRef 的世界书对象上**不触发响应式**；
+        //    而 `getWbTags` 内存优先短跏 `wb.tags` 后不再访问 `wbTagMap.value[key]`
+        //    ⇒ 计算属性（列表/筛选/统计）在「删空后再添加」场景会收集不到依赖 → 界面不刷新。
+        //    统一在本写入出口手动触发，一处修全（手动编辑 / 批量 / 打标全部覆盖）。
+        triggerRef(worldbooks);
         return next;
     };
 
@@ -982,6 +1155,26 @@ export function useWorldbooks({
         const next = toggleWbTag(getWbTags(wb), tag);
         setWbTags(wb, next);
         saveWbCategoriesMap();     // 与分组共用同一个持久化出口（配置层）
+        return next;
+    };
+
+    /** 只加不删地添加一个标签（供标签编辑器输入框 / 建议点击使用；已存在则保持原样） */
+    const addWbTagOn = (wb, tag) => {
+        const n = normalizeWbTag(tag);
+        if (!wb || !n) return getWbTags(wb);
+        const next = normalizeWbTags([...getWbTags(wb), n]);
+        setWbTags(wb, next);
+        saveWbCategoriesMap();
+        return next;
+    };
+
+    /** 移除一个标签（供标签编辑器 ✕ 使用） */
+    const removeWbTagOn = (wb, tag) => {
+        const n = normalizeWbTag(tag);
+        if (!wb || !n) return getWbTags(wb);
+        const next = getWbTags(wb).filter(t => t !== n);
+        setWbTags(wb, next);
+        saveWbCategoriesMap();
         return next;
     };
 
@@ -1010,7 +1203,9 @@ export function useWorldbooks({
     // ═══════════════════════════════════════════════════════════════
 
     /**
-     * 📁 重命名分组（级联全组）
+     * 📁 重命名分组（级联全组）—— 🏷️ S4：**物理版**
+     * 物理夹在 → fs:renameGroupFolder 整体改名 + 内存 path 前缀替换 + 键迁移；
+     * 纯虚拟成员（迁移期）→ 仅改映射值。
      * @param {string} oldName 现分组名
      * @returns {Promise<number>} 实际改动的书本数（0 = 未改动）
      */
@@ -1020,8 +1215,12 @@ export function useWorldbooks({
             nativeAlert('不能重命名「全部」（它是视图筛选，不是真实分组）。', 'warning');
             return 0;
         }
+        const physicalMembers = worldbooks.value.filter(w => getWbCategory(w) === from && wbFolderGroupOf(w) === from);
+        const virtualMembers = worldbooks.value.filter(w => getWbCategory(w) === from && wbFolderGroupOf(w) !== from);
         const newRaw = await appPrompt(
-            `📁 重命名分组「${from}」\n\n请输入新名称（组内 ${worldbooks.value.filter(w => getWbCategory(w) === from).length} 本书将一起改名）：`,
+            `📁 重命名分组「${from}」\n\n请输入新名称（组内共 ${physicalMembers.length + virtualMembers.length} 本书一起迁移）：\n`
+            + (physicalMembers.length ? `· ${physicalMembers.length} 本在物理文件夹内（文件夹将整体重命名）\n` : '')
+            + (virtualMembers.length ? `· ${virtualMembers.length} 本为虚拟分组记录（仅改映射）` : ''),
             from
         );
         if (newRaw === null) return 0;
@@ -1029,14 +1228,38 @@ export function useWorldbooks({
         if (!v.ok) { nativeAlert(`❌ ${v.reason}`, 'error'); return 0; }
         const to = v.name;
         if (to === from) return 0;
-
+        const root = (lastWorldbookDirPath && lastWorldbookDirPath.value) || '';
         let n = 0;
-        for (const wb of worldbooks.value) {
-            if (getWbCategory(wb) !== from) continue;
-            wb.category = to;
+        // ① 物理文件夹整体重命名（一次 IPC）→ 内存逐本 path 前缀替换 + 键迁移
+        if (physicalMembers.length && root && window.electronAPI && typeof window.electronAPI.renameGroupFolder === 'function') {
+            const res = await window.electronAPI.renameGroupFolder({ libraryPath: root, oldName: from, newName: to });
+            if (res && res.success) {
+                for (const wb of physicalMembers) {
+                    const oldPath = wb.path;
+                    const sep = oldPath.includes('\\') ? '\\' : '/';
+                    const rootS = root.replace(/[\\/]/g, sep);
+                    const prefixLen = (rootS + sep + from).length;
+                    const newPath = rootS + sep + to + oldPath.slice(prefixLen);
+                    wb.path = newPath;
+                    migrateWbPathKeys(oldPath, newPath);
+                    n++;
+                }
+                triggerRef(worldbooks);
+            } else {
+                addLog(`⚠️ 分组文件夹重命名失败: ${(res && res.error) || '未知错误'}`, 'warning');
+                nativeAlert(`物理文件夹重命名失败: ${(res && res.error) || '未知错误'}`, 'error');
+                return 0;
+            }
+        }
+        // ② 纯虚拟成员（迁移期）：改映射值
+        for (const wb of virtualMembers) {
             const key = wb.path || wb.name || '';
             if (key) wbCategoryMap.value[key] = to;
             n++;
+        }
+        // ③ 同步映射表中的陈旧值（防残留）
+        for (const [k, val] of Object.entries(wbCategoryMap.value)) {
+            if (val === from) wbCategoryMap.value[k] = to;
         }
         saveWbCategoriesMap();
         if (currentWbCategory.value === from) currentWbCategory.value = to;
@@ -1045,7 +1268,7 @@ export function useWorldbooks({
     };
 
     /**
-     * 🗑️ 删除分组（组内全部回落「默认」）
+     * 🗑️ 解散分组—— 🏷️ S4：**物理版**（组内全部移回库根 + 删空夹）
      * ⚠️ **只解散分组，不删书** —— 必须让用户明确知道（二次确认文案写清）。
      * @param {string} name 分组名
      * @returns {Promise<number>} 回落的书本数
@@ -1058,45 +1281,58 @@ export function useWorldbooks({
         }
         const members = worldbooks.value.filter(w => getWbCategory(w) === target);
         const ok = await confirmDialog(
-            `确定解散分组「${target}」吗？\n\n组内 ${members.length} 本世界书会移回「${WB_CAT_DEFAULT}」，`
+            `确定解散分组「${target}」吗？\n\n组内 ${members.length} 本世界书会移回库根（不再受该分组筛选），`
             + `**不会删除任何世界书**。`
         );
         if (!ok) return 0;
 
+        let n = 0;
+        const root = (lastWorldbookDirPath && lastWorldbookDirPath.value) || '';
         for (const wb of members) {
-            wb.category = WB_CAT_DEFAULT;
-            const key = wb.path || wb.name || '';
-            if (key) delete wbCategoryMap.value[key];
+            const folder = wbFolderGroupOf(wb);
+            if (folder === target) {
+                const okMove = await moveWbToFolder(wb, ''); // 物理移回库根
+                if (okMove) n++;
+            } else {
+                // 纯虚拟成员：删映射即可
+                const key = wb.path || wb.name || '';
+                if (key && wbCategoryMap.value[key]) delete wbCategoryMap.value[key];
+                n++;
+            }
+        }
+        // 清理映射中该组的全部残留
+        for (const [k, val] of Object.entries(wbCategoryMap.value)) {
+            if (val === target) delete wbCategoryMap.value[k];
+        }
+        // 删空文件夹（非空会被主进程拒绝，不影响书籍安全）
+        if (root && window.electronAPI && typeof window.electronAPI.deleteEmptyGroupFolder === 'function') {
+            try { await window.electronAPI.deleteEmptyGroupFolder({ libraryPath: root, groupName: target }); } catch (e) { /* 忽略 */ }
         }
         saveWbCategoriesMap();
         if (currentWbCategory.value === target) currentWbCategory.value = WB_CAT_ALL;
-        addLog(`🗑️ 分组「${target}」已解散（${members.length} 本移回「${WB_CAT_DEFAULT}」）`, 'warning');
+        addLog(`🗑️ 分组「${target}」已解散（${members.length} 本移回库根）`, 'warning');
         return members.length;
     };
 
-    // 3. 修改世界书分组（自建弹窗替代 Electron 不支持的 prompt）
+    // 3. 修改世界书分组（自建弹窗替代 Electron 不支持的 prompt）—— 🏷️ S4：**物理移动**
     const changeWbCategory = async (wb) => {
         if (!wb) return;
         const displayName = wbDisplayName(wb) || '未命名世界书';
         const currentCat = getWbCategory(wb);
         const newCat = await appPrompt(
-            `📁 将《${displayName}》移动到新分组\n\n请输入目标分组名称（当前：${currentCat}）：\n提示：输入全新的名字将自动创建新分组。`,
-            currentCat
+            `📁 将《${displayName}》移动到分组（**物理移动文件**）\n\n请输入目标分组名称（当前：${currentCat}）：\n提示：输入全新名字将自动创建同名文件夹；输入「默认」移回库根。`,
+            currentCat === WB_CAT_DEFAULT ? '' : currentCat
         );
-        if (newCat !== null) {
-            // 🛡️ A2：碰撞防护（「全部」是视图哨兵，用它当分组名会让该组筛选**静默失效**）
-            const v = validateWbCategoryName(newCat, { existing: wbCategories.value, self: currentCat });
-            if (!v.ok) { nativeAlert(`❌ ${v.reason}`, 'error'); return; }
-            const finalCat = v.name;
-            wb.category = finalCat;
-            const key = wb.path || wb.name || '';
-            if (key) {
-                wbCategoryMap.value[key] = finalCat;
-                saveWbCategoriesMap();
-            }
-            addLog(`📁 已将《${displayName}》移动到分组: ${finalCat}`, 'info');
+        if (newCat === null) return;
+        // 移动校验：允许移入已存在的分组（与重命名不同——目标已存在正是「移进去」）
+        const name0 = normalizeWbCategoryName(newCat);
+        if (!name0) { nativeAlert('分组名不能为空。', 'warning'); return; }
+        if (name0 === WB_CAT_ALL) { nativeAlert('「全部」是本应用保留的视图名称，不能用作分组名。', 'warning'); return; }
+        const okMove = await moveWbToFolder(wb, name0);
+        if (okMove) {
+            addLog(`📁 已将《${displayName}》移动到分组: ${name0 === WB_CAT_DEFAULT ? '默认（库根）' : name0}`, 'info');
             // 若当前筛选的分组已被移空，自动回落"全部"避免空列表困惑
-            if (currentWbCategory.value !== WB_CAT_ALL && currentWbCategory.value !== finalCat) {
+            if (currentWbCategory.value !== WB_CAT_ALL && currentWbCategory.value !== name0) {
                 const stillHas = worldbooks.value.some(w => getWbCategory(w) === currentWbCategory.value);
                 if (!stillHas) currentWbCategory.value = WB_CAT_ALL;
             }
@@ -1136,8 +1372,10 @@ export function useWorldbooks({
         openWbContextMenu, closeWbContextMenu, openWbInFolder,
         wbCategories, changeWbCategory, filteredWorldbooks,
         // 🏷️ A2（2026-09-24）：世界书标签 + 分组生命周期（重命名 / 解散）
-        getWbTags, setWbTags, toggleWbTagOn, addWbTagsBatch, wbAllTags,
+        getWbTags, setWbTags, toggleWbTagOn, addWbTagOn, removeWbTagOn, addWbTagsBatch, wbAllTags,
         renameWbGroup, deleteWbGroup,
+        // 📁 S4（2026-09-25）：物理分组（Q6 甲）——移动原语 + 物理分组推导 + 虚拟分组迁移助手
+        getWbCategory, moveWbToFolder, wbFolderGroupOf, sanitizeWbFolderName, migrateVirtualGroupsToFolders,
         // 📊🔍 查重/版本对比的扫描进度（不再用于浏览库）
         wbScanProgress, isWbScanning, wbScanPercent, rescanWorldbooks,
         // ⚡ 秒开阶段 2：元数据后台补齐状态

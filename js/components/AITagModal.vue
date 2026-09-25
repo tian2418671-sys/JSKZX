@@ -1,8 +1,8 @@
 <!--
   AITagModal AI 智能批量打标弹窗（子组件）
-  ⚠️ 复杂交互组件：候选池/规则/预设/API 设置全部由父级状态驱动，本组件 emits 回传操作
-     注：systemPromptPresets 为响应式数组 props，name/content/expanded 直接编辑嵌套属性（Vue3 允许），
-         每次输入后 emit 'save-system-prompts' 让父级持久化
+  ⚠️ 复杂交互组件：候选池/规则/提示词链路/API 设置全部由父级状态驱动，本组件 emits 回传操作
+     注：llmRolePrompts 为响应式对象 prop（{system,user,prefill}），直接编辑嵌套属性（Vue3 允许），
+         每次输入后 emit 'save-role-prompts' 让父级持久化
 -->
 <template>
     <transition name="fade">
@@ -19,7 +19,12 @@
             <div class="bg-white rounded-xl shadow-2xl w-full max-w-5xl overflow-hidden flex flex-col max-h-[92vh]">
 
                 <div class="px-5 py-4 bg-gray-900 text-white border-b border-gray-800 flex justify-between items-center shrink-0">
-                    <h3 class="font-bold text-sm flex items-center gap-2">🤖 AI 智能批量打标 (已选 {{ selectedCount }} 张)</h3>
+                    <h3 class="font-bold text-sm flex items-center gap-2">
+                        🤖 AI 智能批量打标
+                        <span v-if="isWbMode" class="px-1.5 py-0.5 rounded bg-amber-500/25 border border-amber-400/50 text-amber-200 text-[10px]">🌍 世界书模式</span>
+                        <span v-if="isWbMode" class="font-normal text-gray-300">范围：{{ wbTagRange === 'filtered' ? `筛选结果 ${wbTagRangeInfo.filteredCount} 本` : `当前书 · ${wbTagRangeInfo.activeName || '未选择'}` }}</span>
+                        <span v-else>(已选 {{ selectedCount }} 张)</span>
+                    </h3>
                     <button @click="$emit('close')" :disabled="isAITagging" class="text-gray-400 hover:text-white disabled:opacity-50">✕ 关闭</button>
                 </div>
 
@@ -59,6 +64,23 @@
 
                     <!-- 🏷️ P1：执行管线（这里的开关 = 本次任务；全局默认在「设置 → 🏷️ 打标与分类」，两处共用同一状态） -->
                     <div v-show="activeSection === 'pipeline'" class="bg-indigo-50 p-3 rounded-lg border border-indigo-200">
+                        <!-- 🌍 S3：世界书模式范围选择（统一入口按视图分发的「操作对象」由此确定） -->
+                        <div v-if="isWbMode" class="mb-2.5 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-2 text-[11px] flex flex-col gap-1.5">
+                            <span class="font-bold text-amber-900">🌍 世界书打标范围</span>
+                            <div class="flex items-center gap-4 flex-wrap">
+                                <label class="flex items-center gap-1.5" :class="wbTagRangeInfo.hasActive ? 'cursor-pointer' : 'opacity-50 cursor-not-allowed'">
+                                    <input type="radio" value="current" :checked="wbTagRange === 'current'" :disabled="isAITagging || !wbTagRangeInfo.hasActive"
+                                           @change="$emit('update:wbTagRange', 'current')" class="accent-amber-600">
+                                    <span class="text-gray-800">当前书{{ wbTagRangeInfo.activeName ? '（' + wbTagRangeInfo.activeName + '）' : '' }}</span>
+                                </label>
+                                <label class="flex items-center gap-1.5" :class="wbTagRangeInfo.filteredCount ? 'cursor-pointer' : 'opacity-50 cursor-not-allowed'">
+                                    <input type="radio" value="filtered" :checked="wbTagRange === 'filtered'" :disabled="isAITagging || !wbTagRangeInfo.filteredCount"
+                                           @change="$emit('update:wbTagRange', 'filtered')" class="accent-amber-600">
+                                    <span class="text-gray-800">当前筛选结果（{{ wbTagRangeInfo.filteredCount }} 本）</span>
+                                </label>
+                            </div>
+                            <span class="text-[9px] text-amber-700/80">标签写入配置层（不改写世界书文件）；超长材料自动分段（单本上限 40 段，超出均匀采样）</span>
+                        </div>
                         <div class="flex items-center justify-between mb-2 gap-2">
                             <label class="block font-bold text-indigo-900">
                                 ⚙️ 执行管线
@@ -99,19 +121,54 @@
                                 <span class="text-indigo-700/70 ml-2">（①关闭后「导入时自动打标」同样不生效）</span>
                             </template>
                         </div>
-                        <!-- 🧠 R1+R2：仅 LLM 层启动时，分角色结构 + 结构化截取生效（在此明确告知 + 直达编辑入口） -->
+                        <!-- 📦 提量：每请求打包卡数（与「📝 系统提示词 → 👤 User」框下同步；🌍 世界书模式不适用——单本单发） -->
+                        <div v-if="!isWbMode" class="mt-2 flex items-center gap-2 text-[11px]">
+                            <span class="text-gray-600 shrink-0">📦 每请求打包卡数</span>
+                            <input type="range" min="1" max="10" :value="tagPackSize" :disabled="isAITagging"
+                                   @input="$emit('update:tagPackSize', parseInt($event.target.value))" class="w-28 accent-indigo-600">
+                            <span class="font-bold text-indigo-700">{{ tagPackSize }} 张/请求</span>
+                            <span class="text-[9px] text-gray-400">默认 1 = 与旧行为一致；建议 3~5；只打包短卡，失败自动拆单</span>
+                        </div>
+                        <!-- ⏭️ 增量模式：跳过已有标签的卡（Q7） -->
+                        <label class="mt-1.5 flex items-center gap-2 text-[11px] cursor-pointer">
+                            <input type="checkbox" :checked="tagSkipTagged" :disabled="isAITagging"
+                                   @change="$emit('update:tagSkipTagged', $event.target.checked)" class="w-3.5 h-3.5 accent-indigo-600">
+                            <span class="text-gray-700">⏭️ 跳过已打标卡</span>
+                            <span class="text-[9px] text-gray-400">增量模式：已有标签的卡直接跳过（省时省费）</span>
+                        </label>
+                        <!-- 📌 断点续跑入口（有未完成任务时才出现；仅服务角色卡） -->
+                        <div v-if="resumePending > 0 && !isWbMode" class="mt-2 flex items-center gap-2 text-[11px] bg-amber-50 border border-amber-200 rounded px-2 py-1.5">
+                            <span class="text-amber-800">📌 上次任务未完成：还剩 <b>{{ resumePending }}</b> 张</span>
+                            <button @click="$emit('resume-tagging')" :disabled="isAITagging"
+                                    class="ml-auto shrink-0 px-2.5 py-1 bg-amber-600 hover:bg-amber-500 disabled:bg-gray-300 text-white rounded text-[11px] font-medium transition">▶ 继续未完成</button>
+                            <span class="text-[9px] text-amber-600">自动跳过已完成；卡被删除 / 移动的会提示</span>
+                        </div>
+                        <!-- 仅 LLM 层启动时，分角色链路 + 结构化截取生效（在此明确告知 + 直达编辑入口） -->
                         <div v-if="llmOnlyActive" class="mt-1.5 text-[10px] leading-relaxed bg-emerald-50 border border-emerald-200 rounded px-2 py-1 text-emerald-800 flex items-center gap-1.5 flex-wrap">
-                            <span>🧠 <b>仅 LLM 层启动</b> → 已启用「提示词分角色（System / Assistant / User / 预填充）+ <code>&lt;tags&gt;</code> 结构化截取」</span>
+                            <span>🧠 <b>仅 LLM 层启动</b> → 已启用「分角色链路（System → User）+ <code>&lt;tags&gt;</code> 结构化截取」</span>
                             <span class="px-1.5 rounded border"
-                                  :class="activeCotPrompt.trim() ? 'bg-emerald-100 border-emerald-300' : 'bg-gray-100 border-gray-300 text-gray-600'">
-                                {{ activeCotPrompt.trim() ? '🔗 思维链：' + ((activePromptPreset && activePromptPreset.cotMode === 'custom') ? '自定义' : '默认版') : '🔗 思维链：关闭' }}
+                                  :class="trimmedPrefill ? 'bg-emerald-100 border-emerald-300' : 'bg-gray-100 border-gray-300 text-gray-600'">
+                                {{ trimmedPrefill ? '⚡ 预填充：' + trimmedPrefill : '⚡ 预填充：关闭' }}
                             </span>
-                            <button @click="activeSection = 'prompts'" class="ml-auto shrink-0 underline hover:text-emerald-950">去分段编辑 →</button>
+                            <button @click="activeSection = 'prompts'" class="ml-auto shrink-0 underline hover:text-emerald-950">去编辑链路 →</button>
                         </div>
                     </div>
 
                     <!-- 🧩🏷️ 1. 候选标签池 -->
                     <div v-show="activeSection === 'candidates'" class="bg-gray-50 p-3 rounded-lg border border-gray-200">
+                        <!-- 🏷️ S2（Q1 真值表）：候选池开关 —— 仅「仅 LLM」/「三层全开」两种模式下可切换；关 = 提示词不带池 -->
+                        <div class="mb-2.5 pb-2.5 border-b border-gray-200">
+                            <label class="flex items-center gap-2"
+                                   :class="candidatePoolSwitchable ? 'cursor-pointer' : 'cursor-not-allowed'"
+                                   :title="candidatePoolSwitchReason">
+                                <input type="checkbox" :checked="candidatePoolEnabled" :disabled="isAITagging || !candidatePoolSwitchable"
+                                       @change="$emit('update:candidatePoolEnabled', $event.target.checked)"
+                                       class="w-4 h-4 text-blue-600 bg-white border-gray-300 rounded focus:ring-blue-600 focus:ring-2">
+                                <span class="font-bold text-gray-700" :class="!candidatePoolSwitchable && 'opacity-60'">启用候选标签池</span>
+                                <span class="text-[10px] text-gray-500">{{ candidatePoolEnabled ? '（提示词注入池）' : '（已关闭：LLM 完全自由打标）' }}</span>
+                            </label>
+                            <p v-if="!candidatePoolSwitchable" class="text-[10px] text-amber-600 mt-1 ml-6">⚠️ {{ candidatePoolSwitchReason }}</p>
+                        </div>
                         <label class="block font-bold text-gray-700 mb-2">🏷️ 1. 候选标签池 <span class="text-[10px] font-normal text-gray-500">(AI 将优先从中挑选)</span>:</label>
 
                         <div class="flex flex-wrap gap-2 mb-2 p-2 border border-gray-200 bg-white rounded min-h-[40px]">
@@ -219,12 +276,15 @@
                     <div v-show="activeSection === 'extract'" class="p-3 bg-gray-50 border border-gray-200 rounded-lg space-y-3">
                         <h4 class="text-sm font-bold text-gray-700">🤖 AI 提取设置</h4>
 
-                        <label class="flex items-center gap-2 cursor-pointer">
-                            <input type="checkbox" :checked="enableAIExtraction" @change="$emit('update:enableAIExtraction', $event.target.checked)" :disabled="isAITagging"
+                        <label class="flex items-center gap-2 cursor-pointer" :class="!candidatePoolEnabled && 'opacity-60'">
+                            <input type="checkbox" :checked="enableAIExtraction" @change="$emit('update:enableAIExtraction', $event.target.checked)" :disabled="isAITagging || !candidatePoolEnabled"
                                    class="w-4 h-4 text-blue-600 bg-white border-gray-300 rounded focus:ring-blue-600 focus:ring-2">
                             <span class="text-sm text-gray-700">允许 AI 自由提取标签</span>
                         </label>
-                        <p class="text-[10px] text-gray-500 ml-6 -mt-1">关闭后，AI 将<strong class="text-rose-500">严格只能</strong>从候选池中为你选择标签，不会自行创造新标签。</p>
+                        <p class="text-[10px] text-gray-500 ml-6 -mt-1">
+                            <template v-if="!candidatePoolEnabled">候选池已关闭（LLM 完全自由打标）—— 本开关仅在候选池开启时生效。</template>
+                            <template v-else>关闭后，AI 将<strong class="text-rose-500">严格只能</strong>从候选池中为你选择标签，不会自行创造新标签。</template>
+                        </p>
 
                         <div class="flex flex-col gap-1">
                             <label class="text-xs text-gray-600">附加自定义提示词 (可选)</label>
@@ -234,151 +294,104 @@
                         </div>
                     </div>
 
-                    <!-- 🚨 强制破限（独立分区：与「AI 提取设置」拆开，不再嵌在它内部） -->
-                    <div v-show="activeSection === 'jailbreak'" class="border border-rose-300 bg-rose-50 rounded-lg p-3">
-                        <div class="flex items-center justify-between mb-2">
-                            <label class="flex items-center gap-2 cursor-pointer">
-                                <input type="checkbox" :checked="useJailbreak" @change="$emit('update:useJailbreak', $event.target.checked)" :disabled="isAITagging"
-                                       class="w-4 h-4 text-rose-600 bg-white border-gray-300 rounded focus:ring-rose-600 focus:ring-2">
-                                <span class="text-sm font-bold text-rose-600 flex items-center gap-1">⚠️ 启用强制破限 (Jailbreak)</span>
-                            </label>
-                            <span class="text-[10px] text-gray-500">用于对抗模型拒答及道德审查</span>
-                        </div>
-                        <transition name="fade">
-                            <div v-show="useJailbreak" class="mt-2 space-y-2">
-                                <!-- 📚 预设快速套用：选中即覆盖当前破限词 -->
-                                <div class="flex items-center gap-2" v-if="jailbreakPresets.length > 0">
-                                    <label class="text-[10px] text-rose-500 shrink-0">📚 预设套用:</label>
-                                    <select :value="''" @change="$emit('update:jailbreakPrompt', $event.target.value)" :disabled="isAITagging"
-                                            class="flex-1 h-7 bg-white border border-rose-300 rounded px-1.5 text-xs text-rose-700 focus:outline-none focus:border-rose-500">
-                                        <option value="" disabled>— 选择预设覆盖当前破限词 —</option>
-                                        <option v-for="p in jailbreakPresets" :key="p.id" :value="p.content">{{ p.name }}</option>
+                    <!-- 系统提示词（单套链路：破限 → System → User → 预填充） -->
+                    <div v-show="activeSection === 'prompts'" class="space-y-2">
+                        <label class="font-bold text-gray-700 flex justify-between items-center">
+                            <span>📝 系统级微调全局提示词 (System Prompts):</span>
+                            <span class="text-[10px] text-indigo-500 font-normal bg-indigo-50 px-2 py-0.5 rounded border border-indigo-200">链路从上到下 = 发送给 AI 的顺序</span>
+                        </label>
+
+                        <!-- 🧠 System（内置破限栏 + 预设套用 + 主提示词） -->
+                        <div class="bg-white border rounded-lg overflow-hidden" :class="llmOnlyActive ? 'border-indigo-300' : 'border-gray-200'">
+                            <div class="px-3 py-2 bg-indigo-50/70 border-b border-indigo-100 flex items-center justify-between gap-2">
+                                <span class="text-xs font-bold text-indigo-800">🧠 System <span class="font-normal text-indigo-400 text-[10px]">角色设定 / 任务规则 / 打标原则</span></span>
+                                <span class="text-[9px] px-1.5 py-0.5 rounded border"
+                                      :class="llmOnlyActive ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-gray-100 text-gray-500 border-gray-200'"
+                                      :title="llmOnlyActive ? '当前组合 = 只有 LLM 层 → 分角色链路已生效' : '只有 ①规则关 + ②向量关 + ③LLM开 时才生效'">
+                                    {{ llmOnlyActive ? '🟢 分角色链路已生效' : '⚪ 未生效（非「仅 LLM」组合）' }}
+                                </span>
+                            </div>
+
+                            <!-- ⚠️ 破限词栏（置于 System 顶部；发送时仍拼在 system 末尾） -->
+                            <div class="m-2.5 p-2.5 rounded-lg border border-rose-200 bg-rose-50/60 space-y-2">
+                                <div class="flex items-center justify-between gap-2">
+                                    <label class="flex items-center gap-1.5 cursor-pointer">
+                                        <input type="checkbox" :checked="useJailbreak" @change="$emit('update:useJailbreak', $event.target.checked)" :disabled="isAITagging" class="w-3.5 h-3.5 accent-rose-600">
+                                        <span class="text-xs font-bold text-rose-600">⚠️ 启用强制破限 (Jailbreak)</span>
+                                    </label>
+                                    <span class="text-[10px] text-gray-500">对抗模型拒答及道德审查</span>
+                                </div>
+                                <template v-if="useJailbreak">
+                                    <div class="flex items-center gap-2" v-if="jailbreakPresets.length > 0">
+                                        <label class="text-[10px] text-rose-500 shrink-0">📚 预设套用:</label>
+                                        <select :value="jailbreakPresetId(jailbreakPrompt)" @change="onPickJailbreakPreset($event.target.value)" :disabled="isAITagging"
+                                                class="flex-1 h-7 bg-white border border-rose-300 rounded px-1.5 text-xs text-rose-700 focus:outline-none focus:border-rose-500">
+                                            <option v-for="p in jailbreakPresets" :key="p.id" :value="p.id">{{ p.name }}</option>
+                                            <option value="custom">✏️ 自定义（用下方输入框自己的词）</option>
+                                        </select>
+                                    </div>
+                                    <textarea :value="jailbreakPrompt" @input="$emit('update:jailbreakPrompt', $event.target.value)" :disabled="isAITagging" rows="4"
+                                              class="w-full bg-white border border-rose-300 rounded p-2 text-[11px] text-rose-800 focus:border-rose-500 focus:outline-none resize-y shadow-sm placeholder-rose-400 custom-scrollbar"
+                                              placeholder="输入你的强力破限咒语，或从上方套用预设…"></textarea>
+                                </template>
+                            </div>
+
+                            <div class="mx-2.5 border-t border-dashed border-gray-200"></div>
+
+                            <div class="p-2.5 space-y-1.5">
+                                <div class="flex items-center gap-2">
+                                    <label class="text-[10px] text-indigo-500 shrink-0">📚 预设套用:</label>
+                                    <select :value="systemVariantId" @change="onPickSystemVariant($event.target.value)" :disabled="isAITagging"
+                                            class="flex-1 h-7 bg-white border border-indigo-300 rounded px-1.5 text-xs text-indigo-700 focus:outline-none focus:border-indigo-500">
+                                        <option v-for="v in systemVariants" :key="v.id" :value="v.id">{{ v.name }}</option>
+                                        <option value="custom">✏️ 自定义（用下方输入框自己的内容）</option>
                                     </select>
                                 </div>
-                                <textarea :value="jailbreakPrompt" @input="$emit('update:jailbreakPrompt', $event.target.value)" :disabled="isAITagging" rows="6"
-                                          class="w-full bg-white/80 border border-rose-300 rounded p-2 text-xs text-rose-800 focus:border-rose-500 focus:outline-none resize-y shadow-sm placeholder-rose-400 custom-scrollbar"
-                                          placeholder="输入你的强力破限咒语 (Jailbreak Prompt)..."></textarea>
-                                <p class="text-[10px] text-rose-500/80 mt-1">💡 破限词自动拼接在系统提示词最末尾（注意力权重最高），输入一次永久保存，重启不丢。</p>
+                                <textarea :value="rolePromptValue('system')" @input="setRolePrompt('system', $event.target.value)" :disabled="isAITagging" rows="8"
+                                          class="w-full bg-white border border-gray-300 rounded p-2 text-gray-700 font-mono text-[11px] leading-relaxed focus:border-indigo-500 focus:outline-none resize-y shadow-sm custom-scrollbar"
+                                          placeholder="给 AI 的角色设定与打标规则…"></textarea>
+                                <p class="text-[9px] text-gray-500">💡 选预设 = 一键填入；「✏️ 自定义」= 用下方自己写的内容。开启破限时，破限词自动拼在本段最末尾（注意力权重最高）。</p>
                             </div>
-                        </transition>
-                    </div>
+                        </div>
 
-                    <!-- 📝 系统提示词预设库 -->
-                    <div v-show="activeSection === 'prompts'">
-                        <label class="font-bold text-gray-700 mb-2 flex justify-between items-center">
-                            <span>📝 系统级微调全局提示词 (System Prompts):</span>
-                            <span class="text-[10px] text-amber-600 font-normal bg-amber-50 px-2 py-0.5 rounded border border-amber-200">勾选即生效 · 建议保留 JSON 输出指令</span>
-                        </label>
-                        <div class="bg-gray-50 border border-gray-200 rounded-lg p-3.5 shadow-inner">
-                            <div class="flex items-center justify-between mb-2.5 pb-2 border-b border-gray-200">
-                                <span class="font-bold text-amber-600 flex items-center gap-1.5">📝 预设库 ({{ systemPromptPresets.length }} 条)</span>
-                                <button @click="$emit('add-system-prompt-preset')" :disabled="isAITagging" class="px-2 py-1 bg-indigo-600 hover:bg-indigo-500 disabled:bg-gray-300 disabled:text-gray-500 text-white rounded text-[11px] font-medium transition flex items-center gap-1">➕ 新增提示词</button>
+                        <div class="text-center text-gray-300 text-[11px] leading-none">↓</div>
+
+                        <!-- 👤 User（留空 = 程序自动：卡片内容 + 候选池 + 输出要求） -->
+                        <div class="bg-white border border-gray-200 rounded-lg overflow-hidden">
+                            <div class="px-3 py-2 bg-gray-50 border-b border-gray-100 flex items-center justify-between gap-2">
+                                <span class="text-xs font-bold text-gray-700">👤 User <span class="font-normal text-gray-400 text-[10px]">本次任务指令</span></span>
+                                <span class="text-[9px] text-gray-400">留空 = 程序自动</span>
                             </div>
-                            <div class="space-y-2.5 max-h-60 overflow-y-auto custom-scrollbar pr-1">
-                                <div v-for="(preset, index) in systemPromptPresets" :key="preset.id"
-                                     class="bg-white border rounded-lg p-2.5 transition"
-                                     :class="activeSystemPromptId === preset.id ? 'border-indigo-500 bg-indigo-50' : 'border-gray-200'">
-                                    <div class="flex items-center justify-between gap-2">
-                                        <div class="flex items-center gap-2 flex-1">
-                                            <input type="radio" :checked="activeSystemPromptId === preset.id" @change="$emit('update:activeSystemPromptId', preset.id)" :disabled="isAITagging" class="accent-indigo-600 cursor-pointer shrink-0" title="设为当前生效">
-                                            <input v-model="preset.name" @input="$emit('save-system-prompts')" :disabled="isAITagging" type="text" class="bg-white border border-gray-300 rounded px-2 py-0.5 text-gray-800 font-medium text-xs w-full focus:border-indigo-500 focus:outline-none">
-                                        </div>
-                                        <div class="flex items-center gap-1.5 shrink-0">
-                                            <button @click="preset.expanded = !preset.expanded" :disabled="isAITagging" class="text-gray-500 hover:text-gray-800 px-2 py-0.5 rounded hover:bg-gray-100 transition">{{ preset.expanded ? '🔼 折叠' : '🔽 展开' }}</button>
-                                            <button @click="$emit('delete-system-prompt-preset', index)" :disabled="isAITagging" class="text-gray-400 hover:text-rose-500 px-1.5 py-0.5 rounded hover:bg-gray-100 transition" title="删除">🗑️</button>
-                                        </div>
-                                    </div>
-                                    <div v-if="preset.expanded" class="mt-2.5 pt-2 border-t border-gray-200">
-                                        <!-- 🧠 R1+R2 分角色结构：仅「只有 LLM 层启动」时生效 -->
-                                        <div class="flex items-center justify-between mb-1.5">
-                                            <label class="text-[10px] text-gray-500">提示词分角色设定（System / Assistant / User / 预填充）：</label>
-                                            <span class="text-[9px] px-1.5 py-0.5 rounded border"
-                                                  :class="llmOnlyActive ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-gray-100 text-gray-500 border-gray-200'"
-                                                  :title="llmOnlyActive ? '当前组合 = 只有 LLM 层 → 分角色结构已生效' : '只有 ①规则关 + ②向量关 + ③LLM开 时才生效'">
-                                                {{ llmOnlyActive ? '🟢 分角色结构已生效' : '⚪ 未生效（非「仅 LLM」组合）' }}
-                                            </span>
-                                        </div>
-                                        <div class="flex items-center gap-1 mb-1.5">
-                                            <button v-for="t in [{k:'system',i:'🧠',n:'System'},{k:'assistant',i:'💬',n:'Assistant'},{k:'user',i:'👤',n:'User'},{k:'prefill',i:'⚡',n:'预填充'},{k:'cot',i:'🔗',n:'思维链'}]" :key="t.k"
-                                                    @click="presetEditorTab = t.k" :disabled="isAITagging"
-                                                    class="px-2 py-0.5 rounded text-[10px] font-medium border transition flex items-center gap-1"
-                                                    :class="presetEditorTab === t.k ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-600 border-gray-300 hover:border-indigo-400'">
-                                                <span>{{ t.i }}</span><span>{{ t.n }}</span>
-                                                <span v-if="t.k === 'cot' ? presetCotText(preset).trim() : presetField(preset, t.k).trim()" class="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
-                                            </button>
-                                            <span class="ml-auto text-[9px] text-gray-400">{{ presetHasRoles(preset) ? '走预设三段' : '副字段留空 → 走程序默认' }}</span>
-                                        </div>
-
-                                        <!-- 🧠 System：角色与规则（主提示词） -->
-                                        <div v-show="presetEditorTab === 'system'">
-                                            <textarea :value="presetField(preset, 'system')" @input="setPresetField(preset, 'system', $event.target.value)" :disabled="isAITagging" rows="5"
-                                                      class="w-full bg-white border border-gray-300 rounded p-2 text-gray-700 font-mono text-xs focus:border-indigo-500 focus:outline-none resize-y shadow-sm"
-                                                      placeholder="给 AI 的角色设定与打标规则（如：你是资深角色卡标签分析助手…）"></textarea>
-                                            <p class="text-[9px] text-gray-500 mt-0.5">🧠 <b>System</b>：角色 + 任务规则。开启破限时，破限词会自动追加在本段<b>最末尾</b>（注意力权重最高）。</p>
-                                        </div>
-                                        <!-- 💬 Assistant：示例推理 / 格式示范（few-shot） -->
-                                        <div v-show="presetEditorTab === 'assistant'">
-                                            <textarea :value="presetField(preset, 'assistant')" @input="setPresetField(preset, 'assistant', $event.target.value)" :disabled="isAITagging" rows="5"
-                                                      class="w-full bg-white border border-gray-300 rounded p-2 text-gray-700 font-mono text-xs focus:border-indigo-500 focus:outline-none resize-y shadow-sm"
-                                                      placeholder="（可选）示例输出，示范 AI 该怎么思考与输出，如：&#10;<tags>[&quot;奇幻&quot;,&quot;骑士&quot;]</tags>"></textarea>
-                                            <p class="text-[9px] text-gray-500 mt-0.5">💬 <b>Assistant</b>：few-shot 示范（示例推理 / 期望输出格式）。会作为「助手已说过的内容」插在对话中，引导模型模仿。</p>                                        </div>
-                                        <!-- 👤 User：本次任务指令（留空则用程序自动生成的任务） -->
-                                        <div v-show="presetEditorTab === 'user'">
-                                            <textarea :value="presetField(preset, 'user')" @input="setPresetField(preset, 'user', $event.target.value)" :disabled="isAITagging" rows="5"
-                                                      class="w-full bg-white border border-gray-300 rounded p-2 text-gray-700 font-mono text-xs focus:border-indigo-500 focus:outline-none resize-y shadow-sm"
-                                                      placeholder="（留空 = 用程序自动生成的卡片任务指令；填写则覆盖）"></textarea>
-                                            <p class="text-[9px] text-gray-500 mt-0.5">👤 <b>User</b>：本次任务指令。留空时使用程序自动拼装的「当前卡片内容 + 输出要求」，一般无需填写。</p>
-                                        </div>
-                                        <!-- ⚡ 预填充：强制模型从指定开头续写 -->
-                                        <div v-show="presetEditorTab === 'prefill'">
-                                            <textarea :value="presetField(preset, 'prefill')" @input="setPresetField(preset, 'prefill', $event.target.value)" :disabled="isAITagging" rows="2"
-                                                      class="w-full bg-white border border-gray-300 rounded p-2 text-gray-700 font-mono text-xs focus:border-indigo-500 focus:outline-none resize-y shadow-sm"
-                                                      placeholder="默认：<tags>["></textarea>
-                                            <p class="text-[9px] text-gray-500 mt-0.5">⚡ <b>预填充</b>：强制模型从这个开头往下写（默认 <code class="text-indigo-600">&lt;tags&gt;[</code>），能大幅提高「结构化输出」遵守率。留空则用默认值。</p>
-                                        </div>
-
-                                        <!-- 🧠 思维链（CoT）+ 破限：默认版 / 自定义 / 关闭 -->
-                                        <div v-show="presetEditorTab === 'cot'">
-                                            <div class="flex items-center gap-1 mb-1.5 flex-wrap">
-                                                <button v-for="m in [{k:'default',i:'🟢',n:'默认版'},{k:'custom',i:'✏️',n:'自定义'},{k:'off',i:'⚪',n:'关闭'}]" :key="m.k"
-                                                        @click="setCotMode(preset, m.k)" :disabled="isAITagging"
-                                                        class="px-2 py-0.5 rounded text-[10px] font-medium border transition flex items-center gap-1"
-                                                        :class="((preset.cotMode || 'default') === m.k) ? 'bg-emerald-600 text-white border-emerald-600' : 'bg-white text-gray-600 border-gray-300 hover:border-emerald-400'">
-                                                    <span>{{ m.i }}</span><span>{{ m.n }}</span>
-                                                </button>
-                                                <span class="ml-auto text-[9px] text-gray-400">当前将注入 {{ presetCotText(preset).length }} 字</span>
-                                            </div>
-
-                                            <!-- 默认版：只读展示（开箱即用，不需编辑） -->
-                                            <div v-if="(preset.cotMode || 'default') === 'default'">
-                                                <textarea :value="defaultCotPrompt" readonly rows="6"
-                                                          class="w-full bg-emerald-50/60 border border-emerald-200 rounded p-2 text-emerald-900 font-mono text-[10px] focus:outline-none resize-y shadow-inner custom-scrollbar"></textarea>
-                                                <p class="text-[9px] text-gray-500 mt-0.5">🟢 <b>默认版</b>（内置只读）：已融合「思维链引导 + 破限」—— 先让模型在心里过一遍题材/身份/关键词，同时声明这是虚构文本特征归纳、不受内容审查影响。需修改请切到「✏️ 自定义」。</p>
-                                            </div>
-
-                                            <!-- 自定义：可编辑 -->
-                                            <div v-else-if="preset.cotMode === 'custom'">
-                                                <textarea :value="presetField(preset, 'cot')" @input="setPresetField(preset, 'cot', $event.target.value)" :disabled="isAITagging" rows="6"
-                                                          class="w-full bg-white border border-emerald-300 rounded p-2 text-gray-700 font-mono text-[10px] focus:border-emerald-500 focus:outline-none resize-y shadow-sm custom-scrollbar"
-                                                          placeholder="在此写你自己的思维链 / 破限提示词..."></textarea>
-                                                <p class="text-[9px] text-gray-500 mt-0.5">✏️ <b>自定义</b>：留空则自动回退到内置默认版（不会静默失效）。</p>
-                                            </div>
-
-                                            <!-- 关闭 -->
-                                            <div v-else class="text-[10px] text-gray-500 bg-gray-50 border border-gray-200 rounded p-2">
-                                                ⚪ <b>已关闭</b>：不注入思维链段。模型仍会被要求用 <code class="text-indigo-600">&lt;tags&gt;</code> 包裹结果。
-                                            </div>
-
-                                            <p class="text-[9px] text-emerald-700 mt-1.5">📌 该段以 <b>assistant 角色</b>插在 <b>user 之后</b>（Anthropic 协议要求第一条非 system 消息必须是 user，放前面会报错）；被中转站拒绝时会<b>自动逐级降级重试</b>。</p>
-                                        </div>
-
-                                        <p class="text-[9px] text-amber-600 mt-1.5">⚠️ 以上 5 段<b>仅在「①规则关 + ②向量关 + ③LLM 开」</b>（只有 LLM 层启动）时启用；其他组合仍沿用原有单段系统提示词。</p>
-                                    </div>
+                            <div class="p-2.5 space-y-2">
+                                <textarea :value="rolePromptValue('user')" @input="setRolePrompt('user', $event.target.value)" :disabled="isAITagging" rows="3"
+                                          class="w-full bg-white border border-gray-300 rounded p-2 text-gray-700 font-mono text-[11px] focus:border-indigo-500 focus:outline-none resize-y shadow-sm"
+                                          placeholder="（留空 = 程序自动：当前卡片内容 + 候选池 + 输出要求）"></textarea>
+                                <div class="flex items-center gap-2">
+                                    <span class="text-[10px] text-gray-500 shrink-0">📦 每请求打包卡数</span>
+                                    <input type="range" min="1" max="10" :value="tagPackSize" :disabled="isAITagging"
+                                           @input="$emit('update:tagPackSize', parseInt($event.target.value))" class="w-32 accent-indigo-600">
+                                    <span class="text-[11px] font-bold text-indigo-700">{{ tagPackSize }} 张/请求</span>
+                                    <span class="text-[9px] text-gray-400">与「⚙️ 执行管线」页同步</span>
                                 </div>
+                                <p class="text-[9px] text-gray-500">💡 一般无需填写 —— 批量时每张卡自动替换为本卡内容；超长卡自动分段、短卡按「打包数」成组。</p>
                             </div>
-                            <p class="text-[10px] text-gray-500 mt-2">
-                                💡 勾选左侧单选按钮指定当前 AI 打标生效的系统提示词，支持随时折叠管理、自动保存。
-                            </p>
+                        </div>
+
+                        <div class="text-center text-gray-300 text-[11px] leading-none">↓</div>
+
+                        <!-- ⚡ 预填充（高级折叠；留空 = 取消预填充） -->
+                        <div class="bg-white border border-gray-200 rounded-lg overflow-hidden">
+                            <button @click="prefillOpen = !prefillOpen" :disabled="isAITagging" type="button"
+                                    class="w-full px-3 py-2 bg-gray-50 flex items-center justify-between text-left">
+                                <span class="text-xs font-bold text-gray-700">⚡ 预填充 <span class="font-normal text-gray-400 text-[10px]">（高级 · 默认收起）</span></span>
+                                <span class="text-[10px] text-gray-400">{{ trimmedPrefill ? '当前：' + trimmedPrefill : '当前：关闭' }} {{ prefillOpen ? '▴' : '▾' }}</span>
+                            </button>
+                            <div v-show="prefillOpen" class="p-2.5 space-y-1.5">
+                                <input :value="rolePromptValue('prefill')" @input="setRolePrompt('prefill', $event.target.value)" :disabled="isAITagging" type="text"
+                                       class="w-full bg-white border border-gray-300 rounded px-2 py-1 text-gray-700 font-mono text-[11px] focus:border-indigo-500 focus:outline-none"
+                                       placeholder="默认：<tags>[">
+                                <p class="text-[9px] text-gray-500">💡 强制模型从这个开头往下写（默认 <code class="text-indigo-600">&lt;tags&gt;[</code>），大幅提高结构化输出遵守率；留空 = 取消预填充。</p>
+                            </div>
                         </div>
                     </div>
 
@@ -453,8 +466,8 @@
 
 <script>
 import { groupTagsByCategory } from '../utils/tagCategories.js';
-// 🧠 内置默认思维链提示词（只读展示用；与引擎 resolveCotPrompt 的默认值同源，避免两处文案漂移）
-import { DEFAULT_COT_PROMPT } from '../utils/llmPromptRoles.js';
+// 🧠 单套提示词链路：内置 System 预设变体（下拉套用）
+import { SYSTEM_PROMPT_VARIANTS, resolveSystemVariantId } from '../utils/llmPromptRoles.js';
 
 export default {
     name: 'AITagModal',
@@ -469,14 +482,16 @@ export default {
         useJailbreak: { type: Boolean, default: true },
         jailbreakPrompt: { type: String, default: '' },
         jailbreakPresets: { type: Array, default: () => [] },
-        systemPromptPresets: { type: Array, default: () => [] },
-        activeSystemPromptId: { type: String, default: '' },
-        // 🧠 R1+R2（2026-09-24）：是否「只有 LLM 层启动」（决定分角色结构 + 结构化截取是否生效）
+        // 🧠 第二批改造：单套提示词链路（{ system, user, prefill }；由 App.vue 持有）
+        llmRolePrompts: { type: Object, default: () => ({ system: '', user: '', prefill: '' }) },
+        // 📦 每请求打包卡数（1~10；1 = 与旧行为一致）
+        tagPackSize: { type: Number, default: 1 },
+        // 📌 断点续跑账本（null = 无未完成任务）
+        tagResume: { type: Object, default: null },
+        // ⏭️ 增量模式：跳过已打标卡（Q7）
+        tagSkipTagged: { type: Boolean, default: false },
+        // 🧠 是否「只有 LLM 层启动」（决定分角色链路 + 结构化截取是否生效）
         llmOnlyActive: { type: Boolean, default: false },
-        // 当前生效的预设（已归一化：system/assistant/user/prefill/cot；旧 content 自动迁到 system）
-        activePromptPreset: { type: Object, default: null },
-        // 🧠 思维链：当前预设实际会注入的 CoT 提示词（'' = 已关闭）
-        activeCotPrompt: { type: String, default: '' },
         // 🔌 连通性测试
         isTestingConn: { type: Boolean, default: false },
         connTestStatus: { type: String, default: '' },
@@ -499,14 +514,22 @@ export default {
         // 🆕 P1：三层漏斗开关 + 执行计划 + 规则表统计（均来自 App.vue；本组件只展示 + emit）
         tagFunnel: { type: Object, default: () => ({ rule: true, vector: false, llm: true }) },
         funnelPlan: { type: Object, default: () => ({ rule: true, vector: false, llm: true, skip: {} }) },
-        rulesStats: { type: Object, default: () => ({ total: 0, enabled: 0, disabled: 0 }) }
+        rulesStats: { type: Object, default: () => ({ total: 0, enabled: 0, disabled: 0 }) },
+        // 🏷️ S3（2026-09-25）：目标模式（'cards' | 'worldbooks'）——由 App.vue 按当前视图设置
+        targetMode: { type: String, default: 'cards' },
+        // 🌍 世界书打标范围（'current' | 'filtered'）+ 范围信息（{activeName, hasActive, filteredCount}）
+        wbTagRange: { type: String, default: 'current' },
+        wbTagRangeInfo: { type: Object, default: () => ({ activeName: '', hasActive: false, filteredCount: 0 }) },
+        // 🏷️ S2：候选池开关三件套（可用性由 Q1 真值表决定；未可用时保留可见 + 原因）
+        candidatePoolEnabled: { type: Boolean, default: true },
+        candidatePoolSwitchable: { type: Boolean, default: true },
+        candidatePoolSwitchReason: { type: String, default: '' }
     },
     emits: [
         'close', 'remove-ai-candidate-tag', 'update:newAICandidateTag', 'add-ai-candidate-tag-manual',
         'add-ai-candidate-tag', 'update:enableAIExtraction', 'update:customAIPrompt',
         'update:useJailbreak', 'update:jailbreakPrompt',
-        'add-system-prompt-preset', 'update:activeSystemPromptId', 'save-system-prompts',
-        'delete-system-prompt-preset', 'fetch-available-models', 'update:apiEndpoint',
+        'save-role-prompts', 'update:tagPackSize', 'update:tagSkipTagged', 'resume-tagging', 'fetch-available-models', 'update:apiEndpoint',
         'update:apiKey', 'update:apiModel', 'start-tagging', 'remove-system-common-tag',
         // 🧠 本地向量引擎
         'update:useLocalVector', 'update:vectorThreshold', 'update:vectorTopK',
@@ -515,6 +538,8 @@ export default {
         'open-auto-tag-rules',
         // 🆕 P1：三层开关（(layer, enabled)，与 App.vue 的 setFunnelLayer 签名一致）
         'set-funnel-layer',
+        // 🏷️ S2/S3（2026-09-25）：候选池开关 + 世界书打标范围
+        'update:candidatePoolEnabled', 'update:wbTagRange',
         // 🔌 测试 API 连通性（用户 2026-09-24 要求）
         'test-connection'
     ],
@@ -522,6 +547,10 @@ export default {
     computed: {
         groupedSystemTags() {
             return groupTagsByCategory(this.systemCommonTags || []);
+        },
+        // 🏷️ S3：是否处于世界书打标模式（标题/范围区/设置可见性均以它为准）
+        isWbMode() {
+            return this.targetMode === 'worldbooks';
         },
         // 🆕 P1：三层全关 → 禁用「开始打标」（硬验收 H1：绝不出现"静默 0 结果"）
         funnelEmpty() {
@@ -532,6 +561,23 @@ export default {
         plannedLayers() {
             const p = this.funnelPlan || {};
             return [p.rule ? '①' : null, p.vector ? '②' : null, p.llm ? '③' : null].filter(Boolean).join(' → ') || '（无）';
+        },
+        // 🧠 System 预设套用：回显当前命中哪个内置变体（否则「✏️ 自定义」）
+        systemVariantId() {
+            const rp = this.llmRolePrompts || {};
+            return resolveSystemVariantId(rp.system || '');
+        },
+        // ⚡ 预填充预览文字（'' = 关闭）
+        trimmedPrefill() {
+            const rp = this.llmRolePrompts || {};
+            return String(rp.prefill || '').trim();
+        },
+        // 📌 断点续跑：还剩多少张未完成（无任务 = 0）
+        resumePending() {
+            const r = this.tagResume;
+            if (!r || !Array.isArray(r.targetIds)) return 0;
+            const done = new Set(Array.isArray(r.doneIds) ? r.doneIds : []);
+            return r.targetIds.filter(id => id && !done.has(id)).length;
         }
     },
     // 🏷️ [大分类折叠] 记录被折叠的分类 key（点击分组标题折叠/展开）
@@ -540,50 +586,45 @@ export default {
             collapsedTagGroups: {},
             // 🧭 左导航当前分区（纯 UI 状态；不涉及任何业务逻辑）
             activeSection: 'pipeline',
-            // 🧠 R1+R2：预设编辑器的小页签（system / assistant / user / prefill / cot）
-            presetEditorTab: 'system',
-            // 🧠 内置默认思维链提示词（只读展示用；与 js/utils/llmPromptRoles.js 的 DEFAULT_COT_PROMPT 一致）
-            defaultCotPrompt: DEFAULT_COT_PROMPT
+            // ⚡ 预填充折叠面板（高级，默认收起）
+            prefillOpen: false,
+            // 🧠 内置 System 预设变体（下拉数据源）
+            systemVariants: SYSTEM_PROMPT_VARIANTS
         };
     },
     methods: {
         toggleTagGroup(key) {
             this.collapsedTagGroups[key] = !this.collapsedTagGroups[key];
         },
-        // 🧠 R1+R2：读取某个预设的分段值（旧预设只有 content → 归一化到 system，兼容不迁移数据）
-        presetField(preset, field) {
-            if (!preset) return '';
-            if (field === 'system') return preset.system ?? preset.content ?? '';
-            return preset[field] ?? '';
+        // 🧠 单套链路：读取 / 写入（直接改 llmRolePrompts 对象的嵌套属性，Vue3 允许；随后 emit 通知持久化）
+        rolePromptValue(field) {
+            const rp = this.llmRolePrompts || {};
+            return rp[field] ?? '';
         },
-        // 🧠 R1+R2：写入某个预设的分段值（同时同步旧 content，保持向后兼容）
-        setPresetField(preset, field, value) {
-            if (!preset) return;
-            preset[field] = value;
-            if (field === 'system') preset.content = value; // 旧字段镜像，旧逻辑仍能读到
-            this.$emit('save-system-prompts');
+        setRolePrompt(field, value) {
+            const rp = this.llmRolePrompts;
+            if (!rp) return;
+            rp[field] = value;
+            this.$emit('save-role-prompts');
         },
-        // 🧠 思维链：切换模式（default / custom / off）
-        setCotMode(preset, mode) {
-            if (!preset) return;
-            preset.cotMode = mode;
-            // 首次切到「自定义」且尚未写过内容时，用内置默认版预填，方便改
-            if (mode === 'custom' && !String(preset.cot || '').trim()) {
-                preset.cot = this.defaultCotPrompt;
-            }
-            this.$emit('save-system-prompts');
+        // 📚 System 预设套用：选内置变体 = 一键覆盖 System；选「自定义」= 不动内容
+        onPickSystemVariant(id) {
+            if (id === 'custom') return;
+            const v = SYSTEM_PROMPT_VARIANTS.find(x => x.id === id);
+            if (!v) return;
+            this.setRolePrompt('system', v.content);
         },
-        // 🧠 该预设实际会注入的思维链文本（'' = 关闭）
-        presetCotText(preset) {
-            const mode = (preset && preset.cotMode) || 'default';
-            if (mode === 'off') return '';
-            if (mode === 'custom') return String((preset && preset.cot) || '').trim() ? preset.cot : this.defaultCotPrompt;
-            return this.defaultCotPrompt;
+        // 🚨 破限预设套用：选中即覆盖当前破限词；「自定义」= 用输入框里自己的词
+        onPickJailbreakPreset(id) {
+            if (id === 'custom') return;
+            const p = (this.jailbreakPresets || []).find(x => x.id === id);
+            if (p) this.$emit('update:jailbreakPrompt', p.content);
         },
-        // 🧠 R1+R2：该预设是否填了副字段（决定「走预设三段」还是「走程序默认」）
-        presetHasRoles(preset) {
-            if (!preset) return false;
-            return ['assistant', 'user', 'prefill'].some(k => String(preset[k] ?? '').trim() !== '');
+        // 当前破限词命中哪个预设（否则 custom）——供下拉回显
+        jailbreakPresetId(content) {
+            const c = String(content || '').trim();
+            const hit = (this.jailbreakPresets || []).find(p => String(p.content || '').trim() === c);
+            return hit ? hit.id : 'custom';
         },
         // 🧭 左导航分区定义（分组标题 + 条目），模板据此渲染
         navGroups() {
@@ -606,8 +647,7 @@ export default {
                 {
                     title: '提示词',
                     items: [
-                        { key: 'prompts', icon: '📝', label: '系统提示词库', badge: this.systemPromptPresets.length || '' },
-                        { key: 'jailbreak', icon: '⚠️', label: '强制破限', badge: this.useJailbreak ? '开' : '' }
+                        { key: 'prompts', icon: '📝', label: '系统提示词', badge: '' }
                     ]
                 }
             ];

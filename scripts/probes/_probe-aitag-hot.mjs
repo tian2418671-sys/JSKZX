@@ -1,8 +1,15 @@
 /**
- * AI 打标窗口「布局重构」热测探针 · 扩展版（2026-09-22）
+ * AI 打标窗口热测探针 · 扩展版（2026-09-22 首轮 · 2026-09-25 适配第二批改造）
  *
  * 用法（dev 模式 + CDP + 隔离 profile + **真实库**）：
  *   $env:CDP_PORT="9375"; node scripts/probes/_probe-aitag-hot.mjs
+ *
+ * ── 2026-09-25 适配要点（第二批改造后的 UI）──
+ *   ① 左导航 7 → 6 分区：「系统提示词库」「强制破限」独立分区已并入「系统提示词」；
+ *      破限栏位于 System 框内顶部（定位 = label 含「强制破限」的 checkbox）。
+ *   ② appCtx 路径变更：`app._instance.provides.appCtx` 已为 null（实测）→
+ *      统一用 `window.__probeGetCtx()`（兼容 `_context.provides` / `_instance.provides` 两种挂载）。
+ *   ③ 启动后先 Page.reload 取全新实例（防 HMR 残留旧 ctx —— chain-v2 同款踩坑）。
  *
  * ⚠️ **实例必须以「不节流」参数启动**，否则会出一堆假失败（2026-09-22 实测踩坑）：
  *   .\node_modules\electron\dist\electron.exe . --disable-gpu --disable-renderer-backgrounding `
@@ -115,7 +122,7 @@ const clickInModal = (label) => evaluate(`(() => {
 })()`);
 const openModal = async () => {
     await evaluate(`(async () => {
-        const ctx = document.querySelector('#app').__vue_app__._instance.provides.appCtx;
+        const ctx = window.__probeGetCtx();
         const lib = ctx.library.value || [];
         ctx.selectedIds.value = ctx.selectedIds.value.length ? ctx.selectedIds.value : [lib[0].id];
         ctx.openAITagModal();
@@ -126,7 +133,7 @@ const openModal = async () => {
 };
 /** 关闭弹窗（走状态，最可靠）；返回关闭后残留数 */
 const closeModal = async () => {
-    await evaluate(`(() => { const ctx = document.querySelector('#app').__vue_app__._instance.provides.appCtx; ctx.showAITagModal.value = false; return true; })()`);
+    await evaluate(`(() => { const ctx = window.__probeGetCtx(); ctx.showAITagModal.value = false; return true; })()`);
     await wait(WAIT_ANIM);
     return evaluate(`document.querySelectorAll('.max-w-5xl').length`);
 };
@@ -151,9 +158,45 @@ const navBadge = (label) => evaluate(`(() => {
     await send('Runtime.enable');
     info('已连接 CDP', `port ${PORT}`);
 
+    // ── ctx 获取 helper（2026-09-25：`_instance.provides.appCtx` 已为 null，必须走这条）
+    const installCtxHelper = () => evaluate(`(function () {
+        window.__probeGetCtx = function () {
+            try {
+                var a = document.querySelector('#app') && document.querySelector('#app').__vue_app__;
+                if (!a) return null;
+                return (a._context && a._context.provides && a._context.provides.appCtx)
+                    || (a._instance && a._instance.provides && a._instance.provides.appCtx) || null;
+            } catch (e) { return null; }
+        };
+        return 'ok';
+    })()`);
+
+    // 🔄 先重载页面：dev 模式下 HMR 会留下「旧实例 ctx / 半更新状态」（缓存旧 ctx 会点不亮新界面）
+    try {
+        await send('Page.enable');
+        await send('Page.reload', { ignoreCache: true });
+        info('已重载页面（获取全新实例）');
+        await new Promise(r => setTimeout(r, 2500));
+    } catch (e) { /* 忽略 */ }
+    await installCtxHelper();
+
+    // ⏳ 等应用就绪（appCtx 可获取 + **库已加载非空**；页面 reload 后重新拉库 / 大库扫描都需要时间）
+    //    —— 2026-09-25 踩坑：只等 ctx 存在就冲 §0，库还是空的 → 误报「真实库为空」
+    const ctxReady = await (async () => {
+        const t0 = Date.now();
+        let last = null;
+        for (;;) {
+            last = await evaluate(`(function () { try { var c = (typeof window.__probeGetCtx === 'function') ? window.__probeGetCtx() : null; if (!c || !c.openAITagModal) return { ctx: false }; var lib = (c.library && c.library.value) ? c.library.value : []; return { ctx: true, libLen: lib.length }; } catch (e) { return { ctx: false, err: String(e) }; } })()`);
+            if (last && last.ctx && last.libLen > 0) return true;
+            if (Date.now() - t0 > 60000) { info('就绪等待超时', JSON.stringify(last)); return false; }
+            await new Promise(r => setTimeout(r, 400));
+        }
+    })();
+    check('⓪ appCtx 就绪 + 库已加载（__probeGetCtx 路径）', !!ctxReady);
+
     // ── 0. 打开弹窗（真实入口 + 真实库）
     const opened = await evaluate(`(async () => {
-        const ctx = document.querySelector('#app').__vue_app__._instance.provides.appCtx;
+        const ctx = window.__probeGetCtx();
         const lib = ctx.library.value || [];
         if (!lib.length) return { ok: false, err: '真实库为空（本探针要求真实库）' };
         const ids = ctx.selectedIds.value && ctx.selectedIds.value.length ? ctx.selectedIds.value : [lib[0].id];
@@ -168,7 +211,7 @@ const navBadge = (label) => evaluate(`(() => {
 
     // ── 0b. 备份初始状态（收尾还原）
     const backup = await evaluate(`(() => {
-        const ctx = document.querySelector('#app').__vue_app__._instance.provides.appCtx;
+        const ctx = window.__probeGetCtx();
         const pick = (k) => { const v = ctx[k]; return v && typeof v === 'object' && 'value' in v ? JSON.parse(JSON.stringify(v.value)) : undefined; };
         return { tagFunnel: pick('tagFunnel'), useJailbreak: pick('useJailbreak'), useLocalVector: pick('useLocalVector'),
                  newAICandidateTag: pick('newAICandidateTag'), selectedIds: pick('selectedIds') };
@@ -177,31 +220,29 @@ const navBadge = (label) => evaluate(`(() => {
 
     // ── 1. 分区互斥：切到每个分区时右内容区**恰好 1 个**子块可见
     const exclusivity = [];
-    for (const [key, label] of [['pipeline', '执行管线'], ['candidates', '候选标签池'], ['extract', 'AI 提取设置'], ['vector', '本地向量'], ['api', 'API 引擎'], ['prompts', '系统提示词库'], ['jailbreak', '强制破限']]) {
+    for (const [key, label] of [['pipeline', '执行管线'], ['candidates', '候选标签池'], ['extract', 'AI 提取设置'], ['vector', '本地向量'], ['api', 'API 引擎'], ['prompts', '系统提示词']]) {
         const clicked = await switchTo(label);
         exclusivity.push({ key, clicked, n: await visibleSections() });
     }
     const badEx = exclusivity.filter(r => !r.clicked || r.n !== 1);
-    check('七个分区均可切换，且可见块恒为 1（无重叠/无空白）', badEx.length === 0,
-        badEx.length ? badEx.map(r => `${r.key}(clicked=${r.clicked},n=${r.n})`).join(' | ') : '7/7 正常');
+    check('六个分区均可切换，且可见块恒为 1（无重叠/无空白）', badEx.length === 0,
+        badEx.length ? badEx.map(r => `${r.key}(clicked=${r.clicked},n=${r.n})`).join(' | ') : '6/6 正常');
 
     // ── 2. 徽标与真实状态一致
     await switchTo('候选标签池');
-    const badge = { candidates: await navBadge('候选标签池'), vector: await navBadge('本地向量'), prompts: await navBadge('系统提示词库'), jailbreak: await navBadge('强制破限') };
+    const badge = { candidates: await navBadge('候选标签池'), vector: await navBadge('本地向量'), prompts: await navBadge('系统提示词') };
     const real = await evaluate(`(() => {
-        const ctx = document.querySelector('#app').__vue_app__._instance.provides.appCtx;
-        return { cand: ctx.aiCandidateTags.value.length, presets: ctx.systemPromptPresets.value.length,
-                 vec: ctx.useLocalVector.value, jb: ctx.useJailbreak.value };
+        const ctx = window.__probeGetCtx();
+        return { cand: ctx.aiCandidateTags.value.length, vec: ctx.useLocalVector.value };
     })()`);
     check('候选池徽标 == 候选标签真实数量', String(badge.candidates) === String(real.cand || ''), `徽标「${badge.candidates}」/ 实际 ${real.cand}`);
-    check('提示词库徽标 == 预设真实数量', String(badge.prompts) === String(real.presets || ''), `徽标「${badge.prompts}」/ 实际 ${real.presets}`);
     check('本地向量徽标 == 开关真实状态', badge.vector === (real.vec ? '开' : ''), `徽标「${badge.vector}」/ 开关 ${real.vec}`);
-    check('强制破限徽标 == 开关真实状态', badge.jailbreak === (real.jb ? '开' : ''), `徽标「${badge.jailbreak}」/ 开关 ${real.jb}`);
+    check('「系统提示词」分区无徽标（无旧「提示词库 / 破限」计数）', badge.prompts === '', `读到「${badge.prompts}」`);
 
-    // ── 3. 破限开关联动（**先读状态再切到相反值**，最后还原）
-    await switchTo('强制破限');
+    // ── 3. 破限开关联动（第二批改造后位于「系统提示词」页 System 框内顶部；**先读状态再切到相反值**，最后还原）
+    await switchTo('系统提示词');
     const jb = await evaluate(`(async () => {
-        const ctx = document.querySelector('#app').__vue_app__._instance.provides.appCtx;
+        const ctx = window.__probeGetCtx();
         const m = ${M_ROOT};
         const cb = m ? [...m.querySelectorAll('input[type=checkbox]')].find(x => {
             const lb = x.closest('label'); return lb && (lb.textContent || '').includes('强制破限');
@@ -214,12 +255,10 @@ const navBadge = (label) => evaluate(`(() => {
     })()`);
     await wait(WAIT_ANIM);
     const jbVisible = await waitVisible(`(() => { const m = ${M_ROOT}; const ta = m && m.querySelector('textarea[placeholder*="破限"]'); return !!ta && ta.offsetParent !== null; })()`, jb.after === true);
-    const jbBadgeAfter = await navBadge('强制破限');
     check('破限开关点击 → 状态确实翻转（父级收到 emit）', jb.ok && jb.flipped, jb.ok ? `${jb.before} → ${jb.after}` : '未找到开关');
     check('破限开关状态 ↔ 破限文本域可见性一致', jbVisible === jb.after, `开关=${jb.after} 文本域可见=${jbVisible}`);
-    check('破限开关状态 ↔ 左导航徽标一致', jbBadgeAfter === (jb.after ? '开' : ''), `徽标「${jbBadgeAfter}」/ 开关 ${jb.after}`);
     await evaluate(`(async () => {
-        const ctx = document.querySelector('#app').__vue_app__._instance.provides.appCtx;
+        const ctx = window.__probeGetCtx();
         const m = ${M_ROOT};
         const cb = [...m.querySelectorAll('input[type=checkbox]')].find(x => { const lb = x.closest('label'); return lb && (lb.textContent||'').includes('强制破限'); });
         if (cb && ctx.useJailbreak.value !== ${JSON.stringify(backup.useJailbreak)}) cb.click();
@@ -293,7 +332,7 @@ const navBadge = (label) => evaluate(`(() => {
     })()`);
     check('三层复原 → 主按钮恢复可用且计划预览回归', restored.enabled && restored.preview, `文案「${restored.text}」`);
     await evaluate(`(async () => {
-        const ctx = document.querySelector('#app').__vue_app__._instance.provides.appCtx;
+        const ctx = window.__probeGetCtx();
         const m = ${M_ROOT};
         const find = (t) => [...m.querySelectorAll('label')].find(lb => (lb.textContent || '').includes(t) && lb.querySelector('input[type=checkbox]'));
         const map = { '① 规则匹配': 'rule', '② 本地向量': 'vector', '③ LLM 兜底': 'llm' };
@@ -329,7 +368,7 @@ const navBadge = (label) => evaluate(`(() => {
 
     // ── 7. 底部操作栏在各分区都常驻可见
     const badBar = [];
-    for (const label of ['执行管线', '候选标签池', 'API 引擎', '系统提示词库', '强制破限']) {
+    for (const label of ['执行管线', '候选标签池', 'AI 提取设置', '本地向量', 'API 引擎', '系统提示词']) {
         await switchTo(label);
         const v = await evaluate(`(() => {
             const m = ${M_ROOT};
@@ -339,7 +378,7 @@ const navBadge = (label) => evaluate(`(() => {
         })()`);
         if (!v.ok) badBar.push(label);
     }
-    check('底部操作栏（取消/开始）在任意分区都常驻', badBar.length === 0, badBar.join(' | ') || '五分区均可见');
+    check('底部操作栏（取消/开始）在任意分区都常驻', badBar.length === 0, badBar.join(' | ') || '六分区均可见');
 
     // ── 8. 关闭路径：取消按钮 / ✕ 关闭 / 开合循环（等待 > 过渡 400ms）
     await switchTo('执行管线');
@@ -357,7 +396,7 @@ const navBadge = (label) => evaluate(`(() => {
         await openModal();
         const n = await evaluate(`document.querySelectorAll('.max-w-5xl').length`);
         if (n !== 1) { cycleBad = `第 ${i + 1} 次打开后弹窗数=${n}`; break; }
-        await evaluate(`(() => { const ctx = document.querySelector('#app').__vue_app__._instance.provides.appCtx; ctx.showAITagModal.value = false; return true; })()`);
+        await evaluate(`(() => { const ctx = window.__probeGetCtx(); ctx.showAITagModal.value = false; return true; })()`);
         const after = await waitCount('.max-w-5xl', 0);
         if (after !== 0) { cycleBad = `第 ${i + 1} 次关闭后残留=${after}`; break; }
     }
@@ -404,7 +443,7 @@ const navBadge = (label) => evaluate(`(() => {
     await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27, nativeVirtualKeyCode: 27 });
     await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27, nativeVirtualKeyCode: 27 });
     await wait(WAIT_ANIM);
-    await evaluate(`(() => { const ctx = document.querySelector('#app').__vue_app__._instance.provides.appCtx; if (ctx.showAutoTagRulesModal) ctx.showAutoTagRulesModal.value = false; return true; })()`);
+    await evaluate(`(() => { const ctx = window.__probeGetCtx(); if (ctx.showAutoTagRulesModal) ctx.showAutoTagRulesModal.value = false; return true; })()`);
     await wait(WAIT_TICK);
     await closeModal();
     const leftover = await evaluate(`document.querySelectorAll('.fixed.inset-0.z-50').length`);
@@ -412,7 +451,7 @@ const navBadge = (label) => evaluate(`(() => {
 
     // ── 11. 副作用校验：全程不得打开无关弹窗（首轮热测就栽在这里）
     const sideEffect = await evaluate(`(() => {
-        const ctx = document.querySelector('#app').__vue_app__._instance.provides.appCtx;
+        const ctx = window.__probeGetCtx();
         const keys = ['showApiModal', 'showBatchTagModal', 'showAutoGroupModal', 'showDedupeModal', 'showWbImportModal', 'showDiskScanModal'];
         return { opened: keys.filter(k => ctx[k] && ctx[k].value === true) };
     })()`);
@@ -420,7 +459,7 @@ const navBadge = (label) => evaluate(`(() => {
 
     // ── 12. 还原状态 + 无渲染错误
     await evaluate(`(() => {
-        const ctx = document.querySelector('#app').__vue_app__._instance.provides.appCtx;
+        const ctx = window.__probeGetCtx();
         const b = ${JSON.stringify(backup)};
         if (b.tagFunnel && ctx.tagFunnel) { for (const k of Object.keys(b.tagFunnel)) if (k in ctx.tagFunnel) ctx.tagFunnel[k] = b.tagFunnel[k]; }
         if (typeof b.useJailbreak === 'boolean' && ctx.useJailbreak) ctx.useJailbreak.value = b.useJailbreak;

@@ -130,11 +130,11 @@
             :use-jailbreak="useJailbreak"
             :jailbreak-prompt="jailbreakPrompt"
             :jailbreak-presets="jailbreakPresets"
-            :system-prompt-presets="systemPromptPresets"
-            :active-system-prompt-id="activeSystemPromptId"
+            :llm-role-prompts="llmRolePrompts"
+            :tag-pack-size="tagPackSize"
+            :tag-skip-tagged="tagSkipTagged"
+            :tag-resume="tagResume"
             :llm-only-active="llmOnlyActive"
-            :active-prompt-preset="activePromptPreset"
-            :active-cot-prompt="activeCotPrompt"
             :is-testing-conn="isTestingConn"
             :conn-test-status="connTestStatus"
             :api-endpoint="apiEndpoint"
@@ -148,6 +148,12 @@
             :tag-funnel="tagFunnel"
             :funnel-plan="tagFunnelPlan"
             :rules-stats="autoTagRulesStats"
+            :target-mode="aiTagTargetMode"
+            :wb-tag-range="wbTagRange"
+            :wb-tag-range-info="wbTagRangeInfo"
+            :candidate-pool-enabled="useCandidatePool"
+            :candidate-pool-switchable="candidatePoolSwitchable"
+            :candidate-pool-switch-reason="candidatePoolSwitchReason"
             :use-local-vector="useLocalVector"
             :vector-threshold="vectorThreshold"
             :vector-top-k="vectorTopK"
@@ -161,19 +167,21 @@
             @add-ai-candidate-tag-manual="addAICandidateTagManual"
             @add-ai-candidate-tag="addAICandidateTag"
             @update:enableAIExtraction="enableAIExtraction = $event"
+            @update:candidatePoolEnabled="useCandidatePool = $event"
+            @update:wbTagRange="wbTagRange = $event"
             @update:customAIPrompt="customAIPrompt = $event"
             @update:useJailbreak="useJailbreak = $event"
             @update:jailbreakPrompt="jailbreakPrompt = $event"
-            @add-system-prompt-preset="addSystemPromptPreset"
-            @update:activeSystemPromptId="activeSystemPromptId = $event"
-            @save-system-prompts="saveSystemPromptsToStorage"
-            @delete-system-prompt-preset="deleteSystemPromptPreset"
+            @save-role-prompts="saveRolePrompts"
+            @update:tagPackSize="tagPackSize = $event"
+            @update:tagSkipTagged="tagSkipTagged = $event"
+            @resume-tagging="resumeTagging"
             @fetch-available-models="fetchAvailableModels"
             @test-connection="testApiConnection"
             @update:apiEndpoint="apiEndpoint = $event"
             @update:apiKey="apiKey = $event"
             @update:apiModel="apiModel = $event"
-            @start-tagging="startAITagging"
+            @start-tagging="handleStartTagging"
             @remove-system-common-tag="removeTagFromGlobalPool"
             @set-funnel-layer="setFunnelLayer"
             @update:useLocalVector="useLocalVector = $event"
@@ -220,6 +228,29 @@
             @rollback="rollbackAutoGroup"
             @llm-run="runLlmJudge()"
             @llm-abort="abortLlmJudge"
+        />
+
+        <!-- ================= [ 🗂️ S4：世界书自动分组（双选项卡，对齐 AutoGroupModal） ] ================= -->
+        <wb-auto-group-modal
+            :show="showWbAutoGroupModal"
+            :profiles="wbAutoGroupProfiles"
+            :group-options="wbAutoGroupGroupOptions"
+            :scan="wbAutoGroupScan"
+            :exec="wbAutoGroupExec"
+            :rollback="wbAutoGroupRollback"
+            :last-run="wbAutoGroupLastRun"
+            :llm="wbAutoGroupLlm"
+            :llm-active="!!(apiEndpoint && apiEndpoint.trim())"
+            @close="closeWbAutoGroupModal"
+            @save-profiles="saveWbAutoGroupProfiles"
+            @reset-profiles="resetWbAutoGroupProfiles"
+            @rescan="scanWbAutoGroup($event)"
+            @execute="executeWbAutoGroup($event)"
+            @abort="abortWbAutoGroup"
+            @rollback="rollbackWbAutoGroup"
+            @run-llm="runWbLlmJudge()"
+            @abort-llm="abortWbLlmJudge"
+            @migrate-virtual="migrateVirtualGroupsToFolders()"
         />
 
         <!-- ================= [ 弹窗：关系图谱（子组件 GraphModal） ] ================= -->
@@ -293,6 +324,8 @@
             :wb="wbContextMenu.wb"
             @open-folder="openWbInFolder(wbContextMenu.wb); closeWbContextMenu()"
             @rename="renameWorldbook(wbContextMenu.wb); closeWbContextMenu()"
+            @edit-tags="openWbTagEditor(wbContextMenu.wb); closeWbContextMenu()"
+            @ai-tag="openWbTagFor(wbContextMenu.wb); closeWbContextMenu()"
             @duplicate="duplicateWorldbook(wbContextMenu.wb); closeWbContextMenu()"
             @move-group="changeWbCategory(wbContextMenu.wb); closeWbContextMenu()"
             @delete="deleteWorldbook(wbContextMenu.wb); closeWbContextMenu()"
@@ -579,6 +612,18 @@
         @delete="deleteWbSnapshot"
     />
 
+    <!-- ================= [ 🏷️ S1：世界书标签编辑面板（子组件 WbTagEditModal） ] ================= -->
+    <wb-tag-edit-modal
+        :show="showWbTagEditor"
+        :wb-name="wbTagEditorTarget ? (wbDisplayName(wbTagEditorTarget) || wbTagEditorTarget.name || '') : ''"
+        :wb-path="wbTagEditorTarget ? (wbTagEditorTarget.path || '') : ''"
+        :tags="wbTagEditorTags"
+        :suggestions="wbAllTags"
+        @add="wbTagEditorAdd"
+        @remove="wbTagEditorRemove"
+        @close="closeWbTagEditor"
+    />
+
     <!-- ================= [ 弹窗：版本更新检测（子组件 UpdateModal） ] ================= -->
     <update-modal
         :show="showUpdateModal"
@@ -641,6 +686,7 @@ import WbMergeModal from './WbMergeModal.vue'; // 多本世界书智能合并弹
 import WbImportModal from './WbImportModal.vue'; // 条目级导入合并弹窗
 import GlobalEntrySearchModal from './GlobalEntrySearchModal.vue'; // 🔎 全库词条搜索弹窗
 import WbSnapshotModal from './WbSnapshotModal.vue'; // 🕒 世界书快照历史弹窗
+import WbTagEditModal from './WbTagEditModal.vue'; // 🏷️ S1：世界书标签编辑面板（列表按钮 / 右键菜单入口）
 import ContextMenu from './ContextMenu.vue'; // 角色卡右键快捷菜单
 import WbContextMenu from './WbContextMenu.vue'; // 世界书右键快捷菜单
 import AiTagModal from './AITagModal.vue'; // AI 智能批量打标弹窗（⚠️ 注册名须用 AiTagModal，kebab 标签 ai-tag-modal 解析为 AiTagModal 而非 AITagModal）
@@ -660,7 +706,9 @@ import { processFile, extractBookEntries, compileAutoTagRules, defaultAutoTagRul
 import cardFormats from '../../main/cardFormats.json';
 import { isPathSavable, unsavableReason } from '../utils/cardFormats.js'; // 📇 DF-25：渲染层格式表（判「此卡能否写回」）
 import { DEFAULT_TAG_FUNNEL, normalizeTagFunnel, normalizeDisabledRules, resolveFunnelPlan, formatFunnelBadge, isFunnelEmpty } from '../utils/tagFunnel.js'; // 🏷️ P1：打标三层开关默认值/归一化/层决策（纯函数）；P2 起状态短标签也在此派生（供注册表命令的 badge 用）
+import { migrateLegacyPresets } from '../utils/llmPromptRoles.js'; // 🧠 第二批改造：旧提示词预设库 → 单套链路（system/user/prefill）迁移
 import { normalizeGroupProfiles, normalizeAutoGroupLastRun } from '../utils/autoGroup.js'; // 🗂️ 自动分组：分组档案/移动日志归一化（判定纯函数在同文件；执行器在 useAutoGroup）
+import { normalizeWbGroupProfiles, normalizeAutoGroupLastRun as normalizeWbAutoGroupLastRun } from '../utils/wbAutoGroup.js'; // 🗂️ S4：世界书分组档案/日志归一化
 import { createCommandRegistry, evaluateWhen } from '../utils/commandRegistry.js'; // 🎛️ P2：命令注册表 + when 求值（菜单/命令面板/快捷键的唯一真相源）
 import { registerAppCommands } from '../composables/useCommands.js'; // 🎛️ P2：内置命令定义（从 HeaderBar 迁出）
 // normalizeCardData / isCharacterCardData / autoTagRules（cardLoader）与 parsePNGChunk / deepScanForJSON（pngParser）
@@ -677,6 +725,8 @@ import { useEmbeddedWorldbook } from '../composables/useEmbeddedWorldbook.js'; /
 import { useStatusbarPreview } from '../composables/useStatusbarPreview.js'; // 📊 状态栏预览器（正则脚本渲染效果所见即所得 + 内置模板注入）
 import { useCardGroups } from '../composables/useCardGroups.js'; // 📁 角色卡分组/分类功能（拆分出的组合式函数）
 import { useAutoGroup } from '../composables/useAutoGroup.js'; // 🗂️ 卡片自动分组：执行/日志/回滚编排（判定层为 utils/autoGroup.js 纯函数）
+import { useWbAutoGroup } from '../composables/useWbAutoGroup.js'; // 🗂️ S4：世界书自动分组（执行/回滚编排；判定层 utils/wbAutoGroup.js）
+import WbAutoGroupModal from './WbAutoGroupModal.vue'; // 🗂️ S4：世界书自动分组弹窗（双选项卡，对齐 AutoGroupModal）
 import { useDedupe } from '../composables/useDedupe.js'; // 🔍 查重与差异比对功能（拆分出的组合式函数）
 import { useWorldbooks } from '../composables/useWorldbooks.js'; // 🌍 世界书库与分组功能（拆分出的组合式函数）
 import { usePresets } from '../composables/usePresets.js'; // ⚙️ 酒馆预设管理功能
@@ -725,7 +775,7 @@ document.addEventListener('dragover', (e) => e.preventDefault());
 document.addEventListener('drop', (e) => e.preventDefault());
 
 export default {
-    components: { Section, DragOverlay, AppLoadingOverlay, ToastContainer, BatchTagModal, PromptModal, OptionSelectModal, SingleTagModal, DiskScanModal, UpdateModal, TextModal, ImageModal, ApiSettingsModal, /* ⛔ GlobalAssetModal 已下线（2026-09-20） */ CommandPaletteModal, GraphModal, WbGraphModal, DedupeModal, WbDedupeModal, PresetDedupeModal, PresetStitchModal, ContentDedupeModal, DiffModal, WbMergeModal, WbImportModal, GlobalEntrySearchModal, WbSnapshotModal, ContextMenu, WbContextMenu, AiTagModal, AiTagLogModal, AutoTagRulesModal, AutoGroupModal, HeaderBar, SidebarPanel, EditorPanel, PluginWorkspace, CardPluginModal, SnapshotModal, PushModal },
+    components: { Section, DragOverlay, AppLoadingOverlay, ToastContainer, BatchTagModal, PromptModal, OptionSelectModal, SingleTagModal, DiskScanModal, UpdateModal, TextModal, ImageModal, ApiSettingsModal, /* ⛔ GlobalAssetModal 已下线（2026-09-20） */ CommandPaletteModal, GraphModal, WbGraphModal, DedupeModal, WbDedupeModal, PresetDedupeModal, PresetStitchModal, ContentDedupeModal, DiffModal, WbMergeModal, WbImportModal, GlobalEntrySearchModal, WbSnapshotModal, ContextMenu, WbContextMenu, AiTagModal, AiTagLogModal, AutoTagRulesModal, AutoGroupModal, WbAutoGroupModal, WbTagEditModal, HeaderBar, SidebarPanel, EditorPanel, PluginWorkspace, CardPluginModal, SnapshotModal, PushModal },
     setup() {
         // 主题状态（localStorage 在自定义协议下可能不可用，做防御性读取；默认暗夜极客）
         let savedTheme = 'dark';
@@ -2374,6 +2424,13 @@ export default {
                             if (cfg.autoGroupLastRun) {
                                 autoGroupLastRun.value = normalizeAutoGroupLastRun(cfg.autoGroupLastRun);
                             }
+                            // 🗂️ S4：世界书自动分组（老配置无这两个键 → 保持默认空）
+                            if (Array.isArray(cfg.wbAutoGroupProfiles)) {
+                                wbAutoGroupProfiles.value = normalizeWbGroupProfiles(cfg.wbAutoGroupProfiles);
+                            }
+                            if (cfg.wbAutoGroupLastRun) {
+                                wbAutoGroupLastRun.value = normalizeWbAutoGroupLastRun(cfg.wbAutoGroupLastRun);
+                            }
                             // 自定义分组（空数组也要覆盖，尊重「全部删除」结果）
                             if (Array.isArray(cfg.customCategories)) {
                                 const clean = cfg.customCategories.filter(c => typeof c === 'string' && c.trim() !== '');
@@ -2430,8 +2487,26 @@ export default {
                                 if (cfg.ui.viewMode === 'list' || cfg.ui.viewMode === 'grid') viewMode.value = cfg.ui.viewMode;
                                 if (typeof cfg.ui.isCompactMode === 'boolean') isCompactMode.value = cfg.ui.isCompactMode;
                                 if (['importTime', 'time', 'name', 'nameDesc', 'mtime', 'ctime', 'sizeDesc', 'sizeAsc', 'tokens'].includes(cfg.ui.sortBy)) sortBy.value = cfg.ui.sortBy;
-                                if (Array.isArray(cfg.ui.systemPromptPresets) && cfg.ui.systemPromptPresets.length) {
-                                    systemPromptPresets.value = cfg.ui.systemPromptPresets;
+                                // 🧠 第二批改造：单套链路（新字段优先）；旧「预设库」字段仍在配置文件里（可回滚）
+                                if (cfg.ui.llmRolePrompts && typeof cfg.ui.llmRolePrompts === 'object') {
+                                    llmRolePrompts.value = cfg.ui.llmRolePrompts;
+                                } else if (Array.isArray(cfg.ui.systemPromptPresets) && cfg.ui.systemPromptPresets.length) {
+                                    llmRolePrompts.value = migrateLegacyPresets(cfg.ui.systemPromptPresets);
+                                }
+                                if (Number.isFinite(Number(cfg.ui.tagPackSize))) {
+                                    tagPackSize.value = Math.min(10, Math.max(1, Number(cfg.ui.tagPackSize) || 1));
+                                }
+                                if (cfg.ui.tagResume && typeof cfg.ui.tagResume === 'object' && Array.isArray(cfg.ui.tagResume.targetIds)) {
+                                    tagResume.value = cfg.ui.tagResume;
+                                }
+                                if (typeof cfg.ui.tagSkipTagged === 'boolean') {
+                                    tagSkipTagged.value = cfg.ui.tagSkipTagged;
+                                }
+                                // 🏷️ S2（2026-09-25）：候选池三状态（老配置无这些键 → 保持默认：池开 / 自由提取开 / 空池）
+                                if (typeof cfg.ui.candidatePoolEnabled === 'boolean') useCandidatePool.value = cfg.ui.candidatePoolEnabled;
+                                if (typeof cfg.ui.enableAIExtraction === 'boolean') enableAIExtraction.value = cfg.ui.enableAIExtraction;
+                                if (Array.isArray(cfg.ui.aiCandidateTags)) {
+                                    aiCandidateTags.value = cfg.ui.aiCandidateTags.filter(t => typeof t === 'string' && t.trim() !== '');
                                 }
                                 if (typeof cfg.ui.lastWorldbookDirPath === 'string') lastWorldbookDirPath.value = cfg.ui.lastWorldbookDirPath;
                                 if (typeof cfg.ui.lastPresetDirPath === 'string') lastPresetDirPath.value = cfg.ui.lastPresetDirPath;
@@ -3123,6 +3198,9 @@ export default {
         // ⚠️ 判定/执行逻辑在 useAutoGroup（依赖 moveCardToGroup，须在其之后实例化）；此处只持可持久化状态。
         const autoGroupProfiles = ref([]);
         const autoGroupLastRun = ref(null);
+        // 🗂️ S4（2026-09-25）：世界书自动分组档案 + 移动日志（与卡片侧同口径；随 app_config.json 落盘）
+        const wbAutoGroupProfiles = ref([]);
+        const wbAutoGroupLastRun = ref(null);
 
         // 🆕 关闭/开启某条内置规则（规则表弹窗调用；立即落盘，规则即时生效）
         const toggleAutoTagRule = (name, enabled) => {
@@ -3222,27 +3300,54 @@ export default {
         });
 
         // 🏷️ 批量标签/预设标签/标签中英文切换/全局标签库 已拆分为组合式函数 useTags（见下文 setup 尾部调用）
-        // 🧠 系统提示词预设（跨模块共享状态：被 syncConfigToDisk / 集中 watch 引用，保留在 App.vue；打标相关操作方法见 useAITools）
-        const systemPromptPresets = ref((() => {
+        // 🧠 单套提示词链路（第二批改造 · 2026-09-25）：{ system, user, prefill }
+        //    跨模块共享状态：被 syncConfigToDisk / 集中 watch 引用，保留在 App.vue（打标操作方法见 useAITools）。
+        //    迁移：本地还没有新结构时，用旧「预设库」第一条搬运；旧数据本身保留在配置文件（可回滚）。
+        const llmRolePrompts = ref((() => {
             try {
-                const saved = JSON.parse(localStorage.getItem('jsTavernSysPrompts'));
-                if (Array.isArray(saved) && saved.length > 0) return saved;
+                const saved = JSON.parse(localStorage.getItem('jsTavernLlmRolePrompts'));
+                if (saved && typeof saved === 'object' && typeof saved.system === 'string') return saved;
             } catch (e) { /* 忽略 */ }
-            return [
-                {
-                    id: 'preset_1',
-                    name: '标准标签提取助手',
-                    content: '你是一个专业的角色卡分析助手。请阅读以下角色设定，提取最符合角色的标签。请严格只返回一个 JSON 数组格式（例如：["标签1", "标签2"]），绝对不要返回任何其他说明文字。',
-                    expanded: false
-                },
-                {
-                    id: 'preset_2',
-                    name: '精简短标签模式 (2-4个)',
-                    content: '你是一个精准的标签归纳专家。请为该角色提取 2-4 个极度精简的核心短标签。输出必须是纯 JSON 数组格式，形如 ["词1", "词2"]，不要附加任何解释。',
-                    expanded: false
-                }
-            ];
+            let legacy = [];
+            try {
+                const old = JSON.parse(localStorage.getItem('jsTavernSysPrompts'));
+                if (Array.isArray(old)) legacy = old;
+            } catch (e) { /* 忽略 */ }
+            return migrateLegacyPresets(legacy);
         })());
+        // 📦 每请求打包卡数（第二批改造 · 提量；1 = 与旧行为完全一致）
+        const tagPackSize = ref((() => {
+            try {
+                const v = parseInt(localStorage.getItem('jsTavern_tagPackSize'), 10);
+                if (v >= 1 && v <= 10) return v;
+            } catch (e) { /* 忽略 */ }
+            return 1;
+        })());
+        watch(llmRolePrompts, (v) => {
+            try { localStorage.setItem('jsTavernLlmRolePrompts', JSON.stringify(v)); } catch (e) { /* 忽略 */ }
+        }, { deep: true });
+        watch(tagPackSize, (v) => {
+            try { localStorage.setItem('jsTavern_tagPackSize', String(v)); } catch (e) { /* 忽略 */ }
+        });
+        // ⏭️ 增量模式（Q7 · 2026-09-25）：跳过已有标签的卡（复选开关在打标窗口「执行管线」页）
+        const tagSkipTagged = ref((() => {
+            try { return localStorage.getItem('jsTavern_tagSkipTagged') === 'true'; } catch (e) { return false; }
+        })());
+        watch(tagSkipTagged, (v) => {
+            try { localStorage.setItem('jsTavern_tagSkipTagged', v ? 'true' : 'false'); } catch (e) { /* 忽略 */ }
+        });
+        // 🏷️ S2（2026-09-25）：候选池开关 / 允许自由提取 / 候选池本体
+        //    定义在 App.vue（而非 useAITools 内部）以便 useConfigPersistence 收集落盘（app_config.json 唯一权威）；
+        //    useAITools 收到**同一 ref** 使用（解构区不再重复声明）。默认值 = 改动前行为（池开 / 自由提取开 / 空池）。
+        const useCandidatePool = ref(true);
+        const enableAIExtraction = ref(true);
+        const aiCandidateTags = ref([]);
+        // 开关变更 → 立即落盘（回调运行时 saveUiSettingsToDisk 已初始化——项目既有「闭包安全」范式）
+        watch(useCandidatePool, () => { saveUiSettingsToDisk(); });
+        watch(enableAIExtraction, () => { saveUiSettingsToDisk(); });
+        // 📌 断点续跑账本（第二批 · 提量）：{ startedAt, updatedAt, targetIds, doneIds, stats, packSize }
+        //    null = 无未完成任务；引擎逐卡改它 → 下方集中 watch 自动防抖落盘
+        const tagResume = ref(null);
 
         // ✨ AI 打标 / 翻译 / 格式升维 已拆分为组合式函数 useAITools（见下文 setup 尾部调用）
 
@@ -4413,7 +4518,7 @@ export default {
         // 与此处建立集中 watch：所有相关 ref 已声明完毕（最后一个为 wbCategoryMap），
         // 回调里的 syncConfigToDisk 已内置 isRestoringConfig guard，恢复期触发的写盘会被自动拦截，无需 immediate。
         watch(
-            [theme, appSettings, sanitizeImportedTags, autoTagOnImport, snapshotConfig, sidebarWidth, viewMode, isCompactMode, sortBy, systemPromptPresets, lastWorldbookDirPath, lastPresetDirPath, wbCategoryMap, wbTagMap, cardImportTimes],
+            [theme, appSettings, sanitizeImportedTags, autoTagOnImport, snapshotConfig, sidebarWidth, viewMode, isCompactMode, sortBy, llmRolePrompts, tagPackSize, tagSkipTagged, tagResume, lastWorldbookDirPath, lastPresetDirPath, wbCategoryMap, wbTagMap, cardImportTimes],
             // 🚀 v1.8.5 性能修复：改走 500ms 防抖落盘。旧版直接调 syncConfigToDisk（全量
             //    序列化 appSettings/cardOverlays/wbCategoryMap + 加密 IPC + 同步写盘），
             //    连续 UI 微调（拖侧栏宽度/切主题等）每次都全量写盘，千卡库 overlays 体积
@@ -5066,10 +5171,14 @@ export default {
             autoTagRules, customKeywords,
             autoTagDisabledRules, tagFunnel,
             autoGroupProfiles, autoGroupLastRun,
+            // 🗂️ S4（2026-09-25）：世界书自动分组状态（随 app_config.json 落盘）
+            wbAutoGroupProfiles, wbAutoGroupLastRun,
             apiEndpoint, apiKey, apiModel, apiType,
             theme, appSettings, sanitizeImportedTags, autoTagOnImport, snapshotConfig, localCategoryMap,
             sidebarWidth, viewMode, isCompactMode, sortBy,
-            systemPromptPresets, lastWorldbookDirPath, lastPresetDirPath, wbCategoryMap, wbTagMap,
+            llmRolePrompts, tagPackSize, tagSkipTagged, tagResume, lastWorldbookDirPath, lastPresetDirPath, wbCategoryMap, wbTagMap,
+            // 🏷️ S2（2026-09-25）：候选池三状态（开关 / 自由提取 / 池本体）随 ui 段落盘
+            useCandidatePool, enableAIExtraction, aiCandidateTags,
             cardImportTimes,
             // 🧵 预设缝合中心：常用条目库（随 ui 段一起落盘）
             presetStitchSnippets
@@ -5357,9 +5466,56 @@ export default {
             hasKeyIndex, compareKeyHashes, isExactSame,
             // 🏷️ A2（2026-09-24）：世界书标签 + 分组生命周期
             //    ⚠️ 必须在这里解构（AR-13 同型坑：ctx 里引用了但没解构 → 模板拿到 undefined）
-            getWbTags, setWbTags, toggleWbTagOn, addWbTagsBatch, wbAllTags,
+            getWbTags, setWbTags, toggleWbTagOn, addWbTagOn, removeWbTagOn, addWbTagsBatch, wbAllTags,
             renameWbGroup, deleteWbGroup,
+            // 📁 S4（2026-09-25）：物理分组（Q6 甲）
+            getWbCategory, moveWbToFolder, wbFolderGroupOf, sanitizeWbFolderName, migrateVirtualGroupsToFolders,
         } = useWorldbooks({ worldbooks, activeWorldbook, lastWorldbookDirPath, wbSearchQuery, wbFilterType, currentWbCategory, wbCategoryMap, wbTagMap, currentWbTags, saveWbCategoriesMap, syncWorldbooksToDisk, appMode, appPrompt, nativeAlert, confirmDialog, addLog, contextMenu, closeContextMenu });
+
+        // 🗂️ S4（2026-09-25）：世界书自动分组：组合式函数注入
+        //    判定纯函数见 utils/wbAutoGroup.js；落地复用 moveWbToFolder（含键迁移——铁律 6）。
+        //    ⚠️ 必须晚于 useWorldbooks 解构（注入 moveWbToFolder / getWbCategory 等）。
+        const {
+            showWbAutoGroupModal, openWbAutoGroupModal, closeWbAutoGroupModal,
+            wbAutoGroupScan, wbAutoGroupExec, wbAutoGroupRollback,
+            wbAutoGroupLlm, runWbLlmJudge, abortWbLlmJudge,
+            scanWbAutoGroup, executeWbAutoGroup, abortWbAutoGroup, rollbackWbAutoGroup,
+            saveWbAutoGroupProfiles, resetWbAutoGroupProfiles,
+            clearWbKeysCache
+        } = useWbAutoGroup({
+            wbAutoGroupProfiles, wbAutoGroupLastRun,
+            worldbooks, activeWorldbook,
+            getWbCategory, wbFolderGroupOf, moveWbToFolder, wbDisplayName,
+            ensureWorldbookLoaded, releaseWorldbookBody,
+            nativeAlert, confirmDialog, addLog, syncConfigToDiskDebounced,
+            apiEndpoint, apiKey, apiType, resolveApiModel, extractReplyContent
+        });
+
+        // ═══════════════════════════════════════════════════════════════
+        // 🏷️ S1（2026-09-25）：世界书**标签编辑面板**（列表 🏷️ 按钮 / 右键菜单入口）
+        //    标签能力本身已在 useWorldbooks（A2）；这里只做「选中哪本书 + 开关弹窗」的接线。
+        //    增减一律走 addWbTagOn / removeWbTagOn（内部双写配置层 + triggerRef，见 useWorldbooks）。
+        // ═══════════════════════════════════════════════════════════════
+        const showWbTagEditor = ref(false);
+        const wbTagEditorTarget = ref(null);
+        const openWbTagEditor = (wb) => {
+            if (!wb) return;
+            wbTagEditorTarget.value = wb;
+            showWbTagEditor.value = true;
+        };
+        const closeWbTagEditor = () => { showWbTagEditor.value = false; };
+        const wbTagEditorTags = computed(() => {
+            const wb = wbTagEditorTarget.value;
+            return wb ? getWbTags(wb) : [];
+        });
+        const wbTagEditorAdd = (tag) => {
+            const wb = wbTagEditorTarget.value;
+            if (wb) addWbTagOn(wb, tag);
+        };
+        const wbTagEditorRemove = (tag) => {
+            const wb = wbTagEditorTarget.value;
+            if (wb) removeWbTagOn(wb, tag);
+        };
 
         // 📊🔍 查重与差异比对：组合式函数注入
         //    ✅ v4-P0（2026-09-25，评审已批准的《查重引擎重构方案 v4》）：
@@ -5511,25 +5667,69 @@ export default {
         });
 
         // ✨ AI 打标 / 翻译 / 格式升维：组合式函数注入（共享状态与 API 配置保留在 App.vue）
+        //    🏷️ S2/S3：候选池三状态已在 App.vue 定义（useCandidatePool / enableAIExtraction / aiCandidateTags），
+        //    wbCtx 注入世界书打标所需的两套适配（材料/落盘 + 懒加载），appMode 供入口按视图分发。
         const {
-            showAITagModal, aiCandidateTags, aiCustomPrompt, aiTaggingProgress, isAITagging, openAITagModal, startAITagging,
+            showAITagModal, aiCustomPrompt, aiTaggingProgress, isAITagging, openAITagModal, startAITagging,
+            // 🏷️ S3（2026-09-25）：世界书打标（统一入口按视图分发；目标模式/范围/范围信息供弹窗消费）
+            startWbTagging, aiTagTargetMode, wbTagRange, wbTagRangeInfo,
+            // 🏷️ S2：候选池开关可用性（Q1 真值表；状态本体在上面已定义）
+            candidatePoolSwitchable, candidatePoolSwitchReason,
             // 📜 打标过程实时日志（窗口 + 日志流）
             aiTagLog, showAiTagLog, pushTagLog, closeAiTagLog, clearAiTagLog,
-            enableAIExtraction, customAIPrompt, newAICandidateTag,
-            addAICandidateTag, addAICandidateTagManual, removeAICandidateTag,
-            activeSystemPromptId, addSystemPromptPreset, deleteSystemPromptPreset,
-            saveSystemPromptsToStorage, getCurrentSystemPromptContent, buildTaggingSystemPrompt,
-            // 🧠 R1+R2（2026-09-24）：仅 LLM 层时的分角色结构 + 结构化截取（UI 徽标用）
-            llmOnlyActive, activePromptPreset,
-            // 🧠 思维链（默认版/自定义/关闭）+ 🔌 连通性测试
-            activeCotPrompt, isTestingConn, connTestStatus, testApiConnection,
+            customAIPrompt, newAICandidateTag,
+            addAICandidateTag, addAICandidateTagManual, addAICandidateTagsBatch, removeAICandidateTag,
+            getCurrentSystemPromptContent, buildTaggingSystemPrompt, saveRolePrompts,
+            // 🧠 仅 LLM 层时的分角色链路 + 结构化截取（UI 徽标用）
+            llmOnlyActive,
+            // 🔌 连通性测试
+            isTestingConn, connTestStatus, testApiConnection,
             useJailbreak, jailbreakPrompt, jailbreakPresets,
             isTranslating, translateCardContent, isRefactoring, refactorCardFormat,
             // 🧠 本地向量引擎（三层漏斗第二层）
             useLocalVector, vectorThreshold, vectorTopK,
             vectorStatus, vectorDownloading, vectorDownloadProgress, vectorDownloadSource, vectorBatchProgress,
             initVectorEngine, deleteVectorCache
-        } = useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey, apiType, resolveApiModel, extractReplyContent, persistCardUpdate, refreshCardData, nativeAlert, confirmDialog, showToast, systemPromptPresets, autoTagRules: compiledAutoTagRules, tagFunnel, syncConfigToDisk });
+        } = useAITools({
+            selectedIds, library, cardData, apiEndpoint, apiKey, apiType, resolveApiModel, extractReplyContent,
+            persistCardUpdate, refreshCardData, nativeAlert, confirmDialog, showToast,
+            llmRolePrompts, autoTagRules: compiledAutoTagRules, tagFunnel, tagPackSize, tagSkipTagged, tagResume, syncConfigToDisk,
+            // 🏷️ S3：世界书打标接入（与卡片同一条系统；材料/落盘两套适配 + 懒加载/释放在这里注入）
+            appMode,
+            wbCtx: { worldbooks, activeWorldbook, filteredWorldbooks, getWbTags, setWbTags, saveWbCategoriesMap, wbDisplayName, ensureWorldbookLoaded, releaseWorldbookBody },
+            // 🏷️ S2：候选池相关状态（App.vue 定义并持久化；同一 ref 传回引擎）
+            useCandidatePool, enableAIExtraction, aiCandidateTags
+        });
+
+        // 📌 断点续跑入口（弹窗「执行管线」页「继续未完成」按钮）→ fromResume=true
+        const resumeTagging = () => startAITagging(true);
+
+        // 🏷️ S3（2026-09-25）：打标启动按目标模式分发（角色卡 → startAITagging；世界书 → startWbTagging）
+        const handleStartTagging = (fromResume) => {
+            if (aiTagTargetMode.value === 'worldbooks') return startWbTagging();
+            return startAITagging(fromResume);
+        };
+
+        // 🏷️ S3：世界书右键「🤖 AI 打标」→ 以该书为目标打开统一打标弹窗
+        //    · 先经 selectWorldbook 成为「当前书」（既有安全入口：懒加载/视图同步都走它）
+        //    · 打开失败也继续——startWbTagging 会再校验「当前书」是否存在
+        const openWbTagFor = async (wb) => {
+            if (!wb) return;
+            wbTagRange.value = 'current';
+            try { await selectWorldbook(wb); } catch (e) { /* 交打标侧校验 */ }
+            openAITagModal();
+        };
+
+        // 🗂️ S4：自动分组入口**按视图分发**（与「智能查重」「AI 打标」同款二合一）：
+        //    角色卡视图 → 卡片自动分组；世界书视图 → 世界书自动分组
+        const openAutoGroupEntry = () => {
+            if (appMode.value === 'worldbooks') return openWbAutoGroupModal();
+            return openAutoGroupModal();
+        };
+        // 🗂️ S4：世界书自动分组的目标分组候选（= 当前库物理分组清单）
+        const wbAutoGroupGroupOptions = computed(() => (wbCategories.value || [])
+            .filter(c => c && c !== '全部')
+            .map(c => ({ value: c, label: `📁 ${c}` })));
 
         // ================= 🏷️ P1：三层开关的 UI 侧派生状态（与引擎共用同一个纯函数） =================
         // ⚠️ 必须定义在 useAITools 解构**之后**：tagFunnelPlan 依赖 vectorStatus / aiCandidateTags（均来自该组合式函数）
@@ -5537,7 +5737,8 @@ export default {
             funnel: tagFunnel.value,
             vectorReady: !!(vectorStatus.value && vectorStatus.value.ready),
             hasCandidateTags: aiCandidateTags.value.length > 0,
-            hasApiConfig: !!(apiEndpoint.value && apiEndpoint.value.trim())
+            hasApiConfig: !!(apiEndpoint.value && apiEndpoint.value.trim()),
+            poolDisabled: !useCandidatePool.value // 🏷️ S2：池关 → ② 向量跳过（与引擎同一口径）
         }));
         // 规则表生效统计（弹窗与设置菜单显示「生效 N / 关闭 M」）
         const autoTagRulesStats = computed(() => {
@@ -5747,27 +5948,23 @@ export default {
                             return { rule: tagFunnel.value.rule, vector: tagFunnel.value.vector, llm: tagFunnel.value.llm };
                         },
                         llmOnly: () => !!(llmOnlyActive && llmOnlyActive.value),
-                        // 预设摘要（可序列化；不传 Proxy，避免 returnByValue 炸）
-                        presets: () => systemPromptPresets.value.map(p => ({
-                            id: p.id, name: p.name, expanded: p.expanded,
-                            hasSystem: !!String(p.system || p.content || '').trim(),
-                            hasAssistant: !!String(p.assistant || '').trim(),
-                            hasUser: !!String(p.user || '').trim(),
-                            hasPrefill: !!String(p.prefill || '').trim(),
-                            cotMode: p.cotMode || 'default',
-                            cotLen: String(p.cot || '').length
-                        })),
-                        // 当前生效预设实际会注入的思维链文本（供 e2e 断言默认/自定义/关闭三档）
-                        cot: () => ({
-                            mode: (activePromptPreset.value && activePromptPreset.value.cotMode) || 'default',
-                            len: activeCotPrompt.value.length,
-                            text: activeCotPrompt.value.slice(0, 60)
+                        // 🧠 第二批改造：单套链路 + 打包提量摘要（可序列化；不传 Proxy，避免 returnByValue 炸）
+                        rolePrompts: () => ({
+                            systemLen: String((llmRolePrompts.value && llmRolePrompts.value.system) || '').length,
+                            userLen: String((llmRolePrompts.value && llmRolePrompts.value.user) || '').length,
+                            prefill: String((llmRolePrompts.value && llmRolePrompts.value.prefill) || ''),
+                            packSize: tagPackSize.value,
+                            skipTagged: !!tagSkipTagged.value
                         }),
-                        // 展开/收起预设（e2e 需要展开后才能看到五个小页签）
-                        expandPreset: (i) => {
-                            const p = systemPromptPresets.value[Number(i) || 0];
-                            if (!p) return false;
-                            p.expanded = true;
+                        // e2e 写入链路字段（局部 patch；只认 string / 1~10 的数字）
+                        setRolePrompts: (patch) => {
+                            if (patch && typeof patch === 'object') {
+                                if (typeof patch.system === 'string') llmRolePrompts.value.system = patch.system;
+                                if (typeof patch.user === 'string') llmRolePrompts.value.user = patch.user;
+                                if (typeof patch.prefill === 'string') llmRolePrompts.value.prefill = patch.prefill;
+                                if (Number.isFinite(Number(patch.packSize))) tagPackSize.value = Math.min(10, Math.max(1, Number(patch.packSize)));
+                                if (typeof patch.skipTagged === 'boolean') tagSkipTagged.value = patch.skipTagged;
+                            }
                             return true;
                         },
                         // 🔌 连通性测试（silent 避免弹 toast 干扰 e2e）
@@ -6036,6 +6233,9 @@ export default {
             tagLangMode, toggleTagLangMode, getPresetTagText, displayTagText,
             togglePresetTag, executeBatchTagSave,
             showAITagModal, aiCandidateTags, aiCustomPrompt, aiTaggingProgress, isAITagging, openAITagModal, startAITagging,
+            // 🏷️ S2/S3（2026-09-25）：打标双模式 / 世界书范围 / 候选池开关可用性（模板与探针经 ctx 直取）
+            startWbTagging, handleStartTagging, aiTagTargetMode, wbTagRange, wbTagRangeInfo,
+            candidatePoolSwitchable, candidatePoolSwitchReason, useCandidatePool,
             // 📜 打标过程实时日志窗口（模板挂载用）
             aiTagLog, showAiTagLog, closeAiTagLog, clearAiTagLog,
             enableAIExtraction, customAIPrompt, newAICandidateTag,
@@ -6050,11 +6250,11 @@ export default {
             nativeAlert, confirmDialog,
             // 🤖 AI 分类弹窗复用：模型解析 + 响应文本提取
             resolveApiModel, extractReplyContent,
-            systemPromptPresets, activeSystemPromptId, addSystemPromptPreset, deleteSystemPromptPreset, saveSystemPromptsToStorage, getCurrentSystemPromptContent, buildTaggingSystemPrompt,
-            // 🧠 R1+R2：仅 LLM 层时的分角色结构 + 结构化截取（AITagModal 显示「已启用」徽标）
-            llmOnlyActive, activePromptPreset,
-            // 🧠 思维链 + 🔌 连通性测试（AITagModal 用）
-            activeCotPrompt, isTestingConn, connTestStatus, testApiConnection,
+            llmRolePrompts, saveRolePrompts, tagPackSize, tagSkipTagged, tagResume, resumeTagging,
+            // 🧠 仅 LLM 层时的分角色链路 + 结构化截取（AITagModal 显示「已启用」徽标）
+            llmOnlyActive,
+            // 🔌 连通性测试（AITagModal 用）
+            isTestingConn, connTestStatus, testApiConnection,
             // 🚨 破限 (Jailbreak) 状态（对抗模型拒答/道德审查；localStorage 持久化）
             useJailbreak, jailbreakPrompt, jailbreakPresets,
             // 🏷️ 自动打标规则表（v2.1 可配置）+ P1 三层漏斗开关 / 内置规则关闭清单
@@ -6152,6 +6352,9 @@ export default {
             dedupeScanning, dedupeScanLabel, dedupeScanPercent, dedupeScanIndeterminate, dedupeScanProgressForModal,
             // 📢 DF-18：跳过可见化 + 超大世界书懒加载（侧栏用）
             wbEntryCount, selectWorldbook, ensureWorldbookLoaded,
+            // 🧠 PK-27 / S1'：L1 摘要消费 + 批量读正文 / 用后释放（探针与后续调用方经 ctx 可见）
+            releaseWorldbookBody, consumeWorldbookBodies,
+            hasKeyIndex, compareKeyHashes, isExactSame,
             // ⚡ 秒开：书名取法（`wb.data` 不再常驻）+ 元数据后台补齐状态
             wbDisplayName, wbMetaFilling, wbMetaProgress,
             // ⚙️ 预设管理
@@ -6189,9 +6392,25 @@ export default {
             // 📁 世界书分组
             currentWbCategory, wbCategories, changeWbCategory,
             // 🏷️ A2（2026-09-24）：世界书标签 + 分组生命周期（显式重命名 / 解散）
-            currentWbTags, wbTagMap,
-            getWbTags, setWbTags, toggleWbTagOn, addWbTagsBatch, wbAllTags,
+            currentWbTags, wbTagMap, wbCategoryMap,
+            getWbTags, setWbTags, toggleWbTagOn, addWbTagOn, removeWbTagOn, addWbTagsBatch, wbAllTags,
             renameWbGroup, deleteWbGroup,
+            // 📁 S4（2026-09-25）：物理分组原语（移动/推导/迁移助手——探针与后续调用方经 ctx 可见）
+            getWbCategory, moveWbToFolder, wbFolderGroupOf, sanitizeWbFolderName, migrateVirtualGroupsToFolders,
+            // 🏷️ S1（2026-09-25）：世界书标签编辑面板入口（列表 🏷️ 按钮消费）
+            openWbTagEditor,
+            // 🏷️ S1：标签编辑面板自身的状态与动作（模板经 setup→ctx 直取）
+            showWbTagEditor, wbTagEditorTarget, wbTagEditorTags, wbTagEditorAdd, wbTagEditorRemove, closeWbTagEditor,
+            // 🗂️ S4（2026-09-25）：自动分组统一入口（按视图分发）+ 世界书侧直连入口（侧边栏按钮消费）
+            openAutoGroupEntry, openWbAutoGroupModal,
+            // 🗂️ S4：世界书自动分组弹窗的展示状态与动作（模板经 setup→ctx 直取）
+            showWbAutoGroupModal, wbAutoGroupProfiles, wbAutoGroupGroupOptions, wbAutoGroupScan,
+            wbAutoGroupExec, wbAutoGroupRollback, wbAutoGroupLastRun, wbAutoGroupLlm,
+            closeWbAutoGroupModal, saveWbAutoGroupProfiles, resetWbAutoGroupProfiles,
+            scanWbAutoGroup, executeWbAutoGroup, abortWbAutoGroup, rollbackWbAutoGroup,
+            runWbLlmJudge, abortWbLlmJudge, migrateVirtualGroupsToFolders,
+            // 🏷️ S3：世界书打标右键快捷通道
+            openWbTagFor,
             // 💾 统一 IPC 落盘
             syncWorldbooksToDisk,
             // 🌍 世界书词条深度编辑 (Entry IDE)

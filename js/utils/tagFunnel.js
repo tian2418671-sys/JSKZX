@@ -72,26 +72,32 @@ export function isFunnelEmpty(funnel) {
  *
  * 判定顺序（**不要改**，否则会出现"关掉的层仍被计入"）：
  *   1. rule   = funnel.rule
- *   2. vector = funnel.vector && vectorReady && hasCandidateTags（不成立时给出 skip 原因）
+ *   2. vector = funnel.vector && !poolDisabled && vectorReady && hasCandidateTags（不成立时给出 skip 原因）
  *   3. llm    = funnel.llm && hasApiConfig（不成立时给出 skip 原因）
  *
  * ⚠️ 关键契约：`vectorReady` 只影响"②能不能跑"，**绝不影响**"①是否执行"——
  *    层与层之间不得互相短路（历史缺陷 AI-02：曾把"规则命中就跳过向量"写死）。
+ *
+ * 🏷️ S2（2026-09-25）：`poolDisabled` = 候选池开关关闭。向量层的**标签源就是候选池**
+ *    （`batchMatch(payloads, aiCandidateTags, ...)`），池关后向量没有可比对的标签集
+ *    ⇒ ② 必须跳过并给出明确原因（而不是拿空池硬跑出 0 命中）。
  *
  * @param {object} p
  * @param {any} p.funnel               三层开关
  * @param {boolean} [p.vectorReady]    向量模型是否已就绪（vectorStatus.ready）
  * @param {boolean} [p.hasCandidateTags] 候选标签池是否非空
  * @param {boolean} [p.hasApiConfig]   API 是否已配置
+ * @param {boolean} [p.poolDisabled]   候选池开关是否已关闭（缺省 false，老行为）
  * @returns {{rule: boolean, vector: boolean, llm: boolean, skip: {vector?: string, llm?: string}}}
  */
-export function resolveFunnelPlan({ funnel, vectorReady, hasCandidateTags, hasApiConfig } = {}) {
+export function resolveFunnelPlan({ funnel, vectorReady, hasCandidateTags, hasApiConfig, poolDisabled } = {}) {
     const f = normalizeTagFunnel(funnel);
     const skip = {};
 
     let vector = false;
     if (f.vector) {
-        if (!vectorReady) skip.vector = '模型未就绪';
+        if (poolDisabled) skip.vector = '候选池已关闭（向量层的标签源就是候选池）';
+        else if (!vectorReady) skip.vector = '模型未就绪';
         else if (!hasCandidateTags) skip.vector = '候选标签池为空';
         else vector = true;
     }
