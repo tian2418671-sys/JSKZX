@@ -14,14 +14,15 @@ import {
     isLlmOnlyPlan, normalizeRolePrompts, buildLlmMessages, willUsePrefill,
     parseStructuredTags, outputFormatRule, TAG_WRAPPER,
     packedOutputRule, parsePackedTags, sanitizeTagList,
-    composeTagPromptHead, splitTextSegments,
+    composeTagPromptHeadParts, splitTextSegments,
     SEGMENT_DEFAULT_MAX_CHARS, SEGMENT_DEFAULT_CHUNK_CHARS
 } from '../utils/llmPromptRoles.js';
 import { estimateTokens } from '../utils/tokenEstimate.js'; // 📦 打包短卡判定（token 估算）
 import { hasAnyTag } from '../utils/tagIncrement.js'; // ⏭️ 增量模式：跳过已打标卡（Q7）
 import { normalizeWbTags } from '../utils/wbGroupsTags.js'; // 🏷️ S3：世界书标签规范化（打标落盘合并用）
+import { buildCustomMessages, customTailPrefill } from '../utils/customPromptSegments.js'; // 🧩 2026-10-03：自定义模式接入打标（段 → 消息组装）
 
-export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey, apiType, resolveApiModel, extractReplyContent, persistCardUpdate, refreshCardData, nativeAlert, confirmDialog, showToast, llmRolePrompts, autoTagRules, tagFunnel, tagPackSize, tagSkipTagged, tagResume, syncConfigToDisk, appMode, wbCtx, useCandidatePool = ref(true), enableAIExtraction = ref(true), aiCandidateTags = ref([]) }) {
+export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey, apiType, resolveApiModel, extractReplyContent, persistCardUpdate, refreshCardData, nativeAlert, confirmDialog, showToast, llmRolePrompts, tagCustomSegments = ref([]), tagPromptMode = ref('system'), tagMaterialOverrides = ref({}), autoTagRules, tagFunnel, tagPackSize, tagSkipTagged, tagResume, syncConfigToDisk, appMode, wbCtx, useCandidatePool = ref(true), enableAIExtraction = ref(true), aiCandidateTags = ref([]) }) {
     // ================= [ AI 智能批量打标系统 ] =================
     const showAITagModal = ref(false);
     // 🏷️ S2（2026-09-25）：`useCandidatePool` / `enableAIExtraction` / `aiCandidateTags` 三个状态
@@ -120,12 +121,23 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
     const isAITagging = ref(false);
 
     // 📜 打标过程实时日志（应用内窗口；启动打标自动打开——替系统弹框汇报，全程肉眼可检查）
+    // 🔍 过程透明化（2026-09-27 用户要求）：日志条目可携带 `detail`（完整发送数据 + AI 原始回复/思考），
+    //    在「打标过程」窗口里点「🔍 查看」展开；详情超上限后只保留文本行（防内存膨胀）。
     const aiTagLog = ref([]);
     const showAiTagLog = ref(false);
     const AI_TAG_LOG_MAX = 2000; // 超大库防内存膨胀：超出裁掉头部
-    const pushTagLog = (text, level = 'info') => {
-        aiTagLog.value.push({ at: Date.now(), level, text: String(text) });
+    const AI_TAG_LOG_DETAIL_MAX = 100; // 🔍 请求详情条数上限（更早的详情置空，防内存膨胀）
+    const pushTagLog = (text, level = 'info', detail = null) => {
+        aiTagLog.value.push({ at: Date.now(), level, text: String(text), detail });
         if (aiTagLog.value.length > AI_TAG_LOG_MAX) aiTagLog.value.splice(0, aiTagLog.value.length - AI_TAG_LOG_MAX);
+        if (detail) {
+            let seen = 0;
+            for (let i = aiTagLog.value.length - 1; i >= 0; i--) {
+                if (!aiTagLog.value[i].detail) continue;
+                seen++;
+                if (seen > AI_TAG_LOG_DETAIL_MAX) aiTagLog.value[i].detail = null;
+            }
+        }
     };
     const closeAiTagLog = () => { showAiTagLog.value = false; };
     const clearAiTagLog = () => { aiTagLog.value = []; };
@@ -159,12 +171,14 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
                 );
                 if (result && result.success) return result;
                 const msg = (result && result.error) || 'API 请求失败';
+                const failErr = new Error(msg);
+                if (result) failErr.rawResult = result; // 🔍 透明化：失败响应随错误带回（「🔍 查看」里可见原始返回）
                 if (isRetryableAIError(msg) && attempt < AI_TAG_MAX_RETRIES) {
-                    lastErr = new Error(msg);
+                    lastErr = failErr;
                     await sleepMs(AI_TAG_RETRY_BASE_MS * Math.pow(2, attempt));
                     continue;
                 }
-                throw new Error(msg);
+                throw failErr;
             } catch (e) {
                 const emsg = (e && e.message) || String(e);
                 if (isRetryableAIError(emsg) && attempt < AI_TAG_MAX_RETRIES) {
@@ -178,16 +192,206 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
         throw lastErr;
     };
 
-    /** 公共 prompt 头部（候选池[开关] + 自由度规则 + 附加要求）—— 单卡 / 打包 / 分段 / 世界书共用 */
+    /** 🔍 过程透明化（展示用）：尽力提取「模型思考」文本（reasoning_content / anthropic thinking 块；无则空串） */
+    const extractReplyReasoning = (result) => {
+        try {
+            const d = (result && result.data) || {};
+            const m = d.choices && d.choices[0] && d.choices[0].message;
+            if (m) {
+                const r = m.reasoning_content || m.reasoning || '';
+                if (r) return String(r).trim();
+            }
+            if (Array.isArray(d.content)) {
+                const parts = d.content.filter(b => b && (b.type === 'thinking' || b.type === 'reasoning'))
+                    .map(b => b.thinking || b.text || '').filter(Boolean);
+                if (parts.length) return parts.join('\n').trim();
+            }
+        } catch (e) { /* 展示用：失败即忽略 */ }
+        return '';
+    };
+
+    /** 🔍 过程透明化（展示用）：原始响应 → 截断文本（用户要求「失败 / 空回复也要能看到 AI 到底回了什么」） */
+    const AI_TAG_RAW_MAX = 6000; // 原始响应展示上限（字符）
+    const briefRawData = (src) => {
+        try {
+            if (src == null) return '';
+            let t = (typeof src === 'string') ? src : JSON.stringify(src);
+            if (!t || t === '{}' || t === '""') return '';
+            if (t.length > AI_TAG_RAW_MAX) t = t.slice(0, AI_TAG_RAW_MAX) + `\n…（已截断，完整共 ${t.length} 字）`;
+            return t;
+        } catch (e) { return ''; }
+    };
+
+    // ⏸ 打标暂停（2026-09-28）：进行中可随时暂停 —— 引擎在下一个检查点安全收尾，
+    //    已完成结果与断点账本保留；UI 判「已暂停」态 = !isAITagging && tagPauseRequested。
+    //    检查点：主循环（请求单元）/ 分段循环（段）/ 拆单快速路径（processOneCard 入口）。
+    //    暂停 ≠ 取消：卡片继续 = 「▶ 继续未完成」；世界书继续 = 重开打标（保持增量跳过）。
+    const tagPauseRequested = ref(false);
+    const pauseTagging = () => {
+        if (!isAITagging.value || tagPauseRequested.value) return;
+        tagPauseRequested.value = true;
+        pushTagLog('⏸ 暂停请求已收到 —— 当前卡片/请求完成后停下…', 'warn');
+    };
+
+    /** 公共 prompt 头部（候选池[开关] + 自由度规则 + 附加要求）—— 单卡 / 打包 / 分段 / 世界书共用
+     *  📨 2026-10-03「全量可编辑」：拆段构建（composeTagPromptHeadParts）+ 应用「候选池与规则」用户覆盖（scope='global'） */
     const buildTagPromptHead = () => {
-        const poolTags = aiCandidateTags.value.slice(0, CANDIDATE_POOL_MAX);
-        return composeTagPromptHead({
-            poolTags,
+        const { poolPart, extraPart } = composeTagPromptHeadParts({
+            poolTags: aiCandidateTags.value.slice(0, CANDIDATE_POOL_MAX),
             poolEnabled: !!useCandidatePool.value,
             enableExtraction: !!enableAIExtraction.value,
             customPrompt: customAIPrompt.value
         });
+        const poolOv = getMaterialOverride('global', 'pool');
+        return (poolOv !== null ? poolOv : poolPart) + extraPart;
     };
+
+    /** 🃏 卡材料构建（描述/性格/首句；不再硬截断——≤ 分段阈值全文送，> 阈值走分段）
+     *  📨 2026-10-03：从 startAITagging 提升到共享设施区——「发送材料预览」与打标发送共用（同源） */
+    const buildCardMaterial = (card) => {
+        const d = card.data?.data || card.data || {};
+        return {
+            charDesc: String(d.description || card.description || ''),
+            charMes: String(d.first_mes || card.first_mes || ''),
+            charPersonality: String(d.personality || card.personality || '')
+        };
+    };
+
+    /** 📚 世界书展示名（wbCtx.wbDisplayName → wb.name → '未命名'）
+     *  📨 2026-10-03：从 startWbTagging 提升到共享设施区（材料预览共用） */
+    const wbNameOf = (wb) => {
+        if (wbCtx && typeof wbCtx.wbDisplayName === 'function') {
+            try { return wbCtx.wbDisplayName(wb) || wb.name || '未命名'; } catch (e) { /* 回退 */ }
+        }
+        return (wb && (wb.wbName || wb.name)) || '未命名';
+    };
+
+    /** 📚 世界书材料构建（书名 + 全部词条 key/content；不截断——超长交给分段）
+     *  📨 2026-10-03：从 startWbTagging 提升到共享设施区（材料预览共用） */
+    const buildMaterial = (wb) => {
+        const name = wbNameOf(wb);
+        let entries = [];
+        const data = wb && wb.data ? wb.data : null;
+        if (data) {
+            if (Array.isArray(data.entries)) entries = data.entries;
+            else if (data.entries && typeof data.entries === 'object') entries = Object.values(data.entries);
+        }
+        const parts = [`书名：${name}`];
+        for (const e of entries) {
+            if (!e || typeof e !== 'object') continue;
+            const key = Array.isArray(e.key) ? e.key.join('、') : String(e.key || '');
+            const content = String(e.content || '');
+            if (!key && !content) continue;
+            parts.push(`【${key || '无标题'}】\n${content}`);
+        }
+        return parts.join('\n\n');
+    };
+
+    // 📨 2026-10-03「全量可编辑」：程序自动材料的**用户覆盖**（随 ui 段落盘；发送与预览同源应用）
+    //    键域：'global'（任务说明/候选池与规则/输出要求）｜'card:<id>'（卡片材料）｜'wb:<path|name>'（世界书材料）
+    //    值为字符串 = 用户编辑后的**整段发送文本**（空串也是有效覆盖）；未设置的键走自动生成。
+    const getMaterialOverride = (scope, key) => {
+        const cur = (tagMaterialOverrides && tagMaterialOverrides.value) || {};
+        const s = cur[scope];
+        return (s && typeof s[key] === 'string') ? s[key] : null;
+    };
+    const cardScopeKey = (card) => 'card:' + ((card && card.id != null) ? String(card.id) : '');
+    const wbScopeKey = (wb) => 'wb:' + ((wb && (wb.path || wb.name)) ? String(wb.path || wb.name) : wbNameOf(wb));
+
+    /** 📨 2026-10-03：任务说明（含用户覆盖；segmented=true 为「片段」文案——超长材料分段链路用） */
+    const buildTaggingTaskText = (kind, segmented) => {
+        const ov = getMaterialOverride('global', 'task');
+        if (ov !== null) return ov;
+        const isWb = kind === 'wb';
+        if (segmented) return isWb
+            ? '你是一个专业的世界书设定标签分类助手。请根据以下世界书内容片段进行打标。\n'
+            : '你是一个专业的角色卡片标签分类助手。请根据以下卡片内容片段进行打标。\n';
+        return isWb
+            ? '你是一个专业的世界书设定标签分类助手。请根据以下世界书内容进行打标。\n'
+            : '你是一个专业的角色卡片标签分类助手。请根据以下卡片内容进行打标。\n';
+    };
+    /** 📨 2026-10-03：输出要求（含用户覆盖）——常规链路的统一读取口（打包链路的 packedOutputRule 除外——解析契约） */
+    const buildTaggingOutputRule = (llmOnlyFlag) => {
+        const ov = getMaterialOverride('global', 'output');
+        return ov !== null ? ov : outputFormatRule(llmOnlyFlag);
+    };
+
+    /** 📨 2026-10-03 自定义模式「完全透明化」：发送材料「分段构建」——**发送与 UI 预览的唯一拼装实现**
+     *  · parts.map(p => p.body).join('') === 实际发送的 promptText（逐字保真——改这里，发送与预览同时生效）
+     *  · 顺序 = 实际拼接顺序：任务说明 → 候选池与规则 → 输出要求 → 卡材料 / 世界书材料
+     *  · note = 预览区展示的「内容说明」；key 供 UI 定位（pool 段带「去编辑候选池」入口）
+     *  · 公共段（任务/池/输出）与目标无关：单卡与世界书共用一套构建（buildCommonPromptParts）
+     *  · 📨 2026-10-03「全量可编辑」：每段支持用户覆盖（scope/key 见 getMaterialOverride；覆盖源=整段替换） */
+    const buildCommonPromptParts = (kind, llmOnlyFlag) => {
+        const parts = [];
+        parts.push({
+            key: 'task', title: '任务说明', scope: 'global', mode: 'override', overridden: getMaterialOverride('global', 'task') !== null,
+            body: buildTaggingTaskText(kind, false),
+            note: '告诉 AI 要做什么。点 🔓 可编辑（按你的文本发送）；「⟲ 恢复自动」还原程序版本。'
+        });
+        const { poolPart, extraPart } = composeTagPromptHeadParts({
+            poolTags: aiCandidateTags.value.slice(0, CANDIDATE_POOL_MAX),
+            poolEnabled: !!useCandidatePool.value,
+            enableExtraction: !!enableAIExtraction.value,
+            customPrompt: customAIPrompt.value
+        });
+        if (useCandidatePool.value) {
+            // 候选池启用：池 + 规则（+附加要求）合成一段（用户要求「仅启用候选池后才出现此段」）
+            const poolOv = getMaterialOverride('global', 'pool');
+            parts.push({
+                key: 'pool', title: '候选池与规则', scope: 'global', mode: 'override', overridden: poolOv !== null,
+                body: poolOv !== null ? poolOv : (poolPart + extraPart),
+                note: '候选池内容在「🏷️ 候选标签池」页签增删；此段仅在启用候选池时出现（含附加要求文本）。'
+            });
+        } else if (extraPart) {
+            // 候选池关闭但附加要求非空：仍会并入发送材料 → 独立成段（编辑=直接改附加要求本体，非覆盖）
+            parts.push({
+                key: 'extra', title: '附加要求', scope: 'global', mode: 'live', overridden: false, liveValue: String(customAIPrompt.value || ''),
+                body: extraPart,
+                note: '未启用候选池：附加要求仍会并入发送材料；编辑的是「要求正文」，发送时自动带【附加要求】前缀。'
+            });
+        }
+        const outOv = getMaterialOverride('global', 'output');
+        parts.push({
+            key: 'output', title: '输出要求', scope: 'global', mode: 'override', overridden: outOv !== null,
+            body: buildTaggingOutputRule(llmOnlyFlag),
+            note: '确保 AI 按结构化标签格式输出（随「仅 LLM」模式自动切换格式）。'
+        });
+        return parts;
+    };
+
+    /** 🃏 卡片材料段（含用户覆盖 scope='card:<id>'） */
+    const buildCardMaterialPart = (card, matArg) => {
+        const mat = matArg || buildCardMaterial(card);
+        const scope = cardScopeKey(card);
+        const ov = getMaterialOverride(scope, 'card');
+        return {
+            key: 'card', title: '卡片材料', scope, mode: 'override', overridden: ov !== null,
+            body: ov !== null ? ov : `\n\n【角色设定提取】：\n名字：${card.name || '未知'}\n描述：${mat.charDesc}\n性格：${mat.charPersonality}\n首句：${mat.charMes}`,
+            note: '每张卡自动替换为本卡内容；编辑后按你的文本发送（仅该卡生效）。'
+        };
+    };
+
+    /** 📚 世界书材料段（含用户覆盖 scope='wb:<path|name>'） */
+    const buildWbMaterialPart = (wb, materialArg) => {
+        const material = (materialArg != null) ? String(materialArg) : buildMaterial(wb);
+        const scope = wbScopeKey(wb);
+        const ov = getMaterialOverride(scope, 'wb');
+        return {
+            key: 'wb', title: '世界书材料', scope, mode: 'override', overridden: ov !== null,
+            body: ov !== null ? ov : `\n\n【世界书材料】\n${material}`,
+            note: '材料 = 书名 + 全部词条（key/content）；超长材料发送时自动分段（最多 40 段，超出均匀采样）。编辑后按你的文本发送（仅该书生效）。'
+        };
+    };
+
+    const buildCardPromptParts = (card, llmOnlyFlag, matArg) => [
+        ...buildCommonPromptParts('card', llmOnlyFlag),
+        buildCardMaterialPart(card, matArg)
+    ];
+    const buildWbPromptParts = (wb, llmOnlyFlag, materialArg) => [
+        ...buildCommonPromptParts('wb', llmOnlyFlag),
+        buildWbMaterialPart(wb, materialArg)
+    ];
 
     /**
      * 🔁 统一请求出口：单卡 / 打包 / 分段 / 世界书共用（两级降级重试 + 日志）
@@ -199,7 +403,12 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
     const requestTaggingShared = async (llmOnly, promptText, label, { disablePrefill = false } = {}) => {
         const jbText = useJailbreak.value ? jailbreakPrompt.value : '';
         const rolePrompts = normalizeRolePrompts(llmRolePrompts && llmRolePrompts.value);
+        // 🧩 2026-10-03「自定义模式」接入：仅 LLM 组合 + 提示词单选为 custom 时，用段编排替代分角色链路
+        //    （唯一请求出口分流——单卡 / 打包 / 分段 / 世界书一处生效；其他组合行为不变）
+        const customSegs = (tagCustomSegments && Array.isArray(tagCustomSegments.value)) ? tagCustomSegments.value : [];
+        const isCustomMode = llmOnly && !!(tagPromptMode && tagPromptMode.value === 'custom');
         const buildMsgs = (usePrefill) => {
+            if (isCustomMode) return buildCustomMessages({ segments: customSegs, defaultUser: promptText, usePrefill });
             if (llmOnly) return buildLlmMessages({ rolePrompts, jailbreak: jbText, defaultUser: promptText, usePrefill });
             const sysContent = buildTaggingSystemPrompt();
             return [
@@ -207,7 +416,7 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
                 { role: 'user', content: promptText }
             ];
         };
-        const prefillOn = llmOnly && !disablePrefill && willUsePrefill(rolePrompts);
+        const prefillOn = llmOnly && !disablePrefill && (isCustomMode ? !!customTailPrefill(customSegs) : willUsePrefill(rolePrompts));
         const ladder = llmOnly
             ? (disablePrefill
                 ? [{ usePrefill: false, label: '无预填充' }]
@@ -222,6 +431,10 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
             temperature: 0.2
         };
         const authKey = (apiKey.value && apiKey.value.trim()) ? apiKey.value : 'test-key';
+        // 🔍 过程透明化（2026-09-27 用户要求）：本请求 = 一条可展开的日志条目——
+        //    展开可见本次**实际发送**的完整消息（System / User / 预填充）与 AI 原始回复（含思考，若有）。
+        pushTagLog(`📤 ${label} → 请求中…`, 'dim', { title: String(label), mode: '', messages: [], rawReply: '', reasoning: '', rawData: '', error: '' });
+        const logRow = aiTagLog.value[aiTagLog.value.length - 1];
         let result;
         let usedLabel = '全量';
         let usedPrefill = '';
@@ -229,12 +442,19 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
         for (let li = 0; li < ladder.length; li++) {
             const step = ladder[li];
             try {
+                const sentMessages = step ? buildMsgs(step.usePrefill) : (payload.messages || []);
+                if (logRow.detail) {
+                    logRow.detail.messages = sentMessages;
+                    logRow.detail.mode = step ? step.label : '';
+                }
                 result = await callAIWithRetry(
-                    step ? { ...payload, messages: buildMsgs(step.usePrefill) } : payload,
+                    step ? { ...payload, messages: sentMessages } : payload,
                     authKey
                 );
                 usedLabel = step ? step.label : '';
-                usedPrefill = (step && step.usePrefill) ? String(rolePrompts.prefill || '').trim() : '';
+                usedPrefill = (step && step.usePrefill)
+                    ? (isCustomMode ? customTailPrefill(customSegs) : String(rolePrompts.prefill || '').trim())
+                    : '';
                 lastErr = null;
                 break;
             } catch (e) {
@@ -244,9 +464,25 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
                 pushTagLog(`⚠️ ${label} → 「${step.label}」被拒（${e.message}），降级为「${next.label}」重试…`, 'warn');
             }
         }
-        if (lastErr) throw lastErr;
+        if (lastErr) {
+            if (logRow.detail) {
+                logRow.detail.error = String((lastErr && lastErr.message) || lastErr);
+                logRow.detail.rawData = briefRawData(lastErr && lastErr.rawResult); // 🧾 失败也保留原始返回（若有）
+                logRow.level = 'err';
+                logRow.text = `📤❌ ${label} → 请求失败：${logRow.detail.error}（点「🔍 查看」看发送数据与原始返回）`;
+            }
+            throw lastErr;
+        }
         if (llmOnly && usedLabel && usedLabel !== '全量') {
             pushTagLog(`ℹ️ ${label} → 本次实际使用「${usedLabel}」模式`, 'dim');
+        }
+        if (logRow.detail) {
+            logRow.detail.rawReply = String(extractReplyContent(result) || '');
+            logRow.detail.reasoning = extractReplyReasoning(result);
+            logRow.detail.rawData = briefRawData((result && result.data) || result); // 🧾 完整原始响应（空回复 / 非标结构排查用）
+            const modeTxt = logRow.detail.mode ? ` · ${logRow.detail.mode}` : '';
+            const thinkTxt = logRow.detail.reasoning ? ` · 思考 ${logRow.detail.reasoning.length} 字` : '';
+            logRow.text = `📤📥 ${label}${modeTxt} → AI 回复 ${logRow.detail.rawReply.length} 字${thinkTxt}（点「🔍 查看」看全过程）`;
         }
         return { result, usedLabel, usedPrefill };
     };
@@ -475,6 +711,7 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
         const rolePrompts = normalizeRolePrompts(llmRolePrompts && llmRolePrompts.value);
 
         isAITagging.value = true;
+        tagPauseRequested.value = false; // ⏸ 新一轮（含续跑）：清除上一轮的暂停态
         // 分层统计（修正 3.3：严格区分规则命中/向量命中/LLM/无匹配/失败）
         // 🆕 P1：unprocessed = 因③层关闭/不可用而未处理的张数（记账，不静默）
         const stats = { rule: 0, vector: 0, llm: 0, empty: 0, fail: 0, unprocessed: 0 };
@@ -520,9 +757,15 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
         if (!plan.vector) pushTagLog('⏭️ ② 向量层已关闭：未命中的卡将直接交给 ③ LLM（LLM 开着时会真实调用 API）', 'dim');
         else if (plan.skip && plan.skip.vector) pushTagLog(`⏭️ ② 向量层将跳过（${plan.skip.vector}）`, 'dim');
         // 🧠 明确告知本次是否启用了「分角色链路 + 结构化截取」（用户要能看出区别）
+        // 🧩 2026-10-03：单选为自定义模式时，改提示为「段编排」口径
         if (llmOnly) {
-            pushTagLog(`🧠 仅 LLM 层启动 → 已启用「分角色链路（System → User）+ <${TAG_WRAPPER}> 结构化截取」`, 'info');
-            pushTagLog(`🧠 预填充：${willUsePrefill(rolePrompts) ? `已启用（${rolePrompts.prefill.trim() || '<tags>['}…）` : '已关闭'} · User 段：${rolePrompts.user.trim() ? '自定义' : '程序自动（本卡信息 + 候选池 + 输出要求）'}`, 'dim');
+            if (tagPromptMode && tagPromptMode.value === 'custom') {
+                const segN = (tagCustomSegments && Array.isArray(tagCustomSegments.value)) ? tagCustomSegments.value.filter(s => s && String(s.content || '').trim()).length : 0;
+                pushTagLog(`🧩 仅 LLM 层启动 → 走「自定义模式」（${segN} 段 + 卡片材料自动附加）`, 'info');
+            } else {
+                pushTagLog(`🧠 仅 LLM 层启动 → 已启用「分角色链路（System → User）+ <${TAG_WRAPPER}> 结构化截取」`, 'info');
+                pushTagLog(`🧠 预填充：${willUsePrefill(rolePrompts) ? `已启用（${rolePrompts.prefill.trim() || '<tags>['}…）` : '已关闭'} · User 段：${rolePrompts.user.trim() ? '自定义' : '程序自动（本卡信息 + 候选池 + 输出要求）'}`, 'dim');
+            }
         } else {
             pushTagLog('ℹ️ 非「仅 LLM」组合 → 沿用原有打标链路（未启用分角色链路）', 'dim');
         }
@@ -679,19 +922,11 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
         // ═══════════════════════════════════════════════════════════
         // 🏷️ S2（2026-09-25）：候选池上限 / prompt 头部（含池开关）/ 请求出口 / 分段切分
         //    已提升到 setup 层「打标共享设施」区（卡版与世界书版共用同一实现）——
-        //    本流程只保留**卡专用**的材料构建（buildCardMaterial / isPackableCard / buildTagUnits）。
+        //    本流程只保留**卡专用**设施（isPackableCard / buildTagUnits；buildCardMaterial 与分段构建已在共享区）。
         if (aiCandidateTags.value.length > CANDIDATE_POOL_MAX) {
             pushTagLog(`⚠️ 候选池 ${aiCandidateTags.value.length} 个 > 上限 ${CANDIDATE_POOL_MAX}：本次只取前 ${CANDIDATE_POOL_MAX} 个（建议精简）`, 'warn');
         }
-        // 卡材料（第二批改造：**不再硬截断** —— ≤ 分段阈值全文送；> 阈值走分段，避免「只取开头、其余直接丢」）
-        const buildCardMaterial = (card) => {
-            const d = card.data?.data || card.data || {};
-            return {
-                charDesc: String(d.description || card.description || ''),
-                charMes: String(d.first_mes || card.first_mes || ''),
-                charPersonality: String(d.personality || card.personality || '')
-            };
-        };
+        // 卡材料构建 buildCardMaterial 已提升到「打标共享设施」区（📨 2026-10-03：发送与预览同源复用）
         // 短卡判定（token 估算；估算失败时宽松放行 → 按短卡处理）
         const isPackableCard = (card) => {
             const m = buildCardMaterial(card);
@@ -727,9 +962,13 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
                 const counts = new Map();
                 const order = [];
                 for (let si = 0; si < segments.length; si++) {
-                    let segPrompt = '你是一个专业的角色卡片标签分类助手。请根据以下卡片内容片段进行打标。\n';
+                    if (tagPauseRequested.value) { // ⏸ 暂停：半截结果不落盘；该卡不记完成 → 续跑会重试整卡
+                        pushTagLog(`⏸ ${name} → 分段未完成（${si}/${segments.length} 段），该卡将在「继续未完成」时重跑`, 'warn');
+                        return;
+                    }
+                    let segPrompt = buildTaggingTaskText('card', true); // 📨 2026-10-03：任务说明含用户覆盖（global）
                     segPrompt += buildTagPromptHead();
-                    segPrompt += outputFormatRule(llmOnly) + `\n\n【角色卡节选 · 第 ${si + 1}/${segments.length} 段】\n${segments[si]}`;
+                    segPrompt += buildTaggingOutputRule(llmOnly) + `\n\n【角色卡节选 · 第 ${si + 1}/${segments.length} 段】\n${segments[si]}`;
                     const { result, usedPrefill } = await requestTaggingShared(llmOnly, segPrompt, `${name} 第${si + 1}/${segments.length}段`);
                     // 🧩 统一解析（共享实现：llmOnly → 结构化三层降级（拼回预填充）；否则 JSON 正则 → 暴力拆分）
                     const tags = parseTagReplyShared(llmOnly, result, usedPrefill, `${name} 第${si + 1}段`);
@@ -762,31 +1001,22 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
 
         // 单卡处理（原逐卡逻辑整体搬进函数，供「单发单元」与「打包失败拆单」共用）
         const processOneCard = async (card) => {
+            if (tagPauseRequested.value) return; // ⏸ 暂停：跳过尚未开始的卡（包内拆单等快速路径）
             try {
                 // 2.9 ✂️ 超长卡（> 阈值）：分段处理（第二批 · D9）；普通卡走下方常规路径
                 const mat = buildCardMaterial(card);
-                const fullText = [mat.charDesc, mat.charMes, mat.charPersonality].filter(Boolean).join('\n');
+                let fullText = [mat.charDesc, mat.charMes, mat.charPersonality].filter(Boolean).join('\n');
+                // 📨 2026-10-03：材料段被用户编辑（覆盖）→ 分段链路同样以覆盖文本为「材料本体」（与单发同一口径）
+                const cardMaterialOv = getMaterialOverride(cardScopeKey(card), 'card');
+                if (cardMaterialOv !== null) fullText = cardMaterialOv;
                 if (fullText.length > SEGMENT_THRESHOLD_CHARS) {
                     await processSegmentedCard(card, fullText);
                     return;
                 }
                 // 3. 卡片设定（第二批起不再硬截断；≤ 阈值全文送，> 阈值已走分段）
-                const charDesc = mat.charDesc;
-                const charMes = mat.charMes;
-                const charPersonality = mat.charPersonality;
-
-                // 4. 构建强约束 Prompt（候选池[上限 300] + 自由提取开关 + 自定义提示词）
-                let promptText = '你是一个专业的角色卡片标签分类助手。请根据以下卡片内容进行打标。\n';
-                promptText += buildTagPromptHead();
-
-                // 4.4 输出格式（🧠 R1：仅 LLM 单独启动时要求 `<tags>` 结构化包裹）
-                promptText += outputFormatRule(llmOnly) + `
-
-【角色设定提取】：
-名字：${card.name || '未知'}
-描述：${charDesc}
-性格：${charPersonality}
-首句：${charMes}`;
+                //    4. 构建强约束 Prompt（候选池[上限 300] + 自由提取开关 + 自定义提示词 + 输出格式）
+                //    📨 2026-10-03 透明化：改走「分段构建」（buildCardPromptParts）——与 UI 预览同源（同一函数）
+                const promptText = buildCardPromptParts(card, llmOnly, mat).map(p => p.body).join('');
 
                 // 5. 经主进程 IPC 转发调用 API（绕过 CORS；与聊天测卡共用通道）
                 const { result, usedPrefill } = await requestTaggingShared(llmOnly, promptText, card.name || '未知角色');
@@ -819,12 +1049,18 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
             const n = cards.length;
             const label = cards.map(c => c.name || '未知角色').join('、');
             try {
-                let promptText = `你是一个专业的角色卡片标签分类助手。请你一次性为以下 ${n} 张角色卡分别打标。\n`;
+                // 📨 2026-10-03「全量可编辑」：任务说明支持用户覆盖（global）；打包「输出要求」保持多卡对象格式
+                //    （packedOutputRule——与 parsePackedTags 的解析契约绑定，覆盖不应用于打包链路）
+                const packTaskOv = getMaterialOverride('global', 'task');
+                let promptText = packTaskOv !== null ? packTaskOv : `你是一个专业的角色卡片标签分类助手。请你一次性为以下 ${n} 张角色卡分别打标。\n`;
                 promptText += buildTagPromptHead();
                 promptText += packedOutputRule(n) + '\n\n';
                 cards.forEach((card, idx) => {
                     const m = buildCardMaterial(card);
-                    promptText += `【卡片 ${idx + 1}】\n名字：${card.name || '未知'}\n描述：${m.charDesc}\n性格：${m.charPersonality}\n首句：${m.charMes}\n\n`;
+                    const cardOv = getMaterialOverride(cardScopeKey(card), 'card');
+                    promptText += cardOv !== null
+                        ? `【卡片 ${idx + 1}】\n${cardOv}\n\n`
+                        : `【卡片 ${idx + 1}】\n名字：${card.name || '未知'}\n描述：${m.charDesc}\n性格：${m.charPersonality}\n首句：${m.charMes}\n\n`;
                 });
                 // 🧩 打包禁用预填充（AI-10 根治）：打包要求对象格式 `<tags>{…}`，
                 //    与数组预填充 `<tags>[` 本就冲突——禁掉后两端不再打架，解析按对象正文走。
@@ -864,6 +1100,10 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
 
         let processedCards = 0;
         for (let ui = 0; ui < tagUnits.length; ui++) {
+            if (tagPauseRequested.value) { // ⏸ 暂停：不再开启新请求单元（已完成结果保留）
+                pushTagLog('⏸ 已暂停：不再发起新请求（进度已保留）', 'dim');
+                break;
+            }
             const unitCards = tagUnits[ui].ids.map(id => cardIndex.get(id)).filter(Boolean);
             if (unitCards.length === 0) continue;
             if (unitCards.length === 1) {
@@ -891,7 +1131,8 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
 
         // 8. 扫尾工作
         isAITagging.value = false;
-        aiTaggingProgress.value.status = '✅ 全部处理完成！';
+        const wasPaused = tagPauseRequested.value; // ⏸ 暂停收尾 vs 正常完成（文案 / 自动关窗不同）
+        aiTaggingProgress.value.status = wasPaused ? '⏸ 已暂停（点「▶ 继续未完成」接着跑）' : '✅ 全部处理完成！';
         // 🔧 修复：打标全程 persistCardUpdate 走 500ms 防抖落盘覆盖层，若打标后用户
         //    立即关闭窗口，防抖未触发 + beforeunload 冲刷“尽力而为”可能来不及 →
         //    覆盖层未落盘，重启后标签丢失。此处强制立即落盘一次，确保重启后完整恢复。
@@ -900,12 +1141,15 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
         }
 
         // 📜 收尾总结写入日志窗口（**不再弹系统弹框**）：分层结果 + 失败归类聚合
-        pushTagLog('────────── 打标完成 ──────────', 'info');
+        pushTagLog(wasPaused ? '────────── 已暂停 ──────────' : '────────── 打标完成 ──────────', 'info');
         pushTagLog(formatFunnelSummary(stats, plan), stats.fail > 0 ? 'warn' : 'ok');
         if (stats.empty > 0) pushTagLog(`⚠️ 无匹配标签：${stats.empty} 张`, 'warn');
         if (stats.fail > 0) {
             pushTagLog(`❌ 失败：${stats.fail} 张（逐条明细见上方日志）`, 'err');
             for (const line of summarizeFailures(failReasons)) pushTagLog(`· ${line}`, 'err');
+        }
+        if (wasPaused) {
+            pushTagLog('ℹ️ 已完成部分的标签已保存 —— 点「▶ 继续未完成」即可从断点接着跑（自动跳过已完成）', 'dim');
         }
 
         // 📌 断点续跑收尾：全部完成 → 清除账本；仍有未完成（失败卡）→ 保留供「继续未完成」重试
@@ -925,10 +1169,12 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
         //    池关时不询问（用户已选择不用池）；放弃则仅保留在卡片上。
         await offerPoolRefill(poolRefillCandidates);
 
-        // 延迟一点关闭弹窗，让用户看到最后的状态
-        setTimeout(() => {
-            showAITagModal.value = false;
-        }, 2000);
+        // 延迟一点关闭弹窗，让用户看到最后的状态；⏸ 暂停时保持窗口打开（便于点「继续未完成」）
+        if (!wasPaused) {
+            setTimeout(() => {
+                showAITagModal.value = false;
+            }, 2000);
+        }
     };
 
     // ═══════════════════════════════════════════════════════════════
@@ -950,12 +1196,7 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
         if (isAITagging.value) return;
         const wbGetTags = (wb) => ((wbCtx && typeof wbCtx.getWbTags === 'function') ? wbCtx.getWbTags(wb) : []);
         const wbSetTags = (wb, tags) => { if (wbCtx && typeof wbCtx.setWbTags === 'function') wbCtx.setWbTags(wb, tags); };
-        const wbNameOf = (wb) => {
-            if (wbCtx && typeof wbCtx.wbDisplayName === 'function') {
-                try { return wbCtx.wbDisplayName(wb) || wb.name || '未命名'; } catch (e) { /* 回退 */ }
-            }
-            return (wb && (wb.wbName || wb.name)) || '未命名';
-        };
+        // wbNameOf 已提升到「打标共享设施」区（📨 2026-10-03：发送与预览同源复用）
 
         // 1. 目标集（范围单选：当前书 / 当前筛选结果）
         const activeWb = wbCtx && wbCtx.activeWorldbook ? wbCtx.activeWorldbook.value : null;
@@ -1004,6 +1245,7 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
         const llmOnly = isLlmOnlyPlan(plan);
 
         isAITagging.value = true;
+        tagPauseRequested.value = false; // ⏸ 新一轮：清除上一轮的暂停态
         const stats = { rule: 0, vector: 0, llm: 0, empty: 0, fail: 0, unprocessed: 0 };
         const failReasons = [];
         const poolRefillCandidates = new Set();
@@ -1017,25 +1259,7 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
             for (const t of clean) if (!aiCandidateTags.value.includes(t)) poolRefillCandidates.add(t);
         };
 
-        // 材料构建（书名 + 全部词条 key/content；不截断——超长交给分段）
-        const buildMaterial = (wb) => {
-            const name = wbNameOf(wb);
-            let entries = [];
-            const data = wb && wb.data ? wb.data : null;
-            if (data) {
-                if (Array.isArray(data.entries)) entries = data.entries;
-                else if (data.entries && typeof data.entries === 'object') entries = Object.values(data.entries);
-            }
-            const parts = [`书名：${name}`];
-            for (const e of entries) {
-                if (!e || typeof e !== 'object') continue;
-                const key = Array.isArray(e.key) ? e.key.join('、') : String(e.key || '');
-                const content = String(e.content || '');
-                if (!key && !content) continue;
-                parts.push(`【${key || '无标题'}】\n${content}`);
-            }
-            return parts.join('\n\n');
-        };
+        // 材料构建 buildMaterial 已提升到「打标共享设施」区（📨 2026-10-03：发送与预览同源复用）
 
         // 日志窗口 + 头部管线说明
         aiTagLog.value = [];
@@ -1044,7 +1268,12 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
         if (incrementSkipped > 0) pushTagLog(`⏭️ 增量模式：跳过 ${incrementSkipped} 本已有标签的世界书`, 'dim');
         pushTagLog(`管线：${plan.rule ? '① 规则（开）' : '① 规则（关）'} → ${plan.vector ? '② 向量（开）' : '② 向量（关）'} → ${plan.llm ? '③ LLM 兜底（开）' : '③ LLM 兜底（关）'}`, 'info');
         if (tagFunnel.value.vector && !plan.vector) pushTagLog(`⏭️ ② 向量层将跳过（${(plan.skip && plan.skip.vector) || '条件不满足'}）`, 'dim');
-        if (llmOnly) pushTagLog(`🧠 仅 LLM 层启动 → 启用「分角色链路（System → User）+ <${TAG_WRAPPER}> 结构化截取」`, 'info');
+        if (llmOnly) {
+            const customWb = !!(tagPromptMode && tagPromptMode.value === 'custom');
+            pushTagLog(customWb
+                ? '🧩 仅 LLM 层启动 → 走「自定义模式」（段编排 + 材料自动附加）'
+                : `🧠 仅 LLM 层启动 → 启用「分角色链路（System → User）+ <${TAG_WRAPPER}> 结构化截取」`, 'info');
+        }
         pushTagLog('🏷️ 落盘说明：标签写入配置层 wbTagMap（**不改写世界书文件**）', 'dim');
 
         // 5. ① 规则层（作用于书名 + 词条全文；命中后**仍参与②向量补充**——与卡版同构）
@@ -1135,6 +1364,10 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
                 pushTagLog('⚠️ 已关闭 AI 自由提取，且候选标签池为空 —— LLM 兜底已跳过（未处理）', 'warn');
             } else {
                 for (let i = 0; i < llmTargets.length; i++) {
+                    if (tagPauseRequested.value) { // ⏸ 暂停：不再开启新的世界书请求
+                        pushTagLog('⏸ 已暂停：不再发起新请求（已打标的书已保存）', 'dim');
+                        break;
+                    }
                     const wb = llmTargets[i];
                     const name = wbNameOf(wb);
                     aiTaggingProgress.value = {
@@ -1148,15 +1381,15 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
                         if (wbCtx && typeof wbCtx.ensureWorldbookLoaded === 'function') {
                             try { await wbCtx.ensureWorldbookLoaded(wb); } catch (e) { /* 加载失败按空处理 */ }
                         }
-                        const material = buildMaterial(wb);
+                        // 📨 2026-10-03：材料段被用户编辑（覆盖）→ 以覆盖文本为「材料本体」（单发与分段同一口径）
+                        const wbMaterialOv = getMaterialOverride(wbScopeKey(wb), 'wb');
+                        const material = wbMaterialOv !== null ? wbMaterialOv : buildMaterial(wb);
                         if (!material || material.length < 10) {
                             stats.empty++;
                             pushTagLog(`⚠️ ${name} → 无词条内容可打标（无匹配）`, 'warn');
                         } else if (material.length <= SEGMENT_THRESHOLD_CHARS) {
-                            // 短材料：单发
-                            let promptText = '你是一个专业的世界书设定标签分类助手。请根据以下世界书内容进行打标。\n';
-                            promptText += buildTagPromptHead();
-                            promptText += outputFormatRule(llmOnly) + `\n\n【世界书材料】\n${material}`;
+                            // 短材料：单发（📨 2026-10-03 透明化：分段构建，与预览同源）
+                            const promptText = buildWbPromptParts(wb, llmOnly, material).map(p => p.body).join('');
                             const { result, usedPrefill } = await requestTaggingShared(llmOnly, promptText, name);
                             const newTags = parseTagReplyShared(llmOnly, result, usedPrefill, name);
                             if (Array.isArray(newTags) && newTags.length > 0) {
@@ -1184,10 +1417,16 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
                             }
                             const counts = new Map();
                             const order = [];
+                            let segPaused = false; // ⏸ 分段中途暂停：半截结果不落盘（重开时整本重跑）
                             for (let si = 0; si < segments.length; si++) {
-                                let segPrompt = '你是一个专业的世界书设定标签分类助手。请根据以下世界书内容片段进行打标。\n';
+                                if (tagPauseRequested.value) {
+                                    segPaused = true;
+                                    pushTagLog(`⏸ ${name} → 分段未完成（${si}/${segments.length} 段），该本未落盘（重开增量时会重跑）`, 'warn');
+                                    break;
+                                }
+                                let segPrompt = buildTaggingTaskText('wb', true); // 📨 2026-10-03：任务说明含用户覆盖（global）
                                 segPrompt += buildTagPromptHead();
-                                segPrompt += outputFormatRule(llmOnly) + `\n\n【世界书节选 · 第 ${si + 1}/${segments.length} 段】\n${segments[si]}`;
+                                segPrompt += buildTaggingOutputRule(llmOnly) + `\n\n【世界书节选 · 第 ${si + 1}/${segments.length} 段】\n${segments[si]}`;
                                 const { result, usedPrefill } = await requestTaggingShared(llmOnly, segPrompt, `${name} 第${si + 1}/${segments.length}段`);
                                 const tags = parseTagReplyShared(llmOnly, result, usedPrefill, `${name} 第${si + 1}段`);
                                 for (const t of (Array.isArray(tags) ? tags : [])) {
@@ -1198,12 +1437,12 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
                                 }
                                 if (si < segments.length - 1) await sleepMs(AI_TAG_DELAY_MS);
                             }
-                            const merged = order.slice().sort((a, b) => (counts.get(b) - counts.get(a)) || (order.indexOf(a) - order.indexOf(b)));
+                            const merged = segPaused ? [] : order.slice().sort((a, b) => (counts.get(b) - counts.get(a)) || (order.indexOf(a) - order.indexOf(b)));
                             if (merged.length > 0) {
                                 applyWbTags(wb, merged);
                                 stats.llm++;
                                 pushTagLog(`✅ ${name} → LLM 标签（分段 ${segments.length} 段 · 合并去重）：${merged.join('、')}`, 'ok');
-                            } else {
+                            } else if (!segPaused) { // ⏸ 暂停时（merged=[]）不计「无匹配」
                                 stats.empty++;
                                 pushTagLog(`⚠️ ${name} → 分段后仍未取到标签（无匹配）`, 'warn');
                             }
@@ -1224,18 +1463,22 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
 
         // 8. 收尾（强制落盘 → 总结 → 产出回池）
         isAITagging.value = false;
-        aiTaggingProgress.value.status = '✅ 全部处理完成！';
+        const wasPaused = tagPauseRequested.value; // ⏸ 暂停收尾 vs 正常完成（文案 / 自动关窗不同）
+        aiTaggingProgress.value.status = wasPaused ? '⏸ 已暂停' : '✅ 全部处理完成！';
         if (wbCtx && typeof wbCtx.saveWbCategoriesMap === 'function') { try { wbCtx.saveWbCategoriesMap(); } catch (e) { /* 忽略 */ } }
         if (typeof syncConfigToDisk === 'function') { try { syncConfigToDisk(); } catch (e) { /* 忽略 */ } }
-        pushTagLog('────────── 世界书打标完成 ──────────', 'info');
+        pushTagLog(wasPaused ? '────────── 世界书打标已暂停 ──────────' : '────────── 世界书打标完成 ──────────', 'info');
         pushTagLog(formatFunnelSummary(stats, plan), stats.fail > 0 ? 'warn' : 'ok');
         if (stats.empty > 0) pushTagLog(`⚠️ 无匹配标签：${stats.empty} 本`, 'warn');
         if (stats.fail > 0) {
             pushTagLog(`❌ 失败：${stats.fail} 本（逐条明细见上方日志）`, 'err');
             for (const line of summarizeFailures(failReasons)) pushTagLog(`· ${line}`, 'err');
         }
+        if (wasPaused) {
+            pushTagLog('ℹ️ 已打标的世界书标签已保存 —— 重新开始打标（保持「⏭️ 跳过已打标卡」开启）即可接着跑剩余的书', 'dim');
+        }
         await offerPoolRefill(poolRefillCandidates);
-        setTimeout(() => { showAITagModal.value = false; }, 2000);
+        if (!wasPaused) setTimeout(() => { showAITagModal.value = false; }, 2000); // ⏸ 暂停时保持窗口打开
     };
 
     // ================= [ 🌐 AI 一键汉化功能 ] =================
@@ -1569,6 +1812,12 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
     return {
         // AI 智能批量打标
         showAITagModal, aiCandidateTags, aiCustomPrompt, aiTaggingProgress, isAITagging, openAITagModal, startAITagging,
+        // 📨 2026-10-03 透明化：发送材料「分段构建」（UI 预览用；与打标发送同源）
+        buildCardPromptParts, buildWbPromptParts,
+        // 📨 2026-10-03「全量可编辑 · 全目标展示」：公共段/材料段独立构建（预览区按「公共 + 每目标」分组渲染）
+        buildCommonPromptParts, buildCardMaterialPart, buildWbMaterialPart,
+        // ⏸ 打标暂停（2026-09-28）：暂停请求 + 「已暂停」态（UI 与探针共用）
+        tagPauseRequested, pauseTagging,
         // 🏷️ S3（2026-09-25）：世界书打标（与卡片同一条系统；目标模式/范围/范围信息由弹窗消费）
         startWbTagging, aiTagTargetMode, wbTagRange, wbTagRangeInfo,
         // 📜 打标过程实时日志窗口

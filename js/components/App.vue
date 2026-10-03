@@ -113,9 +113,11 @@
             :show="showAiTagLog"
             :log="aiTagLog"
             :running="isAITagging"
+            :paused="tagPausedNow"
             :progress="aiTaggingProgress"
             @close="closeAiTagLog"
             @clear="clearAiTagLog"
+            @pause-tagging="pauseTagging"
         />
 
         <!-- ================= [ 弹窗：AI 智能批量打标（子组件 AITagModal） ] ================= -->
@@ -131,6 +133,9 @@
             :jailbreak-prompt="jailbreakPrompt"
             :jailbreak-presets="jailbreakPresets"
             :llm-role-prompts="llmRolePrompts"
+            :tag-custom-segments="tagCustomSegments"
+            :tag-prompt-mode="tagPromptMode"
+            :material-preview="materialPreview"
             :tag-pack-size="tagPackSize"
             :tag-skip-tagged="tagSkipTagged"
             :tag-resume="tagResume"
@@ -144,6 +149,7 @@
             :is-fetching-models="isFetchingModels"
             :fetch-model-status="fetchModelStatus"
             :is-a-i-tagging="isAITagging"
+            :tag-paused="tagPausedNow"
             :ai-tagging-progress="aiTaggingProgress"
             :tag-funnel="tagFunnel"
             :funnel-plan="tagFunnelPlan"
@@ -173,9 +179,15 @@
             @update:useJailbreak="useJailbreak = $event"
             @update:jailbreakPrompt="jailbreakPrompt = $event"
             @save-role-prompts="saveRolePrompts"
+            @map-prompts="mapPromptsToSegments"
+            @set-prompt-mode="tagPromptMode = $event"
+            @update:tagCustomSegments="tagCustomSegments = $event"
+            @set-material-override="setMaterialOverride"
+            @clear-material-override="clearMaterialOverride"
             @update:tagPackSize="tagPackSize = $event"
             @update:tagSkipTagged="tagSkipTagged = $event"
             @resume-tagging="resumeTagging"
+            @pause-tagging="pauseTagging"
             @fetch-available-models="fetchAvailableModels"
             @test-connection="testApiConnection"
             @update:apiEndpoint="apiEndpoint = $event"
@@ -707,6 +719,7 @@ import cardFormats from '../../main/cardFormats.json';
 import { isPathSavable, unsavableReason } from '../utils/cardFormats.js'; // 📇 DF-25：渲染层格式表（判「此卡能否写回」）
 import { DEFAULT_TAG_FUNNEL, normalizeTagFunnel, normalizeDisabledRules, resolveFunnelPlan, formatFunnelBadge, isFunnelEmpty } from '../utils/tagFunnel.js'; // 🏷️ P1：打标三层开关默认值/归一化/层决策（纯函数）；P2 起状态短标签也在此派生（供注册表命令的 badge 用）
 import { migrateLegacyPresets } from '../utils/llmPromptRoles.js'; // 🧠 第二批改造：旧提示词预设库 → 单套链路（system/user/prefill）迁移
+import { normalizeCustomSegments, buildSegmentsFromPrompts } from '../utils/customPromptSegments.js'; // ✨ 自定义模式（2026-10-03）：多段提示词列表校验/清洗 + 初始映射
 import { normalizeGroupProfiles, normalizeAutoGroupLastRun } from '../utils/autoGroup.js'; // 🗂️ 自动分组：分组档案/移动日志归一化（判定纯函数在同文件；执行器在 useAutoGroup）
 import { normalizeWbGroupProfiles, normalizeAutoGroupLastRun as normalizeWbAutoGroupLastRun } from '../utils/wbAutoGroup.js'; // 🗂️ S4：世界书分组档案/日志归一化
 import { createCommandRegistry, evaluateWhen } from '../utils/commandRegistry.js'; // 🎛️ P2：命令注册表 + when 求值（菜单/命令面板/快捷键的唯一真相源）
@@ -2493,6 +2506,25 @@ export default {
                                 } else if (Array.isArray(cfg.ui.systemPromptPresets) && cfg.ui.systemPromptPresets.length) {
                                     llmRolePrompts.value = migrateLegacyPresets(cfg.ui.systemPromptPresets);
                                 }
+                                // ✨ 自定义模式（2026-10-03）：多段提示词列表（校验清洗后恢复）
+                                if (Array.isArray(cfg.ui.tagCustomSegments)) {
+                                    tagCustomSegments.value = normalizeCustomSegments(cfg.ui.tagCustomSegments);
+                                }
+                                // � 2026-10-03：程序自动材料的用户覆盖（两层清洗：scope 对象 + 字符串值）
+                                if (cfg.ui.tagMaterialOverrides && typeof cfg.ui.tagMaterialOverrides === 'object' && !Array.isArray(cfg.ui.tagMaterialOverrides)) {
+                                    const cleanOv = {};
+                                    for (const [ovScope, ovMap] of Object.entries(cfg.ui.tagMaterialOverrides)) {
+                                        if (!ovMap || typeof ovMap !== 'object' || Array.isArray(ovMap)) continue;
+                                        const cleanMap = {};
+                                        for (const [ovKey, ovVal] of Object.entries(ovMap)) { if (typeof ovVal === 'string') cleanMap[ovKey] = ovVal; }
+                                        if (Object.keys(cleanMap).length) cleanOv[ovScope] = cleanMap;
+                                    }
+                                    tagMaterialOverrides.value = cleanOv;
+                                }
+                                // �🔘 提示词路径单选（2026-10-03；非法值回退 system）
+                                if (cfg.ui.tagPromptMode === 'custom' || cfg.ui.tagPromptMode === 'system') {
+                                    tagPromptMode.value = cfg.ui.tagPromptMode;
+                                }
                                 if (Number.isFinite(Number(cfg.ui.tagPackSize))) {
                                     tagPackSize.value = Math.min(10, Math.max(1, Number(cfg.ui.tagPackSize) || 1));
                                 }
@@ -3315,6 +3347,16 @@ export default {
             } catch (e) { /* 忽略 */ }
             return migrateLegacyPresets(legacy);
         })());
+        // ✨ 自定义模式（2026-10-03）：「提示词 → 自定义模式」页签的多段提示词列表
+        //    [{ id, role: 'system'|'user'|'assistant', content }]——随 ui 段落盘（恢复见 loadAppConfig）
+        const tagCustomSegments = ref([]);
+        // 🔘 提示词路径单选（2026-10-03 用户需求）：「提示词」组二选一 —— 'system'（现有链路）/ 'custom'（自定义模式段）
+        //    打标时只执行选中的一条（互斥；默认 system = 保持现有行为；切换入口 = 点击导航条目）
+        const tagPromptMode = ref('system');
+        // 📨 2026-10-03「全量可编辑」：程序自动材料的**用户覆盖**（发送与预览同源应用；随 ui 段落盘）
+        //    结构：{ global: { task?, pool?, output? }, 'card:<id>': { card? }, 'wb:<path|name>': { wb? } }
+        //    值为字符串 = 用户编辑后的整段发送文本（空串也是有效覆盖）；「⟲ 恢复自动」= 删除对应键
+        const tagMaterialOverrides = ref({});
         // 📦 每请求打包卡数（第二批改造 · 提量；1 = 与旧行为完全一致）
         const tagPackSize = ref((() => {
             try {
@@ -4518,7 +4560,7 @@ export default {
         // 与此处建立集中 watch：所有相关 ref 已声明完毕（最后一个为 wbCategoryMap），
         // 回调里的 syncConfigToDisk 已内置 isRestoringConfig guard，恢复期触发的写盘会被自动拦截，无需 immediate。
         watch(
-            [theme, appSettings, sanitizeImportedTags, autoTagOnImport, snapshotConfig, sidebarWidth, viewMode, isCompactMode, sortBy, llmRolePrompts, tagPackSize, tagSkipTagged, tagResume, lastWorldbookDirPath, lastPresetDirPath, wbCategoryMap, wbTagMap, cardImportTimes],
+            [theme, appSettings, sanitizeImportedTags, autoTagOnImport, snapshotConfig, sidebarWidth, viewMode, isCompactMode, sortBy, llmRolePrompts, tagCustomSegments, tagPromptMode, tagMaterialOverrides, tagPackSize, tagSkipTagged, tagResume, lastWorldbookDirPath, lastPresetDirPath, wbCategoryMap, wbTagMap, cardImportTimes],
             // 🚀 v1.8.5 性能修复：改走 500ms 防抖落盘。旧版直接调 syncConfigToDisk（全量
             //    序列化 appSettings/cardOverlays/wbCategoryMap + 加密 IPC + 同步写盘），
             //    连续 UI 微调（拖侧栏宽度/切主题等）每次都全量写盘，千卡库 overlays 体积
@@ -5176,7 +5218,7 @@ export default {
             apiEndpoint, apiKey, apiModel, apiType,
             theme, appSettings, sanitizeImportedTags, autoTagOnImport, snapshotConfig, localCategoryMap,
             sidebarWidth, viewMode, isCompactMode, sortBy,
-            llmRolePrompts, tagPackSize, tagSkipTagged, tagResume, lastWorldbookDirPath, lastPresetDirPath, wbCategoryMap, wbTagMap,
+            llmRolePrompts, tagCustomSegments, tagPromptMode, tagMaterialOverrides, tagPackSize, tagSkipTagged, tagResume, lastWorldbookDirPath, lastPresetDirPath, wbCategoryMap, wbTagMap,
             // 🏷️ S2（2026-09-25）：候选池三状态（开关 / 自由提取 / 池本体）随 ui 段落盘
             useCandidatePool, enableAIExtraction, aiCandidateTags,
             cardImportTimes,
@@ -5671,6 +5713,8 @@ export default {
         //    wbCtx 注入世界书打标所需的两套适配（材料/落盘 + 懒加载），appMode 供入口按视图分发。
         const {
             showAITagModal, aiCustomPrompt, aiTaggingProgress, isAITagging, openAITagModal, startAITagging,
+            // ⏸ 打标暂停（2026-09-28）：暂停请求 + 已暂停 UI 态
+            tagPauseRequested, pauseTagging,
             // 🏷️ S3（2026-09-25）：世界书打标（统一入口按视图分发；目标模式/范围/范围信息供弹窗消费）
             startWbTagging, aiTagTargetMode, wbTagRange, wbTagRangeInfo,
             // 🏷️ S2：候选池开关可用性（Q1 真值表；状态本体在上面已定义）
@@ -5680,6 +5724,10 @@ export default {
             customAIPrompt, newAICandidateTag,
             addAICandidateTag, addAICandidateTagManual, addAICandidateTagsBatch, removeAICandidateTag,
             getCurrentSystemPromptContent, buildTaggingSystemPrompt, saveRolePrompts,
+            // 📨 2026-10-03 透明化：发送材料「分段构建」（打标窗口「自定义模式」预览用；与发送同源）
+            buildCardPromptParts, buildWbPromptParts,
+            // 📨 2026-10-03「全量可编辑 · 全目标展示」：公共段/材料段独立构建（预览区按「公共 + 每目标」分组渲染）
+            buildCommonPromptParts, buildCardMaterialPart, buildWbMaterialPart,
             // 🧠 仅 LLM 层时的分角色链路 + 结构化截取（UI 徽标用）
             llmOnlyActive,
             // 🔌 连通性测试
@@ -5693,7 +5741,7 @@ export default {
         } = useAITools({
             selectedIds, library, cardData, apiEndpoint, apiKey, apiType, resolveApiModel, extractReplyContent,
             persistCardUpdate, refreshCardData, nativeAlert, confirmDialog, showToast,
-            llmRolePrompts, autoTagRules: compiledAutoTagRules, tagFunnel, tagPackSize, tagSkipTagged, tagResume, syncConfigToDisk,
+            llmRolePrompts, tagCustomSegments, tagPromptMode, tagMaterialOverrides, autoTagRules: compiledAutoTagRules, tagFunnel, tagPackSize, tagSkipTagged, tagResume, syncConfigToDisk,
             // 🏷️ S3：世界书打标接入（与卡片同一条系统；材料/落盘两套适配 + 懒加载/释放在这里注入）
             appMode,
             wbCtx: { worldbooks, activeWorldbook, filteredWorldbooks, getWbTags, setWbTags, saveWbCategoriesMap, wbDisplayName, ensureWorldbookLoaded, releaseWorldbookBody },
@@ -5704,10 +5752,130 @@ export default {
         // 📌 断点续跑入口（弹窗「执行管线」页「继续未完成」按钮）→ fromResume=true
         const resumeTagging = () => startAITagging(true);
 
+        // ⏸ 打标暂停（2026-09-28）：UI 判「已暂停」态 —— 打标已停、暂停标志未被新任务清除（两个弹窗共用）
+        const tagPausedNow = computed(() => !isAITagging.value && tagPauseRequested.value);
+
+        // 📨 2026-10-03「完全透明化 · 全目标展示」（用户迭代）：发送材料预览（分组；与打标发送同源——同一批构建函数）
+        //    · 公共材料（任务说明/候选池与规则/输出要求）与目标无关 → 单列一组（所有卡/书共用）
+        //    · 目标材料：卡片视图 = 全部选中卡；世界书视图 = 打标范围（当前书 / 筛选结果）内全部书
+        //    · 每段可编辑（覆盖 → tagMaterialOverrides）与锁定（纯 UI）；随候选池/附加要求/选中目标实时刷新
+        const materialPreview = computed(() => {
+            try {
+                const isWb = appMode.value === 'worldbooks';
+                const sections = [];
+                sections.push({
+                    id: 'common', kind: 'common',
+                    label: isWb ? '公共材料（所有世界书共用）' : '公共材料（所有卡片共用）',
+                    parts: buildCommonPromptParts(isWb ? 'wb' : 'card', true)
+                });
+                if (isWb) {
+                    const wbs = (wbTagRange.value === 'filtered')
+                        ? (filteredWorldbooks.value || [])
+                        : ((activeWorldbook && activeWorldbook.value) ? [activeWorldbook.value] : []);
+                    for (const wb of wbs) {
+                        const part = buildWbMaterialPart(wb);
+                        let label = '未命名';
+                        try { label = wbDisplayName(wb) || (wb && (wb.wbName || wb.name)) || '未命名'; }
+                        catch (e) { label = (wb && (wb.wbName || wb.name)) || '未命名'; }
+                        sections.push({ id: part.scope, kind: 'target', label, parts: [part] });
+                    }
+                } else {
+                    const cards = library.value.filter((c) => (selectedIds.value || []).includes(c.id));
+                    for (const card of cards) {
+                        const part = buildCardMaterialPart(card);
+                        sections.push({ id: part.scope, kind: 'target', label: card.name || '未知角色', parts: [part] });
+                    }
+                }
+                return { sections, targetCount: Math.max(0, sections.length - 1), isWb };
+            } catch (e) { return { sections: [], targetCount: 0, isWb: false }; }
+        });
+
+        // 📨 2026-10-03：预览目标「懒加载」——世界书正文按需读取（读完预览自动刷新；与打标发送同一加载器）。
+        //    串行 + 令牌取消（目标集变化时放弃旧一轮）；幂等（已加载/无路径跳过）。
+        let wbPreviewLoadToken = 0;
+        watch(
+            () => {
+                if (appMode.value !== 'worldbooks') return '';
+                const wbs = (wbTagRange.value === 'filtered')
+                    ? (filteredWorldbooks.value || [])
+                    : ((activeWorldbook && activeWorldbook.value) ? [activeWorldbook.value] : []);
+                return wbs.filter((w) => w && w.dataLoaded === false && w.path).map((w) => w.path).join('|');
+            },
+            () => {
+                const token = ++wbPreviewLoadToken;
+                const wbs = (wbTagRange.value === 'filtered')
+                    ? (filteredWorldbooks.value || [])
+                    : ((activeWorldbook && activeWorldbook.value) ? [activeWorldbook.value] : []);
+                (async () => {
+                    for (const wb of wbs) {
+                        if (token !== wbPreviewLoadToken) return; // 目标集已变化：让位给最新一轮
+                        if (wb && wb.dataLoaded === false && wb.path && typeof ensureWorldbookLoaded === 'function') {
+                            try { await ensureWorldbookLoaded(wb, { silent: true }); } catch (e) { /* 单本失败不影响其余 */ }
+                        }
+                    }
+                })();
+            },
+            { immediate: true }
+        );
+
         // 🏷️ S3（2026-09-25）：打标启动按目标模式分发（角色卡 → startAITagging；世界书 → startWbTagging）
         const handleStartTagging = (fromResume) => {
             if (aiTagTargetMode.value === 'worldbooks') return startWbTagging();
             return startAITagging(fromResume);
+        };
+
+        // 🌐 2026-10-03「三合一」：URL 导入统一入口 —— 按当前侧边栏所在库自动分发
+        //    同款先例：handleStartTagging（按目标模式）/ startSmartDedupe（按视图）/ openAITagModal（按 appMode）
+        const importFromUrlSmart = () => {
+            const mode = appMode.value;
+            if (mode === 'worldbooks') return importWorldbookFromUrl();
+            if (mode === 'presets') return importPresetFromUrl();
+            if (mode === 'characters') return downloadCardFromUrl();
+            return nativeAlert('当前视图（插件）不支持从链接导入。请切换到角色卡 / 世界书 / 预设库后使用。', 'info');
+        };
+
+        // ⟸ 2026-10-03：自定义模式「初始映射」—— 把当前提示词链路映射为段（作为默认提示词）
+        //    · 顺序与现链路一致：系统提示词 → 破限 → User → 预填充（空内容自动跳过）
+        //    · 已有段时先确认「替换」（防误覆盖手写段）
+        const mapPromptsToSegments = async () => {
+            const built = buildSegmentsFromPrompts({
+                system: (llmRolePrompts.value && llmRolePrompts.value.system) || '',
+                user: (llmRolePrompts.value && llmRolePrompts.value.user) || '',
+                prefill: (llmRolePrompts.value && llmRolePrompts.value.prefill) || '',
+                jailbreak: (jailbreakPrompt && jailbreakPrompt.value) || '',
+                useJailbreak: !!(useJailbreak && useJailbreak.value)
+            });
+            if (!built.length) {
+                nativeAlert('当前提示词（系统 / 破限 / User / 预填充）均为空，没有可映射的内容。', 'info');
+                return;
+            }
+            const n = tagCustomSegments.value.length;
+            if (n > 0) {
+                const ok = await confirmDialog(`将把当前提示词映射为 ${built.length} 段（系统提示词 / 破限 / User / 预填充，空项跳过），并替换现有 ${n} 段。继续？`);
+                if (!ok) return;
+            }
+            tagCustomSegments.value = built;
+        };
+
+        // 📨 2026-10-03「全量可编辑」：材料段覆盖的写 / 清（不可变更新；集中 watch 自动防抖落盘）
+        //    · set：scope 缺省建组；空文本也是有效覆盖（用户有意清空该段）
+        //    · clear：删除对应键，该段回到「程序自动生成」（⟲ 恢复自动）
+        const setMaterialOverride = ({ scope, key, text }) => {
+            if (!scope || !key) return;
+            const cur = tagMaterialOverrides.value || {};
+            const scopeMap = { ...(cur[scope] || {}) };
+            scopeMap[key] = String(text == null ? '' : text);
+            tagMaterialOverrides.value = { ...cur, [scope]: scopeMap };
+        };
+        const clearMaterialOverride = ({ scope, key }) => {
+            if (!scope || !key) return;
+            const cur = tagMaterialOverrides.value || {};
+            if (!cur[scope] || typeof cur[scope][key] !== 'string') return;
+            const scopeMap = { ...cur[scope] };
+            delete scopeMap[key];
+            const next = { ...cur };
+            if (Object.keys(scopeMap).length) next[scope] = scopeMap; else delete next[scope];
+            tagMaterialOverrides.value = next;
         };
 
         // 🏷️ S3：世界书右键「🤖 AI 打标」→ 以该书为目标打开统一打标弹窗
@@ -5930,7 +6098,7 @@ export default {
                     aiTag: {
                         openLog: () => { showAiTagLog.value = true; },
                         closeLog: () => closeAiTagLog(),
-                        push: (t, lv) => pushTagLog(t, lv || 'info'),
+                        push: (t, lv, detail) => pushTagLog(t, lv || 'info', detail || null),
                         state: () => ({ show: showAiTagLog.value, len: aiTagLog.value.length, running: isAITagging.value }),
                         run: async (n) => {
                             const cards = library.value.slice(0, Math.max(1, Number(n) || 1));
@@ -6250,7 +6418,8 @@ export default {
             nativeAlert, confirmDialog,
             // 🤖 AI 分类弹窗复用：模型解析 + 响应文本提取
             resolveApiModel, extractReplyContent,
-            llmRolePrompts, saveRolePrompts, tagPackSize, tagSkipTagged, tagResume, resumeTagging,
+            llmRolePrompts, saveRolePrompts, mapPromptsToSegments, tagCustomSegments, tagPromptMode, tagMaterialOverrides, materialPreview, setMaterialOverride, clearMaterialOverride, tagPackSize, tagSkipTagged, tagResume, resumeTagging,
+            pauseTagging, tagPausedNow,
             // 🧠 仅 LLM 层时的分角色链路 + 结构化截取（AITagModal 显示「已启用」徽标）
             llmOnlyActive,
             // 🔌 连通性测试（AITagModal 用）
@@ -6386,6 +6555,8 @@ export default {
             savingPlugin, savePluginSource, rescanPluginDir,
             // 🌍 世界书网址导入与重命名
             importUrl, isImportingWb, importWorldbookFromUrl, renameWorldbook,
+            // 🌐 2026-10-03：URL 导入三合一（文件菜单命令按 appMode 分发时用）
+            importFromUrlSmart,
             // 🌍 世界书文件夹导入 + 删除/克隆 + 专属右键菜单
             handleWorldbookFolderSelect, deleteWorldbook, duplicateWorldbook,
             wbContextMenu, openWbContextMenu, closeWbContextMenu, openWbInFolder,

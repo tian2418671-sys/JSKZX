@@ -3228,26 +3228,15 @@ app.whenReady().then(() => {
               cache[fullPath] = { mtime: mt, valid: null };  // 未判定 → 下次仍重试
               return;
             }
-            // 🚀 大文件预检：世界书必有 entries 字段；超过 512KB 的先读头 64KB 查关键字，
-            //    不含则跳过（避免 readFile+JSON.parse 大文件——目录里常有 table_data/模板等大 JSON）
-            //    ⚠️ DF-18：预检未命中**不再写 valid:false**，改写 valid:null（未判定）——
-            //       否则 `entries` 在后段的大书会被误杀且**永久固化**，即使修好逻辑也不自愈。
-            if (st.size > 512 * 1024) {
-              let fh;
-              try {
-                fh = await fs.promises.open(fullPath, 'r');
-                const head = Buffer.alloc(64 * 1024);
-                const readRes = await fh.read(head, 0, head.length, 0);
-                const bytes = (readRes && typeof readRes.bytesRead === 'number') ? readRes.bytesRead : head.length;
-                if (!head.subarray(0, bytes).toString('utf-8').includes('"entries"')) {
-                  cache[fullPath] = { mtime: mt, valid: null };   // 未判定（不固化否定）
-                  skipped.push({ path: fullPath, size: st.size, reason: '大文件头部 64KB 未发现 "entries" 关键字（下次仍会重试）' });
-                  return;
-                }
-              } finally { if (fh) await fh.close().catch(() => {}); }
-            }
+            // 🩹 DF-28 根治（2026-10-03）：**删除「头部 64KB 预检」** ——
+            //    「用部分样本判拒绝」从根上就会误杀（实测：`extensions` 巨型对象在前的预设/世界书，
+            //    特征字段被挤出 64KB 窗口 → 每次扫描都跳过；DF-18→DF-28 两轮补丁的共同病灶）。
+            //    实测全量 parse 完整成本（真实库 116 文件 / 61.8MB）≈ 0.5s，且首次后走 mtime 缓存 ——
+            //    为省这一点点而保留任何采样判拒都不值得：直接全量解析，正确性优先。
+            //    ⚠️ 保留 50MB 上限（>50MB 只回元数据，仍显示在列表）与缓存。
             const content = await fs.promises.readFile(fullPath, 'utf-8');
-            const wbData = JSON.parse(content);
+            // 🩹 DF-28 同批：清洗 UTF-8 BOM（带 BOM 的 JSON 会被 JSON.parse 判「解析失败」静默跳过，实测库中 table_data 类）
+            const wbData = JSON.parse(content.replace(/^\uFEFF/, ''));
             const valid = isValidWorldbook(wbData);
             cache[fullPath] = { mtime: mt, valid };
             if (valid) {
@@ -3444,7 +3433,8 @@ app.whenReady().then(() => {
           // 未命中 → 读一次并写缓存
           try {
             const text = await fs.promises.readFile(p, 'utf-8');
-            const data = JSON.parse(text);
+            // 🩹 DF-28 同批：清洗 UTF-8 BOM（同扫描主路径；否则带 BOM 的世界书会被判「解析失败」）
+            const data = JSON.parse(text.replace(/^\uFEFF/, ''));
             // 🛡️ PK-24：与完整扫描**同一把守门员**，结果写回 worldbook 缓存供下次秒开过滤
             const valid = isValidWorldbook(data);
             validCache[p] = { mtime: mt, valid };
@@ -3876,26 +3866,14 @@ app.whenReady().then(() => {
               cache[fullPath] = { mtime: mt, valid: null };
               return;
             }
-            // 🚀 大文件预检：预设常见字段 prompts/temperature/max_tokens 等；超过 512KB 的
-            //    先读头 64KB 查关键字，不含则跳过（避免 readFile+JSON.parse 大文件）
-            //    ⚠️ DF-18：预检未命中不再写 valid:false（防误杀固化），改 valid:null
-            if (st.size > 512 * 1024) {
-              let fh;
-              try {
-                fh = await fs.promises.open(fullPath, 'r');
-                const head = Buffer.alloc(64 * 1024);
-                const readRes = await fh.read(head, 0, head.length, 0);
-                const bytes = (readRes && typeof readRes.bytesRead === 'number') ? readRes.bytesRead : head.length;
-                const headStr = head.subarray(0, bytes).toString('utf-8');
-                if (!PRESET_HINTS.some(k => headStr.includes('"' + k + '"'))) {
-                  cache[fullPath] = { mtime: mt, valid: null };
-                  skipped.push({ path: fullPath, size: st.size, reason: '大文件头部 64KB 未发现预设特征字段（下次仍会重试）' });
-                  return;
-                }
-              } finally { if (fh) await fh.close().catch(() => {}); }
-            }
+            // 🩹 DF-28 根治（2026-10-03）：**删除「头部 64KB 预检」** —— 同 wb:scan 口径：
+            //    「用部分样本判拒绝」从根上会误杀（实测 `"temperature"` 被挤出 64KB 窗口到
+            //    714.9KB / 853.0KB / 90.2KB 处，旧逻辑每次扫描都跳过）；
+            //    全量 parse 成本实测可忽略（116 文件 / 61.8MB ≈ 0.5s，首次后走缓存）——直接全量解析。
+            //    ⚠️ 保留 50MB 上限与缓存。
             const content = await fs.promises.readFile(fullPath, 'utf-8');
-            const pData = JSON.parse(content);
+            // 🩹 DF-28 同批：清洗 UTF-8 BOM（带 BOM 的 JSON 会被 JSON.parse 判「解析失败」静默跳过）
+            const pData = JSON.parse(content.replace(/^\uFEFF/, ''));
             const valid = isValidPreset(pData);
             cache[fullPath] = { mtime: mt, valid };
             if (valid) {

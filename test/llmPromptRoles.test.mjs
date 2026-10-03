@@ -20,7 +20,7 @@ import {
     DEFAULT_SYSTEM_PROMPT, SYSTEM_PROMPT_VARIANTS, resolveSystemVariantId,
     buildLlmMessages, willUsePrefill, parseStructuredTags, outputFormatRule,
     packedOutputRule, parsePackedTags, stripThinkingBlocks, sanitizeTagList,
-    composeTagPromptHead, splitTextSegments
+    composeTagPromptHead, composeTagPromptHeadParts, splitTextSegments
 } from '../js/utils/llmPromptRoles.js';
 
 // ═══════════════════════════════════════════════════════════════
@@ -126,12 +126,20 @@ describe('buildLlmMessages — 单套链路消息顺序', () => {
         });
         assert.deepEqual(msgs.map(m => m.role), ['system', 'user', 'assistant']);
         assert.equal(msgs[0].content, 'S\n\n破限词'); // 破限在 system 末尾（注意力权重最高）
-        assert.equal(msgs[1].content, 'U');          // 预设 user 优先
+        assert.equal(msgs[1].content, 'U\n\n默认任务'); // AI-11：user 附加在默认（卡数据）之前，不顶替
         assert.equal(msgs[2].content, '<tags>[');    // 预填充放最后
     });
     test('预设 user 留空 → 用 defaultUser', () => {
         const msgs = buildLlmMessages({ rolePrompts: { system: 'S', prefill: '' }, defaultUser: '默认任务' });
         assert.equal(msgs[1].content, '默认任务');
+    });
+    test('AI-11：user 非空 + defaultUser 为空 → 只用 user（不产生多余换行）', () => {
+        const msgs = buildLlmMessages({ rolePrompts: { system: 'S', user: 'U', prefill: '' }, defaultUser: '' });
+        assert.equal(msgs[1].content, 'U');
+    });
+    test('AI-11：user 与 defaultUser 均非空 → 卡数据保留（附加在用户内容之后，不被顶替）', () => {
+        const msgs = buildLlmMessages({ rolePrompts: { system: 'S', user: '附加指令', prefill: '' }, defaultUser: '卡片数据+输出要求' });
+        assert.equal(msgs[1].content, '附加指令\n\n卡片数据+输出要求');
     });
     test('破限为空白 → 不追加（也不产生多余换行）', () => {
         const msgs = buildLlmMessages({ rolePrompts: { system: 'S' }, jailbreak: '   ', defaultUser: 'U' });
@@ -610,6 +618,49 @@ describe('composeTagPromptHead — 池开关 / 自由提取 / 附加要求', () 
         assert.ok(h.includes('【规则】'));
         assert.ok(!h.includes('严格限制'));
         assert.equal(composeTagPromptHead({}), composeTagPromptHead());
+    });
+});
+
+// ═══════════════════════════════════════════════════════════════
+// 📨 2026-10-03「完全透明化」：composeTagPromptHeadParts —— 头部拆两段（池 / 附加要求）
+//    · 预览区依赖「池段」与「附加要求段」的独立边界；发送侧依赖逐段拼回
+//    · 锁定契约：poolPart + extraPart === composeTagPromptHead（同一实现保证，防漂移）
+// ═══════════════════════════════════════════════════════════════
+describe('composeTagPromptHeadParts — 拆分与拼回等价（发送/预览同源契约）', () => {
+    const CASES = [
+        { poolTags: ['a', 'b'], poolEnabled: true, enableExtraction: true, customPrompt: '' },
+        { poolTags: ['a', 'b'], poolEnabled: true, enableExtraction: true, customPrompt: '重点分析性格' },
+        { poolTags: ['a'], poolEnabled: true, enableExtraction: false, customPrompt: '注意排版' },
+        { poolTags: ['a', 'b'], poolEnabled: false, enableExtraction: true, customPrompt: '' },
+        { poolTags: ['a'], poolEnabled: false, enableExtraction: false, customPrompt: '仅保留附加要求' },
+        { poolTags: [], poolEnabled: true, enableExtraction: true, customPrompt: '' },
+        {},
+        { poolTags: ['x'], enableExtraction: true },
+        { poolEnabled: false },
+        { customPrompt: '   ' }
+    ];
+    test('全部参数矩阵：poolPart + extraPart === composeTagPromptHead（逐字）', () => {
+        for (const c of CASES) {
+            const { poolPart, extraPart } = composeTagPromptHeadParts(c);
+            assert.equal(poolPart + extraPart, composeTagPromptHead(c), JSON.stringify(c));
+        }
+    });
+    test('池关 → poolPart 为空串（预览区「池段」据此隐藏；附加要求仍独立输出）', () => {
+        const { poolPart, extraPart } = composeTagPromptHeadParts({ poolTags: ['a'], poolEnabled: false, customPrompt: '要求X' });
+        assert.equal(poolPart, '');
+        assert.equal(extraPart, '【附加要求】：要求X\n');
+    });
+    test('池开 → poolPart 含池与规则；附加要求为独立段（不在 poolPart 里）', () => {
+        const { poolPart, extraPart } = composeTagPromptHeadParts({ poolTags: ['a', 'b'], poolEnabled: true, enableExtraction: true, customPrompt: '要求Y' });
+        assert.ok(poolPart.includes('【标签候选池】：[a, b]'));
+        assert.ok(poolPart.includes('【规则】'));
+        assert.ok(!poolPart.includes('【附加要求】'));
+        assert.equal(extraPart, '【附加要求】：要求Y\n');
+    });
+    test('附加要求空白/缺省 → extraPart 为空串（该段不渲染）', () => {
+        assert.equal(composeTagPromptHeadParts({ poolEnabled: true }).extraPart, '');
+        assert.equal(composeTagPromptHeadParts({ customPrompt: '   ' }).extraPart, '');
+        assert.equal(composeTagPromptHeadParts({ customPrompt: undefined }).extraPart, '');
     });
 });
 

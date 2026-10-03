@@ -464,28 +464,11 @@
                     </button>
                 </div>
 
-                <!-- 🎛️ 高级工具区（URL导入 / 打开目录 / 分组 / 筛选）改**浮层**：
+                <!-- 🎛️ 高级工具区（打开目录 / 分组 / 筛选）改**浮层**：
                      与角色卡模式同款 —— 展开时列表高度恒定，不再把书单挤没；点外部即关。
                      ⚠ 不用遮罩（会挡住 Dock）；关闭靠脚本的文档捕获监听。 -->
                 <div v-if="showWbAdvanced"
                      class="sb-popover absolute left-2 right-2 top-full mt-1.5 z-40 max-h-[55vh] overflow-y-auto custom-scrollbar rounded-xl border border-zinc-700 bg-zinc-900 shadow-2xl p-2.5 flex flex-col gap-2">
-                    <!-- 🌐 网址导入世界书 -->
-                    <div class="flex items-center gap-1.5">
-                        <div class="flex-1 h-7 flex items-center bg-black/40 border border-zinc-700 rounded-lg overflow-hidden transition focus-within:border-emerald-500/50 min-w-0">
-                            <span class="pl-2.5 text-zinc-500 text-[10px] shrink-0">🔗 URL</span>
-                            <input v-model="importUrl" type="text"
-                                   placeholder="粘贴 Discord / GitHub 的 .json 直链..."
-                                   class="w-full h-7 bg-transparent text-[11px] text-zinc-300 px-2 outline-none"
-                                   @keyup.enter="importWorldbookFromUrl">
-                        </div>
-                        <button @click="importWorldbookFromUrl" :disabled="isImportingWb"
-                                class="h-7 px-2.5 bg-emerald-600/90 hover:bg-emerald-500 text-white text-[11px] font-bold rounded-lg shadow transition flex items-center gap-1 shrink-0 disabled:opacity-50 disabled:cursor-not-allowed"
-                                title="从 JSON 直链导入世界书">
-                            <span v-if="isImportingWb" class="animate-spin">⌛</span>
-                            <span v-else>⬇️</span>
-                            云端导入
-                        </button>
-                    </div>
                     <!-- 📂 打开世界书目录 + 落盘 -->
                     <div class="flex items-center gap-1.5">
                         <label class="flex-1 h-7 flex items-center justify-center gap-1.5 px-3 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-[11px] rounded-lg border border-zinc-700/60 cursor-pointer transition shadow-sm"
@@ -1199,9 +1182,6 @@ export default {
             showBatchTagModal: ctx.showBatchTagModal,
             openAITagModal: ctx.openAITagModal,
             batchExportSelected: ctx.batchExportSelected,
-            importUrl: ctx.importUrl,
-            importWorldbookFromUrl: ctx.importWorldbookFromUrl,
-            isImportingWb: ctx.isImportingWb,
             handleWorldbookFolderSelect: ctx.handleWorldbookFolderSelect,
             syncWorldbooksToDisk: ctx.syncWorldbooksToDisk,
             currentWbCategory: ctx.currentWbCategory,

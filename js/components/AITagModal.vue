@@ -48,9 +48,16 @@
                         <template v-for="grp in navGroups()" :key="grp.title">
                             <div class="text-[10px] font-bold text-gray-400 px-2 pt-2.5 pb-0.5 first:pt-1">{{ grp.title }}</div>
                             <button v-for="it in grp.items" :key="it.key"
-                                    @click="activeSection = it.key"
+                                    @click="onNavItemClick(grp, it)"
+                                    :title="grp.radioGroup ? '提示词路径二选一：打标时只执行选中的这一条' : ''"
                                     class="w-full text-left px-2.5 py-2 rounded-lg text-xs flex items-center gap-1.5 transition"
                                     :class="activeSection === it.key ? 'bg-indigo-600 text-white font-bold' : 'text-gray-600 hover:bg-gray-200'">
+                                <!-- 🔘 单选圈（仅「提示词」组：系统提示词 / 自定义模式 二选一） -->
+                                <span v-if="grp.radioGroup" class="w-3.5 h-3.5 rounded-full border-2 flex items-center justify-center shrink-0 transition"
+                                      :class="activeSection === it.key ? 'border-white/80' : (isPathSelected(it.key) ? 'border-indigo-500' : 'border-gray-400')">
+                                    <span v-if="isPathSelected(it.key)" class="w-1.5 h-1.5 rounded-full"
+                                          :class="activeSection === it.key ? 'bg-white' : 'bg-indigo-500'"></span>
+                                </span>
                                 <span>{{ it.icon }}</span>
                                 <span class="truncate">{{ it.label }}</span>
                                 <span v-if="it.badge" class="ml-auto shrink-0 text-[9px] px-1 rounded"
@@ -365,7 +372,7 @@
                             <div class="p-2.5 space-y-2">
                                 <textarea :value="rolePromptValue('user')" @input="setRolePrompt('user', $event.target.value)" :disabled="isAITagging" rows="3"
                                           class="w-full bg-white border border-gray-300 rounded p-2 text-gray-700 font-mono text-[11px] focus:border-indigo-500 focus:outline-none resize-y shadow-sm"
-                                          placeholder="（留空 = 程序自动：当前卡片内容 + 候选池 + 输出要求）"></textarea>
+                                          placeholder="（留空 = 程序自动：卡片内容 + 候选池 + 输出要求；填写的内容会附加在前，不会顶替）"></textarea>
                                 <div class="flex items-center gap-2">
                                     <span class="text-[10px] text-gray-500 shrink-0">📦 每请求打包卡数</span>
                                     <input type="range" min="1" max="10" :value="tagPackSize" :disabled="isAITagging"
@@ -373,7 +380,7 @@
                                     <span class="text-[11px] font-bold text-indigo-700">{{ tagPackSize }} 张/请求</span>
                                     <span class="text-[9px] text-gray-400">与「⚙️ 执行管线」页同步</span>
                                 </div>
-                                <p class="text-[9px] text-gray-500">💡 一般无需填写 —— 批量时每张卡自动替换为本卡内容；超长卡自动分段、短卡按「打包数」成组。</p>
+                                <p class="text-[9px] text-gray-500">💡 一般无需填写 —— 批量时每张卡自动替换为本卡内容；超长卡自动分段、短卡按「打包数」成组。若填写，内容会附加在卡片数据之前（卡内容照常发送）。</p>
                             </div>
                         </div>
 
@@ -391,6 +398,136 @@
                                        class="w-full bg-white border border-gray-300 rounded px-2 py-1 text-gray-700 font-mono text-[11px] focus:border-indigo-500 focus:outline-none"
                                        placeholder="默认：<tags>[">
                                 <p class="text-[9px] text-gray-500">💡 强制模型从这个开头往下写（默认 <code class="text-indigo-600">&lt;tags&gt;[</code>），大幅提高结构化输出遵守率；留空 = 取消预填充。</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- ✨ 自定义模式（多段提示词编辑器 · 2026-10-03：仿酒馆提示词管理器形态，本项目自制 UI） -->
+                    <div v-show="activeSection === 'custom'" class="space-y-2">
+                        <div class="flex items-center justify-between gap-2">
+                            <label class="font-bold text-gray-700 flex items-center gap-1.5">✨ 自定义模式（实验）
+                                <span class="text-[10px] text-indigo-500 font-normal bg-indigo-50 px-2 py-0.5 rounded border border-indigo-200">自由编排提示词段（角色 / 顺序 / 内容）</span>
+                            </label>
+                            <div class="flex items-center gap-1.5 shrink-0">
+                                <button @click="$emit('map-prompts')" :disabled="isAITagging"
+                                        title="把「系统提示词」页的 系统 / 破限 / User / 预填充 映射为段，作为初始默认内容（已有段时会先确认替换）"
+                                        class="px-2.5 py-1.5 bg-white hover:bg-indigo-50 border border-indigo-300 text-indigo-600 text-[11px] font-medium rounded shadow-sm flex items-center gap-1 transition disabled:opacity-50 disabled:cursor-not-allowed">⟸ 映射当前提示词</button>
+                                <button @click="addCustomSegment" :disabled="isAITagging"
+                                        class="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 disabled:bg-gray-300 disabled:cursor-not-allowed text-white text-[11px] font-medium rounded shadow flex items-center gap-1 transition shrink-0">＋ 在最上方插入</button>
+                            </div>
+                        </div>
+
+                        <!-- 空状态 -->
+                        <div v-if="tagCustomSegments.length === 0" class="border border-dashed border-gray-300 rounded-lg py-10 text-center bg-white/50">
+                            <p class="text-gray-400 text-xs">还没有任何提示词段</p>
+                            <p class="text-gray-300 text-[10px] mt-1">点右上角「＋ 在最上方插入」开始编排 —— 每段可独立选择角色（SYSTEM / USER / ASSISTANT）</p>
+                        </div>
+
+                        <!-- 段列表（自上而下 = 顺序） -->
+                        <div v-for="(seg, i) in tagCustomSegments" :key="seg.id"
+                             class="bg-white border border-gray-200 border-l-4 rounded-lg overflow-hidden shadow-sm"
+                             :class="customSegmentRoleClass(seg.role).border">
+                            <div class="px-2.5 py-1.5 border-b border-gray-100 flex items-center gap-2"
+                                 :class="customSegmentRoleClass(seg.role).head">
+                                <span class="text-[10px] text-indigo-400 font-bold font-mono shrink-0">#{{ i + 1 }}</span>
+                                <select :value="seg.role" @change="patchCustomSegment(i, { role: $event.target.value })" :disabled="isAITagging"
+                                        class="h-6 bg-white border border-gray-300 rounded px-1 text-[11px] font-bold focus:outline-none focus:border-indigo-500"
+                                        :class="customSegmentRoleClass(seg.role).text">
+                                    <option value="system">SYSTEM</option>
+                                    <option value="user">USER</option>
+                                    <option value="assistant">ASSISTANT</option>
+                                </select>
+                                <div class="ml-auto flex items-center gap-1">
+                                    <button @click="moveCustomSegment(i, -1)" :disabled="i === 0 || isAITagging" title="上移"
+                                            class="w-6 h-6 flex items-center justify-center rounded border border-gray-300 bg-white text-indigo-600 hover:border-indigo-400 hover:text-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed transition text-[11px] leading-none">↑</button>
+                                    <button @click="moveCustomSegment(i, 1)" :disabled="i === tagCustomSegments.length - 1 || isAITagging" title="下移"
+                                            class="w-6 h-6 flex items-center justify-center rounded border border-gray-300 bg-white text-indigo-600 hover:border-indigo-400 hover:text-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed transition text-[11px] leading-none">↓</button>
+                                    <button @click="removeCustomSegment(i)" :disabled="isAITagging" title="删除该段"
+                                            class="w-6 h-6 flex items-center justify-center rounded border border-gray-300 bg-white text-rose-500 hover:border-rose-400 hover:text-rose-600 disabled:opacity-40 disabled:cursor-not-allowed transition text-[11px] leading-none">🗑</button>
+                                </div>
+                            </div>
+                            <div class="p-2.5">
+                                <textarea :value="seg.content" @input="patchCustomSegment(i, { content: $event.target.value })" :disabled="isAITagging" rows="4"
+                                          class="w-full bg-white border border-gray-300 rounded p-2 text-gray-700 font-mono text-[11px] leading-relaxed focus:border-indigo-500 focus:outline-none resize-y shadow-sm custom-scrollbar"
+                                          placeholder="输入这一段的内容…"></textarea>
+                            </div>
+                        </div>
+
+                        <p class="text-[9px] text-gray-500">💡 每段可独立选择角色与顺序，内容与顺序自动保存；「＋ 在最上方插入」把新段插到列表最前。</p>
+
+                        <!-- 📨 2026-10-03 透明化 · 全目标展示：程序自动材料（发送预览——与实际发送同源，完全透明） -->
+                        <div class="border-t-2 border-dashed border-gray-300 pt-3 space-y-2">
+                            <div class="flex items-center justify-between gap-2">
+                                <label class="font-bold text-gray-700 flex items-center gap-1.5">📨 程序自动材料（发送预览）
+                                    <span class="text-[10px] text-emerald-600 font-normal bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">完全透明 · 与打标实际发送同源</span>
+                                </label>
+                                <span class="text-[10px] text-gray-400 shrink-0 flex items-center gap-1.5">
+                                    <template v-if="materialPreview.targetCount > 0">
+                                        <button @click="expandAllSecs" title="展开全部材料（组与段内容）" class="px-1.5 py-0.5 rounded border border-gray-300 bg-white text-gray-500 hover:border-indigo-400 hover:text-indigo-600 transition">全部展开</button>
+                                        <button @click="collapseAllSecs" title="折叠全部材料（组与段内容；大选择集推荐）" class="px-1.5 py-0.5 rounded border border-gray-300 bg-white text-gray-500 hover:border-indigo-400 hover:text-indigo-600 transition">全部折叠</button>
+                                    </template>
+                                    <span>{{ isWbMode ? '世界书打标材料' : '卡片打标材料' }}</span>
+                                </span>
+                            </div>
+                            <p class="text-[10px] text-gray-500 leading-relaxed">💡 组装位置：以上段按顺序发送后，以下材料作为<b>一条 USER 消息</b>自动附加（插在「最后一条 USER 段」之后；无 USER 段时插在末尾预填充之前）。点击<b>段头</b>可折叠 / 展开该段内容；每段可点 <b>🔓</b> 编辑（按你的文本发送）、<b>🔒</b> 锁定防误改，「⟲ 恢复自动」还原程序版本。</p>
+                            <div v-if="materialPreview.targetCount === 0" class="border border-dashed border-gray-300 rounded-lg py-4 text-center bg-white/50">
+                                <p class="text-gray-400 text-xs">{{ isWbMode ? '未打开世界书（或筛选结果为空）' : '未选择卡片' }} —— 选择目标后，这里会逐本 / 逐张显示材料</p>
+                            </div>
+                            <template v-for="sec in materialPreview.sections" :key="sec.id">
+                                <!-- 分组头（公共材料 / 每张卡、每本书）—— 点击折叠/展开（大选择集防超长） -->
+                                <div class="flex items-center gap-2 pt-1 cursor-pointer select-none group"
+                                     data-sec-head="1"
+                                     :title="isSecCollapsed(sec) ? '点击展开该组材料' : '点击折叠该组材料'"
+                                     @click="toggleSec(sec)">
+                                    <span class="text-[10px] font-mono shrink-0" :class="sec.kind === 'common' ? 'text-slate-400' : 'text-indigo-500'">{{ isSecCollapsed(sec) ? '▸' : '▾' }}</span>
+                                    <span class="text-[10px] font-bold shrink-0" :class="sec.kind === 'common' ? 'text-slate-500' : 'text-indigo-600 jsk-preview-target'">
+                                        {{ sec.kind === 'common' ? '🧱 ' + sec.label : '📄 ' + sec.label }}
+                                    </span>
+                                    <span v-if="sec.kind === 'target'" class="text-[9px] text-gray-400 shrink-0">独立发送</span>
+                                    <span class="text-[9px] text-gray-400 shrink-0">{{ secCharCount(sec) }} 字</span>
+                                    <div class="flex-1 border-t border-dashed border-gray-200"></div>
+                                    <span class="text-[9px] text-gray-300 group-hover:text-gray-500 shrink-0">{{ isSecCollapsed(sec) ? '展开' : '收起' }}</span>
+                                </div>
+                                <div v-if="!isSecCollapsed(sec)" class="space-y-2">
+                                <div v-for="part in sec.parts" :key="sec.id + '|' + part.key" class="bg-slate-50 border border-slate-200 rounded-lg overflow-hidden">
+                                    <div class="px-2.5 py-1.5 bg-slate-100 border-b border-slate-200 flex items-center gap-2 cursor-pointer select-none group"
+                                         data-part-head="1"
+                                         :title="isPartFolded(sec, part) ? '点击展开该段内容' : '点击折叠该段内容'"
+                                         @click="togglePartFold(sec, part)">
+                                        <span class="text-[10px] text-slate-400 shrink-0">{{ isPartFolded(sec, part) ? '▸' : '▾' }}</span>
+                                        <button @click.stop="togglePartLock(sec, part)" :title="isPartLocked(sec, part) ? '已锁定（只读）：点击解锁编辑' : '可编辑：点击锁定（防误改）'"
+                                                class="w-6 h-6 flex items-center justify-center rounded border border-gray-300 bg-white hover:border-indigo-400 transition text-[11px] leading-none shrink-0">{{ isPartLocked(sec, part) ? '🔒' : '🔓' }}</button>
+                                        <span class="text-[10px] font-bold text-slate-600">{{ part.title }}</span>
+                                        <span v-if="part.overridden" class="text-[9px] px-1 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200 shrink-0">已修改</span>
+                                        <span v-else-if="part.mode === 'override'" class="text-[9px] text-slate-400 shrink-0">程序自动生成</span>
+                                        <span v-else class="text-[9px] text-slate-400 shrink-0">取自「附加要求」</span>
+                                        <span class="text-[9px] text-slate-400 shrink-0">{{ partValue(part).length }} 字</span>
+                                        <span class="ml-auto flex items-center gap-1 shrink-0">
+                                            <button v-if="part.overridden" @click.stop="clearMaterialOverride(sec, part)" title="删除本段编辑，回到程序自动生成"
+                                                    class="text-[9px] px-1.5 py-0.5 rounded border border-gray-300 bg-white text-indigo-600 hover:border-indigo-400 transition">⟲ 恢复自动</button>
+                                            <span class="text-[9px] text-gray-300 group-hover:text-gray-500">{{ isPartFolded(sec, part) ? '展开' : '收起' }}</span>
+                                        </span>
+                                    </div>
+                                    <div class="p-2.5 space-y-1.5">
+                                        <template v-if="!isPartFolded(sec, part)">
+                                        <textarea v-if="!isPartLocked(sec, part)" :value="partValue(part)" @input="onPartInput(sec, part, $event.target.value)"
+                                                  :disabled="isAITagging" :rows="partTextareaRows(part)" spellcheck="false"
+                                                  class="w-full bg-white border border-gray-300 rounded p-2 text-gray-700 font-mono text-[10px] leading-relaxed focus:border-indigo-500 focus:outline-none resize-y max-h-64 overflow-y-auto custom-scrollbar"></textarea>
+                                        <pre v-else class="whitespace-pre-wrap font-mono text-[10px] leading-relaxed text-gray-600 max-h-56 overflow-y-auto custom-scrollbar bg-white border border-gray-200 rounded p-2">{{ partValue(part) }}</pre>
+                                        </template>
+                                        <p v-if="part.note" class="text-[9px] text-gray-500">💡 {{ part.note }}</p>
+                                        <button v-if="part.key === 'pool'" @click="activeSection = 'candidates'" class="text-[10px] text-indigo-600 hover:text-indigo-500 underline">去「🏷️ 候选标签池」页签编辑候选池 →</button>
+                                    </div>
+                                </div>
+                                </div>
+                            </template>
+                            <!-- 附加要求：就地编辑（与 AI 提取设置页同源；候选池关闭时它仍会并入发送材料） -->
+                            <div class="bg-white border border-indigo-200 rounded-lg p-2.5 space-y-1.5">
+                                <label class="text-[11px] font-bold text-indigo-700">✏️ 附加要求（就地编辑 · 实时反映到上方材料段）</label>
+                                <textarea :value="customAIPrompt" @input="$emit('update:customAIPrompt', $event.target.value)" :disabled="isAITagging" rows="2"
+                                          placeholder="例如：请重点分析角色的性格特征，忽略外观描述…（留空 = 不加）"
+                                          class="w-full bg-white border border-gray-300 rounded p-2 text-[11px] text-gray-700 focus:border-indigo-500 focus:outline-none resize-y shadow-sm"></textarea>
+                                <p class="text-[9px] text-gray-500">与「AI 提取设置」页同一数据，改这里两处同步；候选池内容请到「🏷️ 候选标签池」页签增删。</p>
                             </div>
                         </div>
                     </div>
@@ -452,6 +589,12 @@
 
                 <div class="px-5 py-4 bg-gray-50 border-t border-gray-200 flex justify-end gap-3 shrink-0">
                     <button @click="$emit('close')" :disabled="isAITagging" class="px-5 py-2 bg-white border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-100 disabled:opacity-50 transition">取消</button>
+                    <!-- ⏸ 打标进行中：暂停（安全收尾：当前卡片/请求完成后停下，进度保留） -->
+                    <button v-if="isAITagging" @click="$emit('pause-tagging')" title="当前卡片/请求完成后停下，进度与已完成结果保留"
+                            class="px-5 py-2 bg-amber-500 hover:bg-amber-600 text-white rounded-lg font-bold shadow-md transition">⏸ 暂停</button>
+                    <!-- ⏸ 已暂停（有未完成账本）：继续入口（与「执行管线」页按钮互补） -->
+                    <button v-if="tagPaused && resumePending > 0 && !isWbMode" @click="$emit('resume-tagging')"
+                            class="px-5 py-2 bg-amber-600 hover:bg-amber-500 text-white rounded-lg font-bold shadow-md transition">▶ 继续未完成（{{ resumePending }} 张）</button>
                     <button @click="$emit('start-tagging')" :disabled="isAITagging || funnelEmpty"
                             :title="funnelEmpty ? '三层打标管线均已关闭 —— 请在上方执行管线或「设置 → 🏷️ 打标与分类」至少启用一层' : ''"
                             class="px-5 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-bold disabled:opacity-75 disabled:cursor-not-allowed flex items-center gap-2 shadow-md transition">
@@ -468,6 +611,8 @@
 import { groupTagsByCategory } from '../utils/tagCategories.js';
 // 🧠 单套提示词链路：内置 System 预设变体（下拉套用）
 import { SYSTEM_PROMPT_VARIANTS, resolveSystemVariantId } from '../utils/llmPromptRoles.js';
+// ✨ 自定义模式（2026-10-03）：多段提示词段的增删移改（纯函数，不可变更新）
+import { insertSegmentAtTop, removeSegmentAt, moveSegment, patchSegment } from '../utils/customPromptSegments.js';
 
 export default {
     name: 'AITagModal',
@@ -484,6 +629,13 @@ export default {
         jailbreakPresets: { type: Array, default: () => [] },
         // 🧠 第二批改造：单套提示词链路（{ system, user, prefill }；由 App.vue 持有）
         llmRolePrompts: { type: Object, default: () => ({ system: '', user: '', prefill: '' }) },
+        // ✨ 自定义模式（2026-10-03）：多段提示词列表（[{id, role, content}]；由 App.vue 持有并持久化）
+        tagCustomSegments: { type: Array, default: () => [] },
+        // 📨 2026-10-03 透明化 · 全目标展示：发送材料「分组预览」（{ sections, targetCount, isWb }；与打标发送同源生成）
+        //    sections = [{ id, kind: 'common'|'target', label, parts: [{key, title, body, note, scope, mode, overridden, liveValue?}] }]
+        materialPreview: { type: Object, default: () => ({ sections: [], targetCount: 0, isWb: false }) },
+        // 🔘 提示词路径单选（2026-10-03）：'system' | 'custom' —— 打标时二选一（只执行一条；默认 system = 现有链路）
+        tagPromptMode: { type: String, default: 'system' },
         // 📦 每请求打包卡数（1~10；1 = 与旧行为一致）
         tagPackSize: { type: Number, default: 1 },
         // 📌 断点续跑账本（null = 无未完成任务）
@@ -502,6 +654,8 @@ export default {
         isFetchingModels: { type: Boolean, default: false },
         fetchModelStatus: { type: String, default: '' },
         isAITagging: { type: Boolean, default: false },
+        // ⏸ 打标暂停（2026-09-28）：已暂停态（底部显示「继续未完成」入口；与执行管线页按钮互补）
+        tagPaused: { type: Boolean, default: false },
         aiTaggingProgress: { type: Object, default: () => ({ current: 0, total: 0, status: '' }) },
         // 🧠 本地向量引擎
         useLocalVector: { type: Boolean, default: false },
@@ -529,7 +683,10 @@ export default {
         'close', 'remove-ai-candidate-tag', 'update:newAICandidateTag', 'add-ai-candidate-tag-manual',
         'add-ai-candidate-tag', 'update:enableAIExtraction', 'update:customAIPrompt',
         'update:useJailbreak', 'update:jailbreakPrompt',
-        'save-role-prompts', 'update:tagPackSize', 'update:tagSkipTagged', 'resume-tagging', 'fetch-available-models', 'update:apiEndpoint',
+        'save-role-prompts', 'update:tagCustomSegments', 'map-prompts', 'set-prompt-mode',
+        // 📨 2026-10-03「全量可编辑」：材料段覆盖 写/清（scope/key 由段对象携带）
+        'set-material-override', 'clear-material-override',
+        'update:tagPackSize', 'update:tagSkipTagged', 'resume-tagging', 'pause-tagging', 'fetch-available-models', 'update:apiEndpoint',
         'update:apiKey', 'update:apiModel', 'start-tagging', 'remove-system-common-tag',
         // 🧠 本地向量引擎
         'update:useLocalVector', 'update:vectorThreshold', 'update:vectorTopK',
@@ -584,6 +741,12 @@ export default {
     data() {
         return {
             collapsedTagGroups: {},
+            // 📨 2026-10-03「可锁定」：材料段锁定表（`${secId}|${partKey}` → true；仅在 true 时只读，默认全部可编辑）
+            lockedParts: {},
+            // 📨 2026-10-03「组折叠」：预览分组折叠表（secId → true/false；未记录时：公共组展开、目标组 >5 个默认折叠）
+            collapsedGroups: {},
+            // 📨 2026-10-03「段内容折叠」：材料段正文折叠表（同 partLockId 键；未记录时 = 默认折叠，只显示段头）
+            foldedParts: {},
             // 🧭 左导航当前分区（纯 UI 状态；不涉及任何业务逻辑）
             activeSection: 'pipeline',
             // ⚡ 预填充折叠面板（高级，默认收起）
@@ -626,6 +789,106 @@ export default {
             const hit = (this.jailbreakPresets || []).find(p => String(p.content || '').trim() === c);
             return hit ? hit.id : 'custom';
         },
+        // ✨ 自定义模式（2026-10-03）：段操作——不可变更新，emit 新数组（App.vue 持有并持久化）
+        addCustomSegment() {
+            this.$emit('update:tagCustomSegments', insertSegmentAtTop(this.tagCustomSegments));
+        },
+        removeCustomSegment(index) {
+            this.$emit('update:tagCustomSegments', removeSegmentAt(this.tagCustomSegments, index));
+        },
+        moveCustomSegment(index, direction) {
+            this.$emit('update:tagCustomSegments', moveSegment(this.tagCustomSegments, index, direction));
+        },
+        patchCustomSegment(index, patch) {
+            this.$emit('update:tagCustomSegments', patchSegment(this.tagCustomSegments, index, patch));
+        },
+        // 段卡片角色配色（自制）：system=indigo / user=emerald / assistant=amber
+        customSegmentRoleClass(role) {
+            if (role === 'user') return { border: 'border-l-emerald-400', head: 'bg-emerald-50/60', text: 'text-emerald-700' };
+            if (role === 'assistant') return { border: 'border-l-amber-400', head: 'bg-amber-50/60', text: 'text-amber-700' };
+            return { border: 'border-l-indigo-400', head: 'bg-indigo-50/60', text: 'text-indigo-700' };
+        },
+        // 🔘 提示词路径单选（2026-10-03 用户需求：二选一，不能两个都执行）
+        //   · 点击「提示词」组条目 = 选中该路径（prompts ↔ system / custom ↔ custom）+ 切页
+        //   · radio 选中态 = tagPromptMode（打标侧只执行选中的这一条）
+        isPathSelected(sectionKey) {
+            return this.tagPromptMode === (sectionKey === 'custom' ? 'custom' : 'system');
+        },
+        onNavItemClick(group, it) {
+            this.activeSection = it.key;
+            if (group && group.radioGroup) {
+                this.$emit('set-prompt-mode', it.key === 'custom' ? 'custom' : 'system');
+            }
+        },
+        // 📨 2026-10-03「全量可编辑 · 可锁定」：材料段 锁定 / 取值 / 编辑 / 恢复
+        partLockId(sec, part) {
+            return sec.id + '|' + part.key;
+        },
+        isPartLocked(sec, part) {
+            return !!this.lockedParts[this.partLockId(sec, part)];
+        },
+        togglePartLock(sec, part) {
+            const id = this.partLockId(sec, part);
+            this.lockedParts[id] = !this.lockedParts[id];
+        },
+        // 📨 2026-10-03「段内容折叠」（用户需求：单张卡/书内容太长，再叠一层）：
+        //     · 默认折叠（只显示段头：标题 + 字数）；点段头 / 「展开」提示切换
+        //     · 折叠时正文 v-if 不渲染（大材料惰性 DOM）；「全部展开/折叠」按钮同步控制组与段
+        isPartFolded(sec, part) {
+            const v = this.foldedParts[this.partLockId(sec, part)];
+            return v === undefined ? true : !!v;
+        },
+        togglePartFold(sec, part) {
+            const id = this.partLockId(sec, part);
+            this.foldedParts[id] = !this.isPartFolded(sec, part);
+        },
+        // 编辑框显示值：live 段（附加要求）= 要求正文（不带前缀）；override 段 = 发送文本本身
+        partValue(part) {
+            if (!part) return '';
+            return part.mode === 'live' ? String(part.liveValue || '') : String(part.body || '');
+        },
+        partTextareaRows(part) {
+            const t = this.partValue(part).replace(/\s+$/, '');
+            const est = Math.ceil(t.length / 45) + (t.split('\n').length - 1);
+            return Math.max(3, Math.min(16, est || 3));
+        },
+        onPartInput(sec, part, text) {
+            if (part.mode === 'live') {
+                // 附加要求：直接编辑本体（与「AI 提取设置」页同一数据源）
+                this.$emit('update:customAIPrompt', text);
+            } else {
+                this.$emit('set-material-override', { scope: part.scope, key: part.key, text });
+            }
+        },
+        clearMaterialOverride(sec, part) {
+            this.$emit('clear-material-override', { scope: part.scope, key: part.key });
+        },
+        // 📨 2026-10-03「组折叠」（用户需求：选 700 张卡/书时防「一大长段」）：
+        //     · 公共材料组默认展开（全局重要信息）；目标组未手动设置时：>5 个默认折叠
+        //     · 折叠时内容 v-if 不渲染（惰性 DOM——大选择集不卡）；点组头 / 全部展开折叠快捷切换
+        isSecCollapsed(sec) {
+            const v = this.collapsedGroups[sec.id];
+            if (v === true || v === false) return v;
+            return sec.kind !== 'common' && this.materialPreview.targetCount > 5;
+        },
+        toggleSec(sec) {
+            this.collapsedGroups[sec.id] = !this.isSecCollapsed(sec);
+        },
+        expandAllSecs() {
+            for (const sec of (this.materialPreview.sections || [])) {
+                this.collapsedGroups[sec.id] = false;
+                for (const part of (sec.parts || [])) this.foldedParts[this.partLockId(sec, part)] = false;
+            }
+        },
+        collapseAllSecs() {
+            for (const sec of (this.materialPreview.sections || [])) {
+                this.collapsedGroups[sec.id] = true;
+                for (const part of (sec.parts || [])) this.foldedParts[this.partLockId(sec, part)] = true;
+            }
+        },
+        secCharCount(sec) {
+            return (sec.parts || []).reduce((n, p) => n + String(p.mode === 'live' ? (p.liveValue || '') : (p.body || '')).length, 0);
+        },
         // 🧭 左导航分区定义（分组标题 + 条目），模板据此渲染
         navGroups() {
             return [
@@ -645,9 +908,12 @@ export default {
                     ]
                 },
                 {
+                    // 🔘 2026-10-03 用户需求：本组为「路径单选」——系统提示词 / 自定义模式 二选一（打标只执行一条）
                     title: '提示词',
+                    radioGroup: true,
                     items: [
-                        { key: 'prompts', icon: '📝', label: '系统提示词', badge: '' }
+                        { key: 'prompts', icon: '📝', label: '系统提示词', badge: '' },
+                        { key: 'custom', icon: '✨', label: '自定义模式（实验）', badge: '' }
                     ]
                 }
             ];

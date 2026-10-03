@@ -247,6 +247,9 @@ textarea, input, select { transition: border-color 0.15s ease-in-out; }
 [data-theme="light"] .border-purple-500\/40 { border-color: rgba(168, 85, 247, 0.4); }
 [data-theme="light"] .border-red-500\/30 { border-color: rgba(239, 68, 68, 0.35); }
 
+/* ---------- 补充 light：深色标题栏（bg-gray-900）在浅底上应配深色文字 ---------- */
+[data-theme="light"] .bg-gray-900 { color: #1f2937; }
+
 /* ---------- 深色主题：保持 UI 原生深色，补全灰色系与强调色适配 ---------- */
 [data-theme="dark"] { color-scheme: dark; }
 [data-theme="dark"] body { background-color: #111827; color: #d1d5db; }
@@ -300,6 +303,26 @@ textarea, input, select { transition: border-color 0.15s ease-in-out; }
 [data-theme="dark"] .text-blue-800 { color: #93c5fd; }
 [data-theme="dark"] .text-blue-600\/80 { color: #93c5fd; }
 [data-theme="dark"] .text-amber-500\/80 { color: #fbbf24; }
+
+/* ---------- 补充 dark 遗漏（打标窗口浅色块补丁 · 2026-09-27） ---------- */
+[data-theme="dark"] .bg-indigo-50\/70 { background-color: rgba(30, 58, 95, 0.35); }
+[data-theme="dark"] .bg-rose-50,
+[data-theme="dark"] .bg-rose-50\/60 { background-color: rgba(80, 30, 42, 0.35); }
+[data-theme="dark"] .bg-emerald-50 { background-color: rgba(16, 78, 60, 0.3); }
+[data-theme="dark"] .border-indigo-100 { border-color: rgba(99, 102, 241, 0.35); }
+[data-theme="dark"] .border-rose-200 { border-color: rgba(244, 63, 94, 0.45); }
+[data-theme="dark"] .border-rose-300 { border-color: rgba(244, 63, 94, 0.55); }
+[data-theme="dark"] .border-emerald-200 { border-color: rgba(16, 185, 129, 0.45); }
+[data-theme="dark"] .text-indigo-800 { color: #818cf8; }
+[data-theme="dark"] .text-emerald-700 { color: #34d399; }
+[data-theme="dark"] .text-rose-500,
+[data-theme="dark"] .text-rose-600 { color: #fb7185; }
+[data-theme="dark"] .text-rose-700,
+[data-theme="dark"] .text-rose-800 { color: #fda4af; }
+[data-theme="dark"] .text-emerald-800 { color: #6ee7b7; }
+[data-theme="dark"] .bg-emerald-100 { background-color: rgba(16, 78, 60, 0.45); }
+[data-theme="dark"] .border-emerald-300 { border-color: rgba(52, 211, 153, 0.5); }
+[data-theme="dark"] .disabled\:bg-gray-300:disabled { background-color: #4b5563; }
 
 /* ---------- 雅致青灰 (Slate) 主题：zinc 硬编码整体映射为 slate 色系 ---------- */
 [data-theme="slate"] { color-scheme: dark; }
@@ -387,8 +410,60 @@ textarea, input, select { transition: border-color 0.15s ease-in-out; }
 [data-theme="slate"] .bg-blue-900\/20 { background-color: rgba(30, 58, 138, 0.45); }
 [data-theme="slate"] .bg-blue-900\/30 { background-color: rgba(30, 58, 138, 0.55); }
 
+/* ---------- 补充 slate 遗漏（对照 dark 段：bg-white / 浅色语义块 / emerald / rose / 边框 / 深底文字） ---------- */
+[data-theme="slate"] .bg-white,
+[data-theme="slate"] .bg-\[\#fbfbfb\],
+[data-theme="slate"] .bg-\[\#f8f9fa\],
+[data-theme="slate"] .bg-\[\#fafafa\] { background-color: #1e293b; }
+[data-theme="slate"] .bg-gray-300 { background-color: #334155; }
+[data-theme="slate"] .bg-blue-100 { background-color: #1e3a5f; }
+[data-theme="slate"] .border-blue-300 { border-color: #3b82f6; }
+[data-theme="slate"] .bg-blue-50,
+[data-theme="slate"] .bg-blue-50\/50,
+[data-theme="slate"] .bg-amber-50,
+[data-theme="slate"] .bg-green-50,
+[data-theme="slate"] .bg-indigo-50,
+[data-theme="slate"] .bg-purple-50,
+[data-theme="slate"] .bg-indigo-50\/70,
+[data-theme="slate"] .bg-rose-50,
+[data-theme="slate"] .bg-rose-50\/60 { background-color: rgba(30, 58, 95, 0.3); }
+[data-theme="slate"] .bg-emerald-50 { background-color: rgba(16, 78, 60, 0.3); }
+[data-theme="slate"] .border-blue-200 { border-color: rgba(59, 130, 246, 0.45); }
+[data-theme="slate"] .border-amber-200 { border-color: rgba(245, 158, 11, 0.45); }
+[data-theme="slate"] .border-green-200 { border-color: rgba(34, 197, 94, 0.45); }
+[data-theme="slate"] .border-indigo-200 { border-color: rgba(99, 102, 241, 0.45); }
+[data-theme="slate"] .border-indigo-100 { border-color: rgba(99, 102, 241, 0.35); }
+[data-theme="slate"] .border-purple-200 { border-color: rgba(168, 85, 247, 0.45); }
+[data-theme="slate"] .border-emerald-200 { border-color: rgba(16, 185, 129, 0.45); }
+[data-theme="slate"] .border-rose-200 { border-color: rgba(244, 63, 94, 0.45); }
+[data-theme="slate"] .border-rose-300 { border-color: rgba(244, 63, 94, 0.55); }
+[data-theme="slate"] .text-amber-600 { color: #fbbf24; }
+[data-theme="slate"] .text-green-700 { color: #4ade80; }
+[data-theme="slate"] .text-indigo-700,
+[data-theme="slate"] .text-indigo-800 { color: #818cf8; }
+[data-theme="slate"] .text-purple-700 { color: #c084fc; }
+[data-theme="slate"] .text-blue-800 { color: #93c5fd; }
+[data-theme="slate"] .text-blue-600\/80 { color: #93c5fd; }
+[data-theme="slate"] .text-amber-500\/80 { color: #fbbf24; }
+[data-theme="slate"] .text-emerald-700 { color: #34d399; }
+[data-theme="slate"] .text-rose-500,
+[data-theme="slate"] .text-rose-600 { color: #fb7185; }
+[data-theme="slate"] .text-rose-700,
+[data-theme="slate"] .text-rose-800 { color: #fda4af; }
+[data-theme="slate"] .text-emerald-800 { color: #6ee7b7; }
+[data-theme="slate"] .bg-emerald-100 { background-color: rgba(16, 78, 60, 0.45); }
+[data-theme="slate"] .border-emerald-300 { border-color: rgba(52, 211, 153, 0.5); }
+[data-theme="slate"] .disabled\:bg-gray-300:disabled { background-color: #334155; }
+[data-theme="slate"] .disabled\:text-gray-500:disabled { color: #94a3b8; }
+
 /* ---------- 补充 light 主题遗漏的新增组件覆盖（世界书IDE/查重弹窗等） ---------- */
 [data-theme="light"] .bg-zinc-900\/50 { background-color: rgba(255, 255, 255, 0.5); }
 [data-theme="light"] .bg-zinc-900\/60 { background-color: rgba(255, 255, 255, 0.6); }
 [data-theme="light"] .bg-zinc-900\/80 { background-color: rgba(255, 255, 255, 0.8); }
 [data-theme="light"] .bg-zinc-950\/60 { background-color: rgba(244, 244, 245, 0.6); }
+
+/* ---------- 📨 2026-10-03：打标「程序自动材料（发送预览）」——深色主题下卡名/书名组头对比提亮 ----------
+   indigo-600（#4f46e5）在深底（#1f2937 / #1e293b）上对比仅 ≈2.1:1 → 深色主题改用 indigo-400（≈5:1）；
+   light 主题白底维持 indigo-600（≈4.4:1，无需覆盖）。 */
+[data-theme="dark"] .jsk-preview-target,
+[data-theme="slate"] .jsk-preview-target { color: #818cf8; }

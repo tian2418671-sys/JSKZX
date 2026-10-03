@@ -561,11 +561,14 @@ export function useWorldbooks({
     };
 
     // 1. 网址导入世界书（Discord / GitHub 等 .json 直链）
-    const importWorldbookFromUrl = async () => {
-        const url = importUrl.value.trim();
+    //    🌐 2026-10-03：入口统一到「文件」菜单 —— 支持可选 url 参数；无参时弹输入框
+    //    （侧边栏输入框已移除；保留旧输入框残留值兼容，供栏内旧调用路径与测试使用）
+    const importWorldbookFromUrl = async (urlArg = null) => {
+        let url = (urlArg != null && String(urlArg).trim()) ? String(urlArg).trim() : String(importUrl.value || '').trim();
         if (!url) {
-            nativeAlert('请先输入世界书的 JSON 直链网址！', 'warning');
-            return;
+            url = await appPrompt('🌐 从链接导入世界书\n请输入世界书的 JSON 直链（Discord / GitHub 等 CDN 均可）：');
+            if (!url || !url.trim()) return;
+            url = url.trim();
         }
         if (!/^https?:\/\//i.test(url)) {
             nativeAlert('网址格式不正确，请粘贴以 http:// 或 https:// 开头的 .json 直链。', 'warning');

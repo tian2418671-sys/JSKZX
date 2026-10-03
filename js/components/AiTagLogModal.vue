@@ -14,10 +14,12 @@
                 <!-- 标题栏 -->
                 <div class="px-4 py-3 bg-zinc-900 border-b border-zinc-800 flex items-center gap-2 shrink-0">
                     <h3 class="font-bold text-sm text-zinc-100">🏷️ 打标过程</h3>
-                    <span class="text-[10px]" :class="running ? 'text-amber-400' : 'text-emerald-400'">
-                        {{ running ? '⏳ 打标中…' : '✅ 已结束（保留作记录）' }}
+                    <span class="text-[10px]" :class="(running || paused) ? 'text-amber-400' : 'text-emerald-400'">
+                        {{ running ? '⏳ 打标中…' : (paused ? '⏸ 已暂停（可继续）' : '✅ 已结束（保留作记录）') }}
                     </span>
                     <span class="flex-1"></span>
+                    <button v-if="running" @click="$emit('pause-tagging')"
+                            class="px-2 py-1 bg-amber-600 hover:bg-amber-500 rounded text-[10px] text-white font-bold transition">⏸ 暂停</button>
                     <button @click="copyLog" :disabled="!log.length"
                             class="px-2 py-1 bg-zinc-800 border border-zinc-700 rounded text-[10px] text-zinc-300 hover:bg-zinc-700 disabled:opacity-40 transition">
                         {{ copied ? '已复制 ✓' : '📄 复制日志' }}
@@ -47,6 +49,37 @@
                     <div v-for="(l, i) in log" :key="i" class="whitespace-pre-wrap break-all" :class="levelClass(l.level)">
                         <span class="text-zinc-600 select-none">{{ fmtTime(l.at) }}</span>
                         <span class="ml-1.5">{{ l.text }}</span>
+                        <button v-if="l.detail" @click.stop="toggleDetail(i)"
+                                class="ml-1.5 px-1.5 py-0.5 rounded border border-zinc-700 text-zinc-400 hover:text-zinc-100 hover:border-zinc-500 text-[10px] align-middle transition">
+                            {{ isDetailOpen(i) ? '收起 ▲' : '🔍 查看' }}
+                        </button>
+                        <!-- 🔍 请求详情（过程透明化）：完整发送数据 + AI 原始回复/思考 -->
+                        <div v-if="l.detail && isDetailOpen(i)"
+                             class="mt-1.5 mb-2 border border-zinc-700 rounded-lg overflow-hidden bg-zinc-900/70 font-mono">
+                            <div class="px-2.5 py-1.5 border-b border-zinc-800 flex items-center gap-2">
+                                <span class="text-[10px] text-zinc-400 font-bold">🔍 {{ l.detail.title }}<template v-if="l.detail.mode"> · {{ l.detail.mode }}</template></span>
+                                <span class="flex-1"></span>
+                                <button @click.stop="copyDetail(i)"
+                                        class="px-1.5 py-0.5 bg-zinc-800 border border-zinc-700 rounded text-[10px] text-zinc-300 hover:bg-zinc-700 transition">
+                                    {{ copiedIdx === i ? '已复制 ✓' : '📄 复制全部' }}
+                                </button>
+                            </div>
+                            <div v-if="l.detail.error" class="px-2.5 py-2 text-rose-400 text-[10px] whitespace-pre-wrap break-all">❌ 失败：{{ l.detail.error }}</div>
+                            <template v-for="(m, mi) in (l.detail.messages || [])" :key="mi">
+                                <div class="px-2.5 pt-2 text-[10px] text-indigo-300 font-bold">📤 发送 · {{ roleLabel(m.role) }}（{{ String(m.content || '').length }} 字）</div>
+                                <pre class="mx-2.5 mt-1 max-h-56 overflow-y-auto custom-scrollbar bg-zinc-950 border border-zinc-800 rounded p-2 text-[10px] text-zinc-300 whitespace-pre-wrap break-all font-mono">{{ m.content }}</pre>
+                            </template>
+                            <template v-if="l.detail.reasoning">
+                                <div class="px-2.5 pt-2 text-[10px] text-amber-300 font-bold">🧠 模型思考（{{ l.detail.reasoning.length }} 字）</div>
+                                <pre class="mx-2.5 mt-1 max-h-56 overflow-y-auto custom-scrollbar bg-zinc-950 border border-zinc-800 rounded p-2 text-[10px] text-amber-200/80 whitespace-pre-wrap break-all font-mono">{{ l.detail.reasoning }}</pre>
+                            </template>
+                            <div class="px-2.5 pt-2 text-[10px] text-emerald-300 font-bold">📥 AI 原始回复（{{ String(l.detail.rawReply || '').length }} 字）</div>
+                            <pre class="mx-2.5 mt-1 mb-2.5 max-h-64 overflow-y-auto custom-scrollbar bg-zinc-950 border border-zinc-800 rounded p-2 text-[10px] text-zinc-200 whitespace-pre-wrap break-all font-mono">{{ l.detail.rawReply || (l.detail.rawData ? '（空 —— 未从返回中提取到回复文本，请见下方「🧾 API 原始响应」）' : '（空）') }}</pre>
+                            <template v-if="l.detail.rawData">
+                                <div class="px-2.5 pt-2 text-[10px] text-cyan-300 font-bold">🧾 API 原始响应（{{ l.detail.rawData.length }} 字）</div>
+                                <pre class="mx-2.5 mt-1 mb-2.5 max-h-64 overflow-y-auto custom-scrollbar bg-zinc-950 border border-zinc-800 rounded p-2 text-[10px] text-cyan-100/70 whitespace-pre-wrap break-all font-mono">{{ l.detail.rawData }}</pre>
+                            </template>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -61,11 +94,12 @@ export default {
         show: { type: Boolean, default: false },
         log: { type: Array, default: () => [] },                  // [{ at, level, text }]
         running: { type: Boolean, default: false },               // 打标进行中
+        paused: { type: Boolean, default: false },                // ⏸ 已暂停（可继续）
         progress: { type: Object, default: () => ({}) }           // { current, total, status }
     },
-    emits: ['close', 'clear'],
+    emits: ['close', 'clear', 'pause-tagging'],
     data() {
-        return { copied: false };
+        return { copied: false, openMap: {}, copiedIdx: -1 };
     },
     computed: {
         total() { return Number(this.progress && this.progress.total) || 0; },
@@ -76,9 +110,10 @@ export default {
         }
     },
     watch: {
-        // 新日志到达 → 自动滚到底（打标过程的"直播感"）
+        // 新日志到达 → 自动滚到底（打标过程的"直播感"）；
+        // 🔍 有详情展开时暂停自动滚底（避免把正在看详情的用户拉走）
         'log.length'() {
-            this.scrollToBottom();
+            if (!Object.keys(this.openMap).length) this.scrollToBottom();
         },
         show(v) {
             if (v) this.scrollToBottom();
@@ -103,8 +138,8 @@ export default {
                 if (el) el.scrollTop = el.scrollHeight;
             });
         },
-        async copyLog() {
-            const text = this.log.map(l => `[${this.fmtTime(l.at)}] ${l.text}`).join('\n');
+        /** 复制文本（clipboard API + 老式选区兜底） */
+        async copyText(text) {
             let ok = false;
             try {
                 await navigator.clipboard.writeText(text);
@@ -123,8 +158,40 @@ export default {
                     document.body.removeChild(ta);
                 } catch (e) { ok = false; }
             }
-            this.copied = ok;
+            return ok;
+        },
+        async copyLog() {
+            const text = this.log.map(l => `[${this.fmtTime(l.at)}] ${l.text}`).join('\n');
+            this.copied = await this.copyText(text);
             setTimeout(() => { this.copied = false; }, 1500);
+        },
+        // 🔍 过程透明化（2026-09-27）：请求详情展开/收起 + 复制
+        isDetailOpen(i) { return !!this.openMap[i]; },
+        toggleDetail(i) {
+            if (this.openMap[i]) delete this.openMap[i];
+            else this.openMap[i] = true;
+        },
+        roleLabel(role) {
+            if (role === 'system') return 'System';
+            if (role === 'user') return 'User';
+            if (role === 'assistant') return '预填充（assistant）';
+            return String(role || '');
+        },
+        detailText(d) {
+            const parts = [`🔍 ${d.title || ''}${d.mode ? ' · ' + d.mode : ''}`];
+            for (const m of (d.messages || [])) parts.push(`\n───── 📤 发送 · ${this.roleLabel(m.role)}（${String(m.content || '').length} 字）─────\n${m.content || ''}`);
+            if (d.reasoning) parts.push(`\n───── 🧠 模型思考（${d.reasoning.length} 字）─────\n${d.reasoning}`);
+            if (d.error) parts.push(`\n❌ 失败：${d.error}`);
+            parts.push(`\n───── 📥 AI 原始回复（${String(d.rawReply || '').length} 字）─────\n${d.rawReply || '（空）'}`);
+            if (d.rawData) parts.push(`\n───── 🧾 API 原始响应（${d.rawData.length} 字）─────\n${d.rawData}`);
+            return parts.join('\n');
+        },
+        async copyDetail(i) {
+            const d = this.log[i] && this.log[i].detail;
+            if (!d) return;
+            const ok = await this.copyText(this.detailText(d));
+            this.copiedIdx = ok ? i : -1;
+            setTimeout(() => { this.copiedIdx = -1; }, 1500);
         }
     }
 };

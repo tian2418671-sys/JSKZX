@@ -68,10 +68,18 @@ export function registerAppCommands(registry, ctx) {
             menu: 'file', section: 2, order: 10, shortcut: 'Ctrl+I',
             run: () => ctx.importCards()
         },
+        // 🌐 2026-10-03 三合一：一条命令按「侧边栏当前所在库」自动分发（角色卡 / 世界书 / 预设）
+        //    标题用 titleFn 动态显示当前库（先例：toolbar.graph / edit.dedupeSmart）
         {
-            id: 'file.importFromUrl', title: '🌐 从链接导入角色卡...', category: '文件',
+            id: 'file.importFromUrl', category: '文件',
             menu: 'file', section: 2, order: 20,
-            run: () => ctx.downloadCardFromUrl()
+            titleFn: () => {
+                const label = { characters: '角色卡', worldbooks: '世界书', presets: '预设', plugins: '插件' }[v(ctx.appMode)] || '';
+                return `🌐 从链接导入${label ? '（' + label + '）' : ''}...`;
+            },
+            tooltip: '按当前侧边栏所在的库自动分发；粘贴 JSON 直链（Discord / GitHub 等 CDN）即可导入',
+            disabled: () => v(ctx.appMode) === 'plugins',
+            run: () => ctx.importFromUrlSmart()
         },
         {
             id: 'file.saveCurrentAsset', title: '💾 物理保存修改', category: '文件',

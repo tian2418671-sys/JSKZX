@@ -206,14 +206,14 @@ export function isLlmOnlyPlan(plan) {
  * 消息顺序（与方案 §3.3 一致）：
  * ```text
  * [ system: 主提示词 + 破限 ]                              ← 破限拼在末尾（注意力权重最高）
- * [ user:   预设 user 段 或 程序生成的默认（候选池 + 卡片数据 + 输出要求） ]
+ * [ user:   预设 user 段（附加）+ 程序生成的默认（候选池 + 卡片数据 + 输出要求） ]
  * [ assistant: 预填充（如 `<tags>[`） ]                     ← 可选，必须放最后
  * ```
  *
  * @param {object} p
  * @param {object} p.rolePrompts 单套提示词（`{system, user, prefill}`）
  * @param {string} [p.jailbreak] 破限词（非空则追加到 system 末尾）
- * @param {string} p.defaultUser 程序生成的默认 user 内容（预设 user 段为空时使用）
+ * @param {string} p.defaultUser 程序生成的默认 user 内容（预设 user 段留空时使用；非空时附加在其后）
  * @param {boolean} [p.usePrefill] 是否使用预填充（false = 不用，用于「预填充被拒后重试」）
  * @returns {Array<{role:string, content:string}>}
  */
@@ -227,8 +227,12 @@ export function buildLlmMessages({ rolePrompts, jailbreak, defaultUser, usePrefi
     if (jb) sys = sys ? `${sys}\n\n${jb}` : jb;
     if (sys.trim()) msgs.push({ role: 'system', content: sys });
 
-    // ② user：预设优先，留空用程序默认
-    const userContent = p.user.trim() ? p.user : String(defaultUser || '');
+    // ② user：预设 user 段（若有）**附加**在程序默认之前——绝不顶替卡片数据（AI-11）
+    //    留空 = 只用程序默认；两者皆空则不产生 user 消息
+    const dv = String(defaultUser || '');
+    const userContent = p.user.trim()
+        ? (dv.trim() ? p.user + '\n\n' + dv : p.user)
+        : dv;
     if (userContent.trim()) msgs.push({ role: 'user', content: userContent });
 
     // ③ assistant：预填充（可选，放最后 —— 紧邻模型输出位置）
@@ -608,24 +612,35 @@ function parsePackedBody(body) {
  * @param {string} [p.customPrompt] 附加要求
  * @returns {string} 头部文本（可能为空串）
  */
-export function composeTagPromptHead({ poolTags, poolEnabled, enableExtraction, customPrompt } = {}) {
-    let head = '';
+export function composeTagPromptHeadParts({ poolTags, poolEnabled, enableExtraction, customPrompt } = {}) {
+    let poolPart = '';
+    let extraPart = '';
     const pool = Array.isArray(poolTags) ? poolTags : [];
     const poolOn = poolEnabled !== false;
     // ⚠️ 缺省按**宽松**（允许自由提取）——与引擎默认（enableAIExtraction=true）同口径；仅显式 false 才用严格规则
     const extractionOn = enableExtraction !== false;
-    if (poolOn && pool.length > 0) head += `【标签候选池】：[${pool.join(', ')}]\n`;
+    if (poolOn && pool.length > 0) poolPart += `【标签候选池】：[${pool.join(', ')}]\n`;
     if (poolOn) {
         if (extractionOn) {
-            head += '【规则】：你可以优先从候选池中选择合适的标签。如果候选池中没有合适的，允许你结合卡片内容自由提取或生成最精准的标签。\n';
+            poolPart += '【规则】：你可以优先从候选池中选择合适的标签。如果候选池中没有合适的，允许你结合卡片内容自由提取或生成最精准的标签。\n';
         } else {
-            head += '【严格限制规则】：你 **绝对只能** 从【标签候选池】中挑选符合的标签，绝对不允许输出候选池以外的任何词汇！\n';
+            poolPart += '【严格限制规则】：你 **绝对只能** 从【标签候选池】中挑选符合的标签，绝对不允许输出候选池以外的任何词汇！\n';
         }
     }
     if (customPrompt && String(customPrompt).trim() !== '') {
-        head += `【附加要求】：${String(customPrompt).trim()}\n`;
+        extraPart += `【附加要求】：${String(customPrompt).trim()}\n`;
     }
-    return head;
+    return { poolPart, extraPart };
+}
+
+/**
+ * 📨 2026-10-03「完全透明化」：头部**拆两段**的后向兼容出口 —— `poolPart + extraPart` 与本函数返回值**逐字相同**
+ * （由同一实现拼接保证，单测锁定等价性）。预览区需要「候选池段仅启用池时出现 / 附加要求独立成段」，
+ * 与发送侧共用同一拆分口径。
+ */
+export function composeTagPromptHead(params = {}) {
+    const { poolPart, extraPart } = composeTagPromptHeadParts(params);
+    return poolPart + extraPart;
 }
 
 /** 默认分段阈值（超出 → 按段落边界切段逐段打标） */

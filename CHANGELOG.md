@@ -1,7 +1,218 @@
-# SillyTavern 角色卡管理器 · v1.0 → v2.3.0 更新汇总
+# SillyTavern 角色卡管理器 · v1.0 → v2.3.5 更新汇总
 
-> 更新周期：2026-08-09 ~ 2026-09-25
+> 更新周期：2026-08-09 ~ 2026-10-03
 > 技术栈：Electron + Vue3 + Tailwind + ECharts
+
+---
+
+## 🔸 v2.3.5 · 打标「自定义模式（实验）」全系列：段编排 → 完全透明 → 全量可编辑 → 两级折叠（2026-10-03）
+
+> 用户诉求链：「照酒馆提示词管理器做个自定义模式（页签先空白，内容等我填充）」→「加上初始映射」→「路径二选一（单选）」→「接入打标」→「把要发送的卡/世界书内容全部透明化展示、可编辑」→「选 700 张不能一大长段（加组折叠）」→「单卡内容再加一层折叠（段折叠）」→ 文案标注「（实验）」。
+
+### ✨ 用户可感知的变化
+
+- 「提示词」组新增 **「✨ 自定义模式（实验）」** 页签，与「📝 系统提示词」**单选二选一**（打标只执行选中的一条）；
+- **多段编辑器**：段 = `{ role: SYSTEM/USER/ASSISTANT, content }`；插入（最上方）/删除/上移/下移；不可变更新、随 ui 段落盘、重启恢复；「⟸ 映射当前提示词」一键把『系统提示词 / 破限 / User / 预填充』映射为初始段（已有段时先确认替换）；
+- **接入打标**：唯一出口 `requestTaggingShared` 分流（`tagPromptMode==='custom'` 且「仅 LLM」）→ `buildCustomMessages` 段编排；材料自动拼进「最后一条 user 段」/无 user 段时独立 user 插在末尾连续 assistant 前；`usePrefill=false` 去末尾 assistant 段；`customTailPrefill` 供解析拼回；
+- **完全透明化预览**：「📨 程序自动材料（发送预览）」区块——`buildCardPromptParts`/`buildWbPromptParts` = **发送与预览唯一拼装**（`parts.map(p=>p.body).join('')` 与实发 promptText 逐字一致）；
+- **全目标展示**：预览重构为「🧱 公共材料（所有卡/书共用）」+「📄 每目标一组（独立发送）」；卡片视图 = 全部选中卡；世界书视图 = 打标范围（当前书 / 筛选结果逐本）；
+- **全量可编辑（覆盖）**：任一段可编辑 → `ui.tagMaterialOverrides`（键域 `global` / `card:<id>` / `wb:<path|name>`；空串=有效覆盖）；覆盖在 **parts 构建内部**应用（发送/预览同源）；穿透：单卡/书单发（parts）、超长分段（材料本体 + task/head/output）、打包（task/卡材料；**output 不穿透**——`packedOutputRule` 与 `parsePackedTags` 解析契约）；「⟲ 恢复自动」= 删键；🔒 锁定 = 纯 UI 态（默认解锁）；
+- **两级折叠**：① 组折叠（`collapsedGroups`；公共组默认展开、目标组 **>5 默认折叠**）；② 段内容折叠（`foldedParts`；**默认折叠**，段头 = ▸/▾ + 锁钮 + 标题 + 角标 + 字数 + 展开/收起）；折叠全部 `v-if` 惰性渲染；「全部展开/全部折叠」按钮**组+段双控**；
+- **「候选池与规则」段显隐**：`useCandidatePool=false` 时不渲染该段（用户要求）；附加要求非空时以「附加要求」段（live 模式，编辑=改 `customAIPrompt` 本体、非覆盖）出现；池开时 pool 段（含附加要求文本）；
+- **主题修复**：深色主题（dark/slate）下预览「卡名/书名」组头对比仅 2.1:1 → 新增 `.jsk-preview-target` 专用类 + `css/style.css` 覆盖（→ `#818cf8`，实测 5.0 / 4.6:1）；light 保持 indigo-600（4.4:1）；
+- 组头/段头加 `data-sec-head="1"` / `data-part-head="1"` 标记（测试/探针定位；段头同样含 `.group` 类，禁用 `.group` 选择器做定位）。
+
+### 🧩 关键文件
+
+- 新增 `js/utils/customPromptSegments.js`（段纯函数 + `buildSegmentsFromPrompts` + `buildCustomMessages` + `customTailPrefill`）+ `test/customPromptSegments.test.mjs`（15 用例）；
+- `js/utils/llmPromptRoles.js`：新增 `composeTagPromptHeadParts`（头部拆 pool/extra；`composeTagPromptHead` 改为其拼接——单测锁定逐字等价，4 新用例）；
+- `js/composables/useAITools.js`：`getMaterialOverride`/`cardScopeKey`/`wbScopeKey` + `buildCommonPromptParts`/`buildCardMaterialPart`/`buildWbMaterialPart`/`buildTaggingTaskText`/`buildTaggingOutputRule`；各发送链路穿透（单卡 L1019、分段、打包、世界书 L1392 / L1428）；
+- `js/components/AITagModal.vue`：段编辑器 / 预览区块（sections 渲染 + 锁定 / 折叠 / 覆盖事件）/ 导航单选圈 /「（实验）」标注 / `.stop` 事件处理 / max-h 编辑框；
+- `js/components/App.vue`：`tagCustomSegments` / `tagPromptMode` / `tagMaterialOverrides` 状态（恢复 + 集中 watch）+ `materialPreview` computed（sections + 字数）+ `setMaterialOverride` / `clearMaterialOverride` + **世界书预览懒加载 watch**（串行 + 令牌取消）；
+- `js/composables/useConfigPersistence.js`：三字段收集（含 `tagPromptMode` 曾漏 `.value` 的修复）；
+- `css/style.css`：`.jsk-preview-target` 主题覆盖。
+
+### 🧪 验证
+
+- E2E `%TEMP%\jsk-e2e-overrides2.mjs`（副本 9377 + mock 8899）**40 断言全过**：多卡结构 / DOM=计算值 / 覆盖四层一致（计算·DOM·落盘·实发）/ ⭐ 预览=实发逐字 / 池显隐 / 锁定 / 组折叠 G1-G6 / 段折叠 B0-B0c / 打标块（system+custom）；
+- 历史轮 E2E：编辑器 7 断言、映射、单选 6 断言（含落盘双向）、接入打标 9 断言、透明化 7 断言；
+- 全面审计 `%TEMP%\jsk-full-audit.mjs`（副本）**38 项全绿**：三视图 / 打标窗 7 导航页 / 空态 / 折叠锁定 6 轮循环 / 77 张全选（computed 0.2ms、78 组头、惰性 DOM 仅 ≤6 段卡片）/ 三主题切换 / 持久性（reload + **进程级冷启动**均恢复：覆盖+池开关）/ 坏数据兼容（字符串覆盖→{}、非法段滤除+清洗）/ mock 打标（system+custom）/ **console 0 错误**；
+- 三主题 computedStyle 实测（`.jsk-preview-target` / 段卡片浅底深字恒定 / 锁按钮 / 恢复按钮）；
+- `npm test` **824 全绿**；`guard:scope` 0 未定义；`build:web` 通过。
+
+### ⚠️ 关键坑（接手须知）
+
+- **prod 构建（app://）下 `__vue_app__._instance` 为 null 且 `_context.provides` 为空** —— 探针必须走 `_container._vnode.component.provides.appCtx`（稳妥=三路径 fallback）；
+- **打标完成后窗口自动关闭（2s）+ 后台合成停帧 → `<transition>` 离开动画卡住**（遗留 DOM 悬挂、点击失效）—— E2E 设计原则：**所有 DOM 断言必须放在打标之前**；F 轮打标走 `ctx.startAITagging()` 引擎入口（不依赖按钮）；
+- E2E 读盘断言：`ctx.syncConfigToDisk`（App 暴露）为防抖版 → await 后需 wait≈800ms 再读 `app_config.json`；
+- 用户实例 reload 后**启动蒙版**淡出可能延迟很久 —— 截图前用「正在载入资源与分类配置」文本轮询等消失。
+
+---
+
+## 🔸 v2.3.5 · URL 导入「三合一」：一条命令按侧边栏当前库自动分发（2026-10-03）
+
+> 用户需求：「增加 URL 导入预设功能」→「三个库的 URL 导入都收进文件菜单，侧边栏入口删除」→「三合一升级：采用侧边栏库切换实现」。
+
+### ✨ 用户可感知的变化
+
+- **「文件」菜单只保留一条「🌐 从链接导入（当前库）...」命令**：标题随**侧边栏切换的库**动态变化（角色卡 / 世界书 / 预设），点击即对**当前库**导入 ——
+  弹窗粘贴 JSON 直链（Discord / GitHub 等 CDN）即可拉取；预设/世界书**自动落盘**（**同名不覆盖**）并加入列表（预设自动打开编辑器）；插件视图下自动置灰；
+- **侧边栏的 URL 输入行已移除**（世界书高级工具浮层 + 预设工具栏）—— 入口统一在菜单，界面更清爽；
+- 拉取链路 = 前端直连失败时**自动回退主进程**下载（绕开 CORS），带 50MB 体积守卫；解析前清洗 BOM。
+
+### 🧩 实现要点（内部）
+
+- `useCommands.js`：合并为单条 `file.importFromUrl`（`titleFn` 动态标题按 `appMode` 切换 + `disabled` 插件视图）；
+- `App.vue` 新增 `importFromUrlSmart()`：按 `appMode` 分发到 `downloadCardFromUrl` / `importWorldbookFromUrl` / `importPresetFromUrl`（同款先例：`handleStartTagging` / `startSmartDedupe`）；
+- `importWorldbookFromUrl` / `importPresetFromUrl` 支持**可选 url 参数**，无参时 `appPrompt` 弹输入框；
+- `SidebarPanel.vue`：移除两处 URL 导入 UI 块与对应 return 映射。
+
+### 🧪 验证
+
+- E2E（`%TEMP%\jsk-verify-smart-url.mjs` + `preset-url-mock.mjs`，8898 故意不发 CORS 头以覆盖回退链）：
+  ① 三视图标题动态切换实证（角色卡/世界书/预设三态）；② 插件视图命令自动置灰（`disabled`）；
+  ③ 预设视图点命令 → 输入弹窗 → 填 mock URL → 确定 → **落盘成功**（隔离目录）→ **全过**；
+- 早期链路 E2E（`jsk-e2e-preset-url.mjs`）：前端 + 主进程回退双通道实证（mock 收 2 次请求）；
+- `npm test` 801 全绿；`build:web` / `guard:scope` 通过。
+
+---
+
+## 🔸 v2.3.5 · 预设库「预设读不出来」修复：大文件预检误杀 + BOM 加固（2026-10-03）
+
+> 用户反馈：「预设库中有预设不能被读取被跳过」——真实库复核确认复现（非误报）。
+
+### ✨ 用户可感知的变化
+
+- **大预设不再被跳过**：此前「体积超 512KB 且开头一段没有预设特征字段」的预设会被扫描**误判为「非预设」**而不显示——真实库实测受害者：`A.U.T.O.预设`、`万象枢机 2.5`、`双人成行` 系列等 **5 个**，现在**全部可正常读取**；
+- 修复同样作用于**世界书**（同款预检逻辑）——`entries` 字段被前段大段内容挤出的书不再被误杀；
+- **带 BOM 的 JSON 不再误报「解析失败」**（部分工具导出的 JSON 带 BOM 头，实测库 8 个命中）；
+- 备注：预设库里大量非预设文件（世界书 / 表格 / 酒馆助手脚本 / 正则）仍会按正确理由跳过——它们本来就不是预设。
+
+### 🧩 实现要点（内部）
+
+- `preset:scan` / `wb:scan`：**彻底删除「头部 64KB 预检」**（「采样判拒」模式从根移除）——直接全量 parse（实测 116 文件 / 61.8MB 仅 **504ms**，首次后走 mtime 缓存；为省这 0.5s 保留任何采样判拒都不值得）；保留 50MB 上限（>50MB 仍显示在列表）与缓存；
+- `wb:scan` / `wb:meta` / `preset:scan` 三处 parse 前清洗 UTF-8 BOM；
+- 规范沉淀：「预检 / 采样」只能加速**放行**，不能单独作为**拒绝**依据。
+
+### 🧪 验证
+
+- 真实库：`H:\01` 全量复核**救回 5 个唯一真预设**（应用缓存已验证由「每次跳过」变 `valid:true`）；启动日志「跳过非预设」**13 条 → 4 条**（剩 4 条均为真损坏 JSON）；`E:\AI\酒馆工具\预设` 13/14 通过（唯一跳过的是正则脚本）；
+- **根治版复跑**：跳过名单仍 = 4 条真损坏（无任何大文件漏网）；**同类模式全库排查**：深度剪枝（H:\01 全深 264 JSON、**0 深层受害者**）/ 各体积闸门（不丢弃、仅降级或显式报错）逐项核过；
+- 缓存 76 个固化否定 + 11 个未判定**逐个人工甄别**——无真预设被误杀；
+- `npm test` 801 全绿。
+
+---
+
+## 🔸 v2.3.5 · 打标支持暂停 / 继续：不想打了随时停下，之后接着跑（2026-09-28）
+
+### ✨ 用户可感知的变化
+
+- **打标进行中可随时「⏸ 暂停」**：当前卡片处理完成后即停下，不再发起新请求 —— 不想继续时不用再「等它跑完」；
+- **进度不丢**：已打好的标签、已完成计数原样保留，打标窗口保持打开（不自动关闭）；
+- **一键接着跑**：点「▶ 继续未完成（N 张）」从断点继续 —— 自动跳过已完成，不重复打标、不重复花 Token；
+- 暂停按钮两处：打标窗口底部 + 打标过程窗口右上角（同一个动作）；
+- 世界书打标同样可暂停；继续方式：重新开始打标（保持「⏭️ 跳过已打标卡」开启即自动跳过已完成的书）。
+
+### 🧩 实现要点（内部）
+
+- `useAITools` 新增 `tagPauseRequested` / `pauseTagging()`：检查点 = 主循环（请求单元）/ 分段循环（段）/ 拆单快速路径（`processOneCard` 入口）——收到暂停后**不再开启新请求**，下一个检查点安全收尾；
+- 卡片扫尾：状态显示「⏸ 已暂停」、日志「已暂停」分隔 + 断点续跑提示；**不自动关窗**；账本（`tagResume`）保留 → 「继续未完成」复用现有续跑机制（零新账本）；
+- 世界书扫尾：已打标标签已落盘（`wbTagMap`）；分段半截不落盘（重开时整本重跑）；
+- 新任务/续跑开始时清除暂停标志；组件侧：`AITagModal`（底部 ⏸ 暂停 / ▶ 继续未完成）、`AiTagLogModal`（头部 ⏸ 暂停 + 「已暂停（可继续）」状态）。
+
+### 🧪 验证
+
+- `npm test` 801 全绿；`build:web` ✓；`guard:scope` 0。
+- 副本库 + mock E2E（`%TEMP%\jsk-e2e-pause.mjs`）：4 张卡开始打标 → 第 2 个请求后点「⏸ 暂停」→ 日志确认「已暂停：不再发起新请求」+ mock 请求数 3.2s 稳定不再增长（循环真停）→「▶ 继续未完成」→ 日志「续跑 · 自动跳过已完成」只跑剩余 2 张（含 1 张 5369 字超长卡自动分 2 段）→「打标完成」；总请求数精确 = 暂停前 2 + 续跑 3，无任何重复请求。
+
+---
+
+## 🔸 v2.3.5 · 打标「User 手输顶替卡片数据」修复：改合并语义（AI-11，2026-09-27）
+
+> 用户反馈（v2.3.0 实发版首轮）：「在打标窗口 User 里手动输入内容后，卡片内容像消失了、AI 收不到」——实机复核确认（非误报）。
+
+### ✨ 用户可感知的变化
+
+- **在「User」段手输内容后，卡片数据不再消失**：手输内容改为**附加**在卡片数据之前发送（卡名 / 描述 / 词条与输出要求照旧尾随）——此前「仅 LLM」组合下任何手输内容都会让卡片材料整块不发送，清空 User 才恢复；
+- 输入框提示同步补明：「若填写，内容会附加在卡片数据之前（卡内容照常发送）」。
+
+### 🧩 实现要点（内部）
+
+- `llmPromptRoles.js` `buildLlmMessages()`：user 组装由「二选一」（`p.user.trim() ? p.user : defaultUser`）改为**合并**（`p.user + '\n\n' + defaultUser`；`defaultUser` 为空则只用 user 内容；两者皆空不产生 user 消息）；
+- 打包 / 分段 / 世界书打标共用同一出口，一处修全；仅影响「仅 LLM」组合（分角色链路的生效条件）。
+
+### 🧪 验证
+
+- `test/llmPromptRoles.test.mjs`：原「预设 user 优先」断言改为合并断言 + 新增 2 条边界用例（`defaultUser` 为空 / 两者均非空）；
+- 副本库 + mock E2E：User 非空时请求体同时含用户文本与卡数据；
+- `npm test` 801 全绿。
+
+---
+
+## 🔸 v2.3.5 · 打标过程透明化：请求 / 回复详情可展开查看（2026-09-27）
+
+> 用户反馈要求：「打标时希望看到 AI 如何思考的、用户的数据如何发送给 AI——在打标过程窗口里展露」。
+
+### ✨ 用户可感知的变化
+
+- **「打标过程」窗口里每个请求都变成一条可展开的记录**：点「🔍 查看」即可看到本次**实际发送**的完整内容
+  （System / User / 预填充逐段展示，含字数）与 **AI 原始回复全文**；
+- **有思考字段的模型会额外显示「🧠 模型思考」**（reasoning_content / Anthropic thinking 块尽力提取，无则隐藏）；
+- 请求**失败**的条目直接标红并可展开看发送数据（排查中转站 / 超时问题不用再靠猜）；
+- 详情支持「📄 复制全部」；展开详情时暂停自动滚动（不打扰阅读），收起后恢复跟随。
+- **失败 / 空回复时同样看得到 AI 的原话（2026-09-28 增强）**：新增「🧾 API 原始响应」块，
+  直接展示服务器返回的**完整原始 JSON**（截断 6000 字）——「回复为空」「结构不认识」时一眼可查到底返回了什么；
+  「📥 AI 原始回复」也不再隐藏于错误之后（空时给出引导语）。用户反馈「只看到自己发送的、看不到 AI 的回文」已补上。
+
+### 🧩 实现要点（内部）
+
+- `useAITools.js`：`pushTagLog(text, level, detail)` 第三参携带详情对象（`{title, mode, messages, rawReply, reasoning, error}`）；
+  `requestTaggingShared()` 每请求 push 一条「📤 请求中…」，ladder 循环内实时更新**实际发送的 messages**（降级重试反映到详情），
+  成功后回填 `rawReply` + `reasoning` 并更新行文案，失败时回填 `error` 并标红；新增 `extractReplyReasoning()` 尽力提取思考字段。
+- 详情**上限 100 条**（超出仅保留文本行，防内存膨胀；主日志上限 2000 条不变）。
+- `AiTagLogModal.vue`：条目渲染「🔍 查看 / 收起 ▲」+ 详情块（消息逐段 `pre`、思考、原始回复、复制全部）；
+  `copyText()` 抽取复用（clipboard + 老式兜底）；`openMap` 记录展开态；有展开时暂停自动滚底。
+- 覆盖所有打标场景（单卡 / 打包 / 分段 / 世界书——共用唯一请求出口，一处生效）。
+- 🔍 增强（2026-09-28）：详情新增 `rawData` —— 成功 = `result.data` 响应体 JSON（`briefRawData()` 截断 6000 字）；
+  失败 = `callAIWithRetry` 把失败响应挂到 `err.rawResult` 随错误带回（HTTP 错误里含服务器正文）；
+  「📥 AI 原始回复」渲染不再以 `error` 为条件（失败/空同样显示）；复制全文同步含原始响应。
+
+### 🧪 验证
+
+- `npm test` 801 全绿；`build:web` ✓；`guard:scope` 0。
+- 副本库 + mock 端到端（`%TEMP%\jsk-e2e-transparency.mjs`）：请求后 `aiTagLog` 出现详情条目
+  （messages：system 239 字 / user 912 字 / assistant 预填充 7 字；rawReply 30 字；mode=全量）；
+  UI 点「🔍 查看」→ 4 个 `pre` 渲染 + 「📤 发送 ·」「📥 AI 原始回复」文本出现 → **全部通过**。
+- 🧾 增强双场景 E2E（`%TEMP%\jsk-e2e-rawdata.mjs`，2026-09-28）：①正常回复 → 详情含「🧾 API 原始响应」（含标签内容）；
+  ②服务器返回空 content（`MOCK_EMPTY=1`）→「📥 AI 原始回复（0 字）」+ 空原因引导语 + 「🧾 API 原始响应」完整 JSON 全部可见 → **两阶段全过**。
+
+---
+
+## 🔸 v2.3.5 · 主题适配修复：打标窗口在青灰 / 白昼下的显示问题（2026-09-27）
+
+> 用户反馈：「打标窗口好像是主题有问题」——实机三主题截图复核证实（非误报）。
+
+### ✨ 用户可感知的变化
+
+- **青灰主题下打标窗口不再「一半深一半白」**：右侧面板、顶部进度条区、底部操作栏恢复为深色（与左导航统一）；
+- **白昼主题下打标窗口标题栏文字可见**（此前标题为白字、标题栏被浅色主题反转为白 → 文字几乎不可见）；
+- 顺带修复同一机制下的多处小残留：浅绿「仅 LLM 层启动」提示条、破限区浅粉块等在暗夜 / 青灰下的配色；
+- **受益面**：所有使用「深色标题栏 + 浅色面板」模式的弹窗（自动分组、规则表、文本查看、关系图谱等 7 个窗口）。
+
+### 🧩 实现要点（内部）
+
+- 根因：全局主题靠 `css/style.css` 的 `[data-theme]` 类覆盖实现（UI 底色以 zinc 深色硬编码 + 浅色主题全面反转）；
+  **slate 段缺 `.bg-white` 整套映射**（dark 段有、light 段天然无需）→ 青灰下所有 `bg-white` 面板保持纯白；
+  **light 段 `.bg-gray-900` 只反转背景未适配文字** → 标题栏白字白底；另有若干 `-50` 系 / 边框 / 深底文字两边未覆盖。
+- 修复：`css/style.css` 三处补丁——slate 段补齐整套（对照 dark 段：`bg-white` / 浅色语义块 / emerald / rose / 边框 / 深底文字）、
+  dark 段补遗漏（indigo-50/70、rose-50、emerald 系列等）、light 段补 `.bg-gray-900 { color }`。
+- `App.vue`：`__jskDiag.aiTag.push` 增加 detail 透传（e2e 截图 / 探针用，配合透明化详情）。
+
+### 🧪 验证
+
+- 实机三主题截图（打标窗口 / 打标过程窗口）：slate 全窗深色统一、light 标题文字清晰、dark 无回归。
+- ⚠️ dev 截图流程两条纪律：改过组件后须 `Page.reload` 取全新实例（HMR 残留会「状态对但 DOM 不渲染」）；
+  reload 后先等 ~2.5s 再轮询（避免读到旧页面 ctx 的竞态）。
 
 ---
 

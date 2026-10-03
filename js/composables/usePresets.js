@@ -237,11 +237,14 @@ export function usePresets({
     // 网址导入预设
     // =========================================================
 
-    const importPresetFromUrl = async () => {
-        const url = importPresetUrl.value.trim();
+    //    🌐 2026-10-03：入口统一到「文件」菜单 —— 支持可选 url 参数；无参时弹输入框
+    //    （侧边栏输入框已移除，保留旧输入框残留值兼容）
+    const importPresetFromUrl = async (urlArg = null) => {
+        let url = (urlArg != null && String(urlArg).trim()) ? String(urlArg).trim() : String(importPresetUrl.value || '').trim();
         if (!url) {
-            nativeAlert('请先输入预设的 JSON 直链网址！', 'warning');
-            return;
+            url = await appPrompt('🌐 从链接导入预设\n请输入预设的 JSON 直链（Discord / GitHub 等 CDN 均可）：');
+            if (!url || !url.trim()) return;
+            url = url.trim();
         }
         if (!/^https?:\/\//i.test(url)) {
             nativeAlert('网址格式不正确，请粘贴以 http:// 或 https:// 开头的 .json 直链。', 'warning');
@@ -252,7 +255,8 @@ export function usePresets({
         try {
             addLog(`开始从网址导入预设: ${url}`);
             const text = await fetchRemoteText(url);
-            const pData = JSON.parse(text);
+            // 🩹 2026-10-03：清洗 UTF-8 BOM（与 DF-28 扫描口径一致；部分导出文件带 BOM 会导致 JSON.parse 报「解析失败」）
+            const pData = JSON.parse(text.replace(/^\uFEFF/, ''));
 
             // 归一化预设数据
             const presetName = (pData.name || `网络导入预设_${Date.now()}`).trim();

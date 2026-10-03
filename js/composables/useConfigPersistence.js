@@ -34,7 +34,7 @@ export function useConfigPersistence({
     // —— 收集源：UI 状态 ——
     theme, appSettings, sanitizeImportedTags, autoTagOnImport, snapshotConfig, localCategoryMap,
     sidebarWidth, viewMode, isCompactMode, sortBy,
-    llmRolePrompts, tagPackSize, tagSkipTagged, tagResume, lastWorldbookDirPath, lastPresetDirPath, wbCategoryMap, wbTagMap,
+    llmRolePrompts, tagCustomSegments, tagPromptMode, tagMaterialOverrides, tagPackSize, tagSkipTagged, tagResume, lastWorldbookDirPath, lastPresetDirPath, wbCategoryMap, wbTagMap,
     // 🏷️ S2（2026-09-25）：候选池开关 / 自由提取 / 候选池本体（随 ui 段落盘；恢复在 App.vue loadAppConfig）
     useCandidatePool, enableAIExtraction, aiCandidateTags,
     // —— 收集源：导入时间映射（卡片首次入库时刻持久化） ——
@@ -99,6 +99,12 @@ export function useConfigPersistence({
                 sortBy: sortBy.value,
                 // 🧠 第二批改造：单套提示词链路（system / user / prefill）+ 每请求打包卡数
                 llmRolePrompts: JSON.parse(JSON.stringify((llmRolePrompts && llmRolePrompts.value) || { system: '', user: '', prefill: '' })),
+                // ✨ 自定义模式（2026-10-03）：多段提示词列表（[{id, role, content}]）
+                tagCustomSegments: JSON.parse(JSON.stringify(Array.isArray(tagCustomSegments && tagCustomSegments.value) ? tagCustomSegments.value : [])),
+                // 🔘 提示词路径单选（2026-10-03）：'system' | 'custom'（打标二选一）
+                tagPromptMode: (tagPromptMode && tagPromptMode.value === 'custom') ? 'custom' : 'system',
+                // 📨 2026-10-03「全量可编辑」：程序自动材料的用户覆盖（{ scope: { key: 文本 } }；发送与预览同源应用）
+                tagMaterialOverrides: JSON.parse(JSON.stringify((tagMaterialOverrides && typeof tagMaterialOverrides.value === 'object' && tagMaterialOverrides.value) ? tagMaterialOverrides.value : {})),
                 tagPackSize: Math.min(10, Math.max(1, Number((tagPackSize && tagPackSize.value) || 1) || 1)),
                 // 📌 断点续跑账本（null = 无未完成任务）
                 tagResume: (tagResume && tagResume.value) ? JSON.parse(JSON.stringify(tagResume.value)) : null,
