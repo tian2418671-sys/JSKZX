@@ -18,6 +18,9 @@ import {
     TAG_WRAPPER, TAG_WRAPPER_ALT, DEFAULT_PREFILL,
     isLlmOnlyPlan, normalizeRolePrompts, migrateLegacyPresets,
     DEFAULT_SYSTEM_PROMPT, SYSTEM_PROMPT_VARIANTS, resolveSystemVariantId,
+    // 🌍 AI-15（2026-10-03）：世界书专用 System（三态 + 变体表）
+    DEFAULT_SYSTEM_PROMPT_WB, WB_SYSTEM_PROMPT_VARIANTS, WB_SYSTEM_MODES,
+    normalizeWbPrompt, resolveRolePromptsForKind,
     buildLlmMessages, willUsePrefill, parseStructuredTags, outputFormatRule,
     packedOutputRule, parsePackedTags, stripThinkingBlocks, sanitizeTagList,
     composeTagPromptHead, composeTagPromptHeadParts, splitTextSegments
@@ -50,17 +53,66 @@ describe('isLlmOnlyPlan — 仅「①关 ②关 ③开」才为真', () => {
 // 📝 单套链路归一化 + 旧预设库迁移
 // ═══════════════════════════════════════════════════════════════
 describe('normalizeRolePrompts — 单套链路', () => {
-    test('正常对象 → 原样保留三个字段', () => {
+    test('正常对象 → 原样保留三个字段（+ 🌍 世界书三态缺省 default）', () => {
         const p = normalizeRolePrompts({ system: 'S', user: 'U', prefill: '<tags>[' });
-        assert.deepEqual(p, { system: 'S', user: 'U', prefill: '<tags>[' });
+        assert.deepEqual(p, { system: 'S', user: 'U', prefill: '<tags>[', wb: { mode: 'default', system: '' } });
     });
     test('缺失 / 脏值 → 空字符串（不抛错）', () => {
-        assert.deepEqual(normalizeRolePrompts(null), { system: '', user: '', prefill: '' });
-        assert.deepEqual(normalizeRolePrompts('x'), { system: '', user: '', prefill: '' });
-        assert.deepEqual(normalizeRolePrompts({ system: 123, user: null, prefill: undefined }), { system: '', user: '', prefill: '' });
+        const empty = { system: '', user: '', prefill: '', wb: { mode: 'default', system: '' } };
+        assert.deepEqual(normalizeRolePrompts(null), empty);
+        assert.deepEqual(normalizeRolePrompts('x'), empty);
+        assert.deepEqual(normalizeRolePrompts({ system: 123, user: null, prefill: undefined }), empty);
     });
     test('⚠️ prefill 为空串 = 关闭预填充（不是「用默认」）', () => {
         assert.equal(normalizeRolePrompts({ prefill: '' }).prefill, '');
+    });
+    test('🌍 wb 三态：合法值保留 / 非法 mode 回退 default / system 非字符串回退空串', () => {
+        assert.deepEqual(normalizeRolePrompts({ wb: { mode: 'custom', system: '我的世界书提示词' } }).wb,
+            { mode: 'custom', system: '我的世界书提示词' });
+        assert.deepEqual(normalizeRolePrompts({ wb: { mode: 'inherit' } }).wb, { mode: 'inherit', system: '' });
+        assert.deepEqual(normalizeRolePrompts({ wb: { mode: '乱写' } }).wb, { mode: 'default', system: '' });
+        assert.deepEqual(normalizeRolePrompts({ wb: { mode: 'default', system: 123 } }).wb, { mode: 'default', system: '' });
+        assert.deepEqual(normalizeRolePrompts({ wb: 'x' }).wb, { mode: 'default', system: '' });
+    });
+});
+
+describe('normalizeWbPrompt / resolveRolePromptsForKind — 🌍 AI-15 世界书 System 分叉', () => {
+    test('normalizeWbPrompt：容错', () => {
+        assert.deepEqual(normalizeWbPrompt(null), { mode: 'default', system: '' });
+        assert.deepEqual(normalizeWbPrompt({ mode: 'custom', system: 'A' }), { mode: 'custom', system: 'A' });
+        assert.deepEqual(normalizeWbPrompt({ mode: 'bad' }), { mode: 'default', system: '' });
+    });
+    test('卡片目标 → 永远用主套（kind 缺省 = card）', () => {
+        const rp = { system: '卡主套', user: 'U', prefill: 'P', wb: { mode: 'custom', system: '书专用' } };
+        assert.equal(resolveRolePromptsForKind(rp, 'card').system, '卡主套');
+        assert.equal(resolveRolePromptsForKind(rp).systemSource, 'main');
+        assert.equal(resolveRolePromptsForKind(rp).user, 'U');
+        assert.equal(resolveRolePromptsForKind(rp).prefill, 'P');
+    });
+    test('世界书目标：default = 内置世界书文案（修口径错配）', () => {
+        const r = resolveRolePromptsForKind({ system: '卡主套', wb: { mode: 'default' } }, 'wb');
+        assert.equal(r.system, DEFAULT_SYSTEM_PROMPT_WB);
+        assert.equal(r.systemSource, 'wb-default');
+        assert.ok(r.system.includes('世界书'));
+        assert.ok(!r.system.includes('角色卡标签分析助手'));
+    });
+    test('世界书目标：inherit = 沿用主套（一套通吃）', () => {
+        const r = resolveRolePromptsForKind({ system: '卡主套', wb: { mode: 'inherit' } }, 'wb');
+        assert.equal(r.system, '卡主套');
+        assert.equal(r.systemSource, 'wb-inherit');
+    });
+    test('世界书目标：custom 用自定义内容；custom 但留空 → 回退内置（**不静默失效**）', () => {
+        const r1 = resolveRolePromptsForKind({ system: 'S', wb: { mode: 'custom', system: '我的书提示词' } }, 'wb');
+        assert.equal(r1.system, '我的书提示词');
+        assert.equal(r1.systemSource, 'wb-custom');
+        const r2 = resolveRolePromptsForKind({ system: 'S', wb: { mode: 'custom', system: '   ' } }, 'wb');
+        assert.equal(r2.system, DEFAULT_SYSTEM_PROMPT_WB);
+        assert.equal(r2.systemSource, 'wb-default');
+    });
+    test('老配置（无 wb）→ 世界书走内置默认文案（不再沿用角色卡口径）', () => {
+        const r = resolveRolePromptsForKind({ system: '老卡提示词', user: '', prefill: '' }, 'wb');
+        assert.equal(r.system, DEFAULT_SYSTEM_PROMPT_WB);
+        assert.equal(r.systemSource, 'wb-default');
     });
 });
 
@@ -91,6 +143,10 @@ describe('migrateLegacyPresets — 旧预设库 → 单套链路', () => {
         assert.equal(migrateLegacyPresets([{ system: '   ' }]).system, DEFAULT_SYSTEM_PROMPT);
         assert.equal(migrateLegacyPresets([{ content: '' }]).system, DEFAULT_SYSTEM_PROMPT);
     });
+    test('🌍 迁移结果带世界书三态缺省（default）', () => {
+        assert.deepEqual(migrateLegacyPresets([]).wb, { mode: 'default', system: '' });
+        assert.deepEqual(migrateLegacyPresets([{ content: 'x' }]).wb, { mode: 'default', system: '' });
+    });
 });
 
 describe('System 预设套用 — 变体与识别', () => {
@@ -107,10 +163,33 @@ describe('System 预设套用 — 变体与识别', () => {
         assert.equal(resolveSystemVariantId(''), 'custom');
         assert.equal(resolveSystemVariantId(null), 'custom');
     });
+    test('🌍 世界书变体表：3 个变体 + 换表识别（同一函数、不同 variants）', () => {
+        assert.equal(WB_SYSTEM_PROMPT_VARIANTS.length, 3);
+        assert.equal(WB_SYSTEM_PROMPT_VARIANTS[0].id, 'standard-wb');
+        assert.equal(WB_SYSTEM_PROMPT_VARIANTS[0].content, DEFAULT_SYSTEM_PROMPT_WB);
+        assert.equal(resolveSystemVariantId(DEFAULT_SYSTEM_PROMPT_WB, WB_SYSTEM_PROMPT_VARIANTS), 'standard-wb');
+        assert.equal(resolveSystemVariantId(WB_SYSTEM_PROMPT_VARIANTS[1].content, WB_SYSTEM_PROMPT_VARIANTS), 'deep-wb');
+        assert.equal(resolveSystemVariantId(WB_SYSTEM_PROMPT_VARIANTS[2].content, WB_SYSTEM_PROMPT_VARIANTS), 'brief-wb');
+        assert.equal(resolveSystemVariantId('随便写', WB_SYSTEM_PROMPT_VARIANTS), 'custom');
+        // ⚠️ 换表后**不会**把卡片文案误判成世界书变体
+        assert.equal(resolveSystemVariantId(DEFAULT_SYSTEM_PROMPT, WB_SYSTEM_PROMPT_VARIANTS), 'custom');
+    });
     test('默认文案包含真实性与第 5 条推理句', () => {
         assert.ok(DEFAULT_SYSTEM_PROMPT.includes('不脑补'));
         assert.ok(DEFAULT_SYSTEM_PROMPT.includes('大类/子类'));
         assert.ok(DEFAULT_SYSTEM_PROMPT.includes('输出前先在内部完成推理'));
+    });
+    test('🌍 世界书默认文案：面向世界书、含词条名/触发词线索、不再自称角色卡助手', () => {
+        assert.ok(DEFAULT_SYSTEM_PROMPT_WB.includes('世界书设定标签分析助手'));
+        assert.ok(DEFAULT_SYSTEM_PROMPT_WB.includes('词条名'));
+        assert.ok(DEFAULT_SYSTEM_PROMPT_WB.includes('触发词'));
+        assert.ok(DEFAULT_SYSTEM_PROMPT_WB.includes('不脑补'));
+        assert.ok(DEFAULT_SYSTEM_PROMPT_WB.includes('输出前先在内部完成推理'));
+        assert.ok(!DEFAULT_SYSTEM_PROMPT_WB.includes('角色卡'));
+        assert.ok(!DEFAULT_SYSTEM_PROMPT.includes('世界书设定标签分析助手'));
+    });
+    test('🌍 WB_SYSTEM_MODES 三态常量', () => {
+        assert.deepEqual(WB_SYSTEM_MODES, ['default', 'inherit', 'custom']);
     });
 });
 
@@ -161,6 +240,20 @@ describe('buildLlmMessages — 单套链路消息顺序', () => {
         assert.equal(firstNonSystem.role, 'user');
         const roles = msgs.map(m => m.role);
         assert.equal(roles.indexOf('user') < roles.indexOf('assistant'), true);
+    });
+    test('🌍 kind=wb → system 换成世界书文案（user / prefill 与卡片侧共用；破限仍拼 system 末尾）', () => {
+        const rolePrompts = { system: '卡主套', user: 'U', prefill: '<tags>[', wb: { mode: 'default', system: '' } };
+        const card = buildLlmMessages({ rolePrompts, defaultUser: 'M' });
+        assert.equal(card[0].content, '卡主套');
+        const wb = buildLlmMessages({ rolePrompts, jailbreak: '破限', defaultUser: 'M', kind: 'wb' });
+        assert.equal(wb[0].content, DEFAULT_SYSTEM_PROMPT_WB + '\n\n破限');
+        assert.equal(wb[1].content, 'U\n\nM');
+        assert.equal(wb[2].content, '<tags>[');
+        assert.deepEqual(wb.map(m => m.role), ['system', 'user', 'assistant']);
+    });
+    test('🌍 kind=wb + inherit → system 与卡片完全一致（一套通吃）', () => {
+        const rolePrompts = { system: '卡主套', prefill: '', wb: { mode: 'inherit', system: '' } };
+        assert.equal(buildLlmMessages({ rolePrompts, defaultUser: 'M', kind: 'wb' })[0].content, '卡主套');
     });
     test('system 与 defaultUser 均空 → 只返回必要消息（不产生空消息）', () => {
         const msgs = buildLlmMessages({ rolePrompts: { prefill: '' }, defaultUser: '' });

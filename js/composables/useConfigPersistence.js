@@ -33,6 +33,14 @@ export function useConfigPersistence({
     apiEndpoint, apiKey, apiModel, apiType,
     // —— 收集源：UI 状态 ——
     theme, appSettings, sanitizeImportedTags, autoTagOnImport, snapshotConfig, localCategoryMap,
+    // 📦 v2.3.6：整库冷备设置（目录 + 保留份数）
+    // ⚠️ 参数名必须与 App.vue 传入的一致（`fullBackupDir` / `fullBackupKeep`）——
+    //    曾误写成 `fullBackup`（App 没这个 ref）⇒ 落盘恒为 `{}`（功能正常但设置不持久化）。
+    fullBackupDir, fullBackupKeep,
+    // 🚀 v2.3.6：启动自动任务配置（总开关 + 三任务 + 延迟）
+    startupTasks,
+    // 🧩 2026-10-03：预填充兼容（模式 + 按 API 的记忆表）
+    prefillCompatMode, prefillCompatTable,
     sidebarWidth, viewMode, isCompactMode, sortBy,
     llmRolePrompts, tagCustomSegments, tagPromptMode, tagMaterialOverrides, tagPackSize, tagSkipTagged, tagResume, lastWorldbookDirPath, lastPresetDirPath, wbCategoryMap, wbTagMap,
     // 🏷️ S2（2026-09-25）：候选池开关 / 自由提取 / 候选池本体（随 ui 段落盘；恢复在 App.vue loadAppConfig）
@@ -92,6 +100,18 @@ export function useConfigPersistence({
                 sanitizeImportedTags: sanitizeImportedTags.value,
                 autoTagOnImport: autoTagOnImport.value,
                 snapshotConfig: JSON.parse(JSON.stringify(snapshotConfig.value || {})),
+                // 📦 v2.3.6：整库冷备设置（目录 / 保留份数）—— 用**实际传入的两个 ref** 组装
+                fullBackup: {
+                    dir: String((fullBackupDir && fullBackupDir.value) || ''),
+                    keep: Math.min(10, Math.max(1, Math.round(Number(fullBackupKeep && fullBackupKeep.value) || 3)))
+                },
+                // 🚀 v2.3.6：启动自动任务（字段清洗在 App 侧 loadAppConfig 用 normalizeStartupTasks 完成）
+                startupTasks: JSON.parse(JSON.stringify((typeof startupTasks !== 'undefined' && startupTasks && startupTasks.value) || {})),
+                // 🧩 2026-10-03：预填充兼容（模式 + 记忆表）
+                prefillCompat: {
+                    mode: String((prefillCompatMode && prefillCompatMode.value) || 'auto'),
+                    table: JSON.parse(JSON.stringify((prefillCompatTable && prefillCompatTable.value) || {}))
+                },
                 localCategoryMap: JSON.parse(JSON.stringify(localCategoryMap.value || {})),
                 sidebarWidth: Number(sidebarWidth.value) || 0,
                 viewMode: viewMode.value,

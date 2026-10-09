@@ -36,7 +36,7 @@
              悬浮条与弹窗同为 z-50，同层级时由 DOM 顺序决定覆盖关系（谁后渲染谁在上）。
              放在弹窗之后会盖住打标/自动分组等弹窗（用户报「被挡住了看不见」）。移动本块前先看 AR-35。 -->
         <div v-if="selectedIds.length > 0"
-             class="fixed z-50 bg-gray-800/95 backdrop-blur-sm text-zinc-100 p-2.5 flex flex-col gap-1.5 shadow-2xl text-xs border border-gray-700 rounded-xl"
+             class="fixed z-50 bg-gray-800/95 backdrop-blur-sm text-zinc-100 p-3 flex flex-col gap-2 shadow-2xl text-xs border border-gray-700 rounded-xl"
              :style="batchBarStyle">
             <div class="flex justify-between items-center px-1 cursor-grab select-none active:cursor-grabbing"
                  title="按住此处可随意拖动；双击复位到底部居中"
@@ -48,7 +48,15 @@
                     <button @click="clearSelection" class="text-gray-400 hover:text-zinc-100">取消选择 ✕</button>
                 </div>
             </div>
-            <div class="grid grid-cols-5 gap-1">
+            <!-- ① 范围类操作（作用于当前筛选/搜索结果）—— 单独一行，避免与卡片操作挤在一起 -->
+            <div class="grid grid-cols-2 gap-1.5">
+                <button @click="selectAllCards({ silentToast: true })" title="全选当前筛选/搜索结果里的所有卡片"
+                        class="bg-gray-700/80 hover:bg-sky-600 py-1.5 rounded transition font-medium border border-gray-600/60">☑️ 全选</button>
+                <button @click="selectInvertCards({ silentToast: true })" title="反选：当前筛选/搜索结果里「已选→取消、未选→选中」"
+                        class="bg-gray-700/80 hover:bg-sky-600 py-1.5 rounded transition font-medium border border-gray-600/60">🔄 反选</button>
+            </div>
+            <!-- ② 卡片操作 -->
+            <div class="grid grid-cols-5 gap-1.5">
                 <button @click="batchChangeCategoryModal" class="bg-gray-700 hover:bg-blue-600 py-1.5 rounded transition font-medium">📁 移分组</button>
                 <button @click="showBatchTagModal = true" class="bg-gray-700 hover:bg-purple-600 py-1.5 rounded transition font-medium">🏷️ 贴标签</button>
                 <button @click="openAITagModal" class="bg-gray-700 hover:bg-amber-600 py-1.5 rounded transition font-medium">🤖 AI 打标</button>
@@ -138,8 +146,16 @@
             :material-preview="materialPreview"
             :tag-pack-size="tagPackSize"
             :tag-skip-tagged="tagSkipTagged"
+            :tag-wb-segment-max="tagWbSegmentMax"
+            :wb-seg-min="WB_SEGMENT_MAX_SEGMENTS_MIN"
+            :wb-seg-max="WB_SEGMENT_MAX_SEGMENTS_MAX"
+            :wb-seg-default="WB_SEGMENT_MAX_SEGMENTS_DEFAULT"
+            :tag-auto-material="tagAutoMaterial"
             :tag-resume="tagResume"
             :llm-only-active="llmOnlyActive"
+            :prefill-compat-mode="prefillCompatMode"
+            :prefill-compat-info="prefillCompatInfo"
+            @update:prefillCompatMode="(v) => (prefillCompatMode = v)"
             :is-testing-conn="isTestingConn"
             :conn-test-status="connTestStatus"
             :api-endpoint="apiEndpoint"
@@ -150,6 +166,7 @@
             :fetch-model-status="fetchModelStatus"
             :is-a-i-tagging="isAITagging"
             :tag-paused="tagPausedNow"
+            :tag-pausing="tagPausing"
             :ai-tagging-progress="aiTaggingProgress"
             :tag-funnel="tagFunnel"
             :funnel-plan="tagFunnelPlan"
@@ -180,12 +197,15 @@
             @update:jailbreakPrompt="jailbreakPrompt = $event"
             @save-role-prompts="saveRolePrompts"
             @map-prompts="mapPromptsToSegments"
+            @apply-guide-recipe="applyGuideRecipe"
             @set-prompt-mode="tagPromptMode = $event"
             @update:tagCustomSegments="tagCustomSegments = $event"
             @set-material-override="setMaterialOverride"
             @clear-material-override="clearMaterialOverride"
             @update:tagPackSize="tagPackSize = $event"
             @update:tagSkipTagged="tagSkipTagged = $event"
+            @update:tagWbSegmentMax="tagWbSegmentMax = $event"
+            @update:tagAutoMaterial="tagAutoMaterial = $event"
             @resume-tagging="resumeTagging"
             @pause-tagging="pauseTagging"
             @fetch-available-models="fetchAvailableModels"
@@ -382,6 +402,21 @@
             @open-folder="openSnapshotFolder"
         />
 
+        <!-- ================= [ 弹窗：📦 整库冷备（一键全量快照 · v2.3.6 五功能之一） ] ================= -->
+        <!-- ⚠️ 必须顶层挂载（项目历史坑：fixed 定位在子组件里会被裁切） -->
+        <full-backup-modal
+            :show="showFullBackupModal"
+            :library-path="currentFolderPath"
+            :backup-dir="fullBackupDir"
+            :keep="fullBackupKeep"
+            :confirm="confirmDialog"
+            :alert="nativeAlert"
+            @close="showFullBackupModal = false"
+            @update:backup-dir="onFullBackupDirChange"
+            @update:keep="onFullBackupKeepChange"
+            @restored="onFullBackupRestored"
+        />
+
         <!-- ================= [ 弹窗：🚀 推送目标选择与执行（子组件 PushModal） ] ================= -->
         <push-modal
             :show="showPushModal"
@@ -456,6 +491,45 @@
             @close="showWbDedupeModal = false"
             @open-diff="openDiffDetailModal"
             @resolve-group="resolveWbDedupeGroup"
+            @merge-group="mergeWbDedupeGroup"
+        />
+
+        <!-- ================= [ 🔀 世界书合并预览（v2.3.6：两个入口共用一套算法 + 执行前预览） ] ================= -->
+        <wb-merge-preview-modal
+            :show="showWbMergePreview"
+            :sources="wbMergePreview.sources"
+            :stats="wbMergePreview.stats"
+            :merge-name="wbMergePreview.mergeName"
+            :busy="wbMergeBusy"
+            @close="cancelWbMergePreview"
+            @confirm="confirmWbMerge"
+        />
+
+        <!-- ================= [ 🧪 一键质检流水线（只读检查 + 综合报告 · v2.3.6 五功能之一） ] ================= -->
+        <quality-check-modal
+            :show="showQualityCheckModal"
+            :steps="qcSteps"
+            :steps-meta="qcStepsMeta"
+            :enabled="qcEnabled"
+            :running="qcRunning"
+            :current-index="qcCurrentIndex"
+            :elapsed-sec="qcElapsedSec"
+            :token-threshold="qcTokenThreshold"
+            :report="qcReport"
+            @toggle-step="(id, v) => (qcEnabled[id] = v)"
+            @update:tokenThreshold="(v) => (qcTokenThreshold = v)"
+            @run="runQualityCheck"
+            @cancel="cancelQualityCheck"
+            @locate="locateQualityItem"
+            @close="closeQualityCheck"
+        />
+
+        <!-- ================= [ 🚀 启动自动任务设置（v2.3.6 五功能之一） ] ================= -->
+        <startup-tasks-modal
+            :show="showStartupTasksModal"
+            :cfg="startupTasks"
+            @change="onStartupTasksChange"
+            @close="showStartupTasksModal = false"
         />
 
         <!-- ================= [ ⚙️ 预设智能查重弹窗（子组件 PresetDedupeModal） ] ================= -->
@@ -695,6 +769,7 @@ import PresetStitchModal from './PresetStitchModal.vue'; // 🧵 预设缝合中
 import ContentDedupeModal from './ContentDedupeModal.vue'; // 🧬 内容级跨名称版本查重弹窗
 import DiffModal from './DiffModal.vue'; // 数据版本差异深度比对弹窗
 import WbMergeModal from './WbMergeModal.vue'; // 多本世界书智能合并弹窗
+import WbMergePreviewModal from './WbMergePreviewModal.vue'; // 🔀 v2.3.6 合并执行前预览
 import WbImportModal from './WbImportModal.vue'; // 条目级导入合并弹窗
 import GlobalEntrySearchModal from './GlobalEntrySearchModal.vue'; // 🔎 全库词条搜索弹窗
 import WbSnapshotModal from './WbSnapshotModal.vue'; // 🕒 世界书快照历史弹窗
@@ -703,6 +778,9 @@ import ContextMenu from './ContextMenu.vue'; // 角色卡右键快捷菜单
 import WbContextMenu from './WbContextMenu.vue'; // 世界书右键快捷菜单
 import AiTagModal from './AITagModal.vue'; // AI 智能批量打标弹窗（⚠️ 注册名须用 AiTagModal，kebab 标签 ai-tag-modal 解析为 AiTagModal 而非 AITagModal）
 import AiTagLogModal from './AiTagLogModal.vue'; // 🏷️ 打标过程实时日志窗口（启动打标自动打开；替代系统弹框汇报）
+import FullBackupModal from './FullBackupModal.vue'; // 📦 v2.3.6 整库冷备（一键全量快照；弹窗必须顶层挂载）
+import QualityCheckModal from './QualityCheckModal.vue'; // 🧪 v2.3.6 一键质检流水线（只读检查 + 综合报告）
+import StartupTasksModal from './StartupTasksModal.vue'; // 🚀 v2.3.6 启动自动任务设置
 import AutoTagRulesModal from './AutoTagRulesModal.vue'; // 📝 自动打标规则表编辑弹窗（v2.1 可配置）
 import AutoGroupModal from './AutoGroupModal.vue'; // 🗂️ 自动分组弹窗（收纳规则 + 预览 + 执行 + 回滚，S1~S4）
 import HeaderBar from './HeaderBar.vue'; // 顶部菜单栏 + 紧凑工具栏
@@ -718,18 +796,26 @@ import { processFile, extractBookEntries, compileAutoTagRules, defaultAutoTagRul
 import cardFormats from '../../main/cardFormats.json';
 import { isPathSavable, unsavableReason } from '../utils/cardFormats.js'; // 📇 DF-25：渲染层格式表（判「此卡能否写回」）
 import { DEFAULT_TAG_FUNNEL, normalizeTagFunnel, normalizeDisabledRules, resolveFunnelPlan, formatFunnelBadge, isFunnelEmpty } from '../utils/tagFunnel.js'; // 🏷️ P1：打标三层开关默认值/归一化/层决策（纯函数）；P2 起状态短标签也在此派生（供注册表命令的 badge 用）
-import { migrateLegacyPresets } from '../utils/llmPromptRoles.js'; // 🧠 第二批改造：旧提示词预设库 → 单套链路（system/user/prefill）迁移
-import { normalizeCustomSegments, buildSegmentsFromPrompts } from '../utils/customPromptSegments.js'; // ✨ 自定义模式（2026-10-03）：多段提示词列表校验/清洗 + 初始映射
+import { migrateLegacyPresets, normalizeWbPrompt } from '../utils/llmPromptRoles.js'; // 🧠 第二批改造：旧提示词预设库 → 单套链路；🌍 AI-15：世界书 System 三态
+import { parseSegmentVars, splitPartsByVars } from '../utils/tagPromptVars.js'; // 🔗 批次 C：占位符解析 / 材料段分流（预览与发送同一判据）
+import { normalizeCustomSegments, buildSegmentsFromPrompts, makeCustomSegment } from '../utils/customPromptSegments.js'; // ✨ 自定义模式（2026-10-03）：多段提示词列表校验/清洗 + 初始映射 + 教程配方套用
 import { normalizeGroupProfiles, normalizeAutoGroupLastRun } from '../utils/autoGroup.js'; // 🗂️ 自动分组：分组档案/移动日志归一化（判定纯函数在同文件；执行器在 useAutoGroup）
 import { normalizeWbGroupProfiles, normalizeAutoGroupLastRun as normalizeWbAutoGroupLastRun } from '../utils/wbAutoGroup.js'; // 🗂️ S4：世界书分组档案/日志归一化
 import { createCommandRegistry, evaluateWhen } from '../utils/commandRegistry.js'; // 🎛️ P2：命令注册表 + when 求值（菜单/命令面板/快捷键的唯一真相源）
 import { registerAppCommands } from '../composables/useCommands.js'; // 🎛️ P2：内置命令定义（从 HeaderBar 迁出）
+import { useQualityCheck } from '../composables/useQualityCheck.js'; // 🧪 v2.3.6 一键质检编排
+import { createStartupScheduler } from '../composables/useStartupTasks.js'; // 🚀 v2.3.6 启动任务调度
+import { normalizeStartupTasks, STARTUP_TASK_DEFS } from '../utils/startupPlan.js'; // 🚀 配置归一/开关解析（纯函数）
+import { computeTagStats } from '../utils/tagStats.js'; // 🚀 启动体检：复用质检 S3 同一套统计（不另写口径）
+import { apiCompatKey, sanitizeCompatTable, normalizePrefillMode } from '../utils/prefillCompat.js'; // 🧩 预填充兼容自动判定
+import { auditCards } from '../utils/cardAudit.js'; // 🚀 启动体检：复用质检 S4 同一套巡检
 // normalizeCardData / isCharacterCardData / autoTagRules（cardLoader）与 parsePNGChunk / deepScanForJSON（pngParser）
 // 已随导入入库域迁移至 useCardCrud 组合式函数，由其自行 import；
 // App.vue 仍需要 parsePNGChunk / deepScanForJSON（🔧 PK-14：瘦身卡正文回读的 readBuffer 兜底解析）
 import { parsePNGChunk, deepScanForJSON } from '../utils/pngParser.js';
 import { estimateTokens } from '../utils/tokenEstimate.js'; // Token 估算（与 TextModal 共享）
 import { stripInternalFields, dropInternalFields, worldbookEntryList } from '../utils/cardFields.js'; // 🧹 导出/转存前剥离前端内部字段（白名单 + 限定位置，见 DF-14）
+import { mergeWorldbookEntries, mergeNameOf, mergeDescriptionOf } from '../utils/wbMerge.js'; // 🔀 v2.3.6 世界书合并纯函数（顺序不敏感去重键 + 冲突统计）
 import { toEmbeddedEntry } from '../utils/wbEntryFormat.js'; // 🌍 库格式 → 卡内嵌 V2 字段口径转换（见 DF-15）
 import { useSnapshots } from '../composables/useSnapshots.js'; // 📸 历史快照功能（拆分出的组合式函数）
 import { useCardCrud } from '../composables/useCardCrud.js'; // 🃏 卡片 CRUD（导入入库/删除回收/持久化保存/导出重命名，从 App.vue 拆分）
@@ -788,7 +874,7 @@ document.addEventListener('dragover', (e) => e.preventDefault());
 document.addEventListener('drop', (e) => e.preventDefault());
 
 export default {
-    components: { Section, DragOverlay, AppLoadingOverlay, ToastContainer, BatchTagModal, PromptModal, OptionSelectModal, SingleTagModal, DiskScanModal, UpdateModal, TextModal, ImageModal, ApiSettingsModal, /* ⛔ GlobalAssetModal 已下线（2026-09-20） */ CommandPaletteModal, GraphModal, WbGraphModal, DedupeModal, WbDedupeModal, PresetDedupeModal, PresetStitchModal, ContentDedupeModal, DiffModal, WbMergeModal, WbImportModal, GlobalEntrySearchModal, WbSnapshotModal, ContextMenu, WbContextMenu, AiTagModal, AiTagLogModal, AutoTagRulesModal, AutoGroupModal, WbAutoGroupModal, WbTagEditModal, HeaderBar, SidebarPanel, EditorPanel, PluginWorkspace, CardPluginModal, SnapshotModal, PushModal },
+    components: { Section, DragOverlay, AppLoadingOverlay, ToastContainer, BatchTagModal, PromptModal, OptionSelectModal, SingleTagModal, DiskScanModal, UpdateModal, TextModal, ImageModal, ApiSettingsModal, /* ⛔ GlobalAssetModal 已下线（2026-09-20） */ CommandPaletteModal, GraphModal, WbGraphModal, DedupeModal, WbDedupeModal, PresetDedupeModal, PresetStitchModal, ContentDedupeModal, DiffModal, WbMergeModal, WbMergePreviewModal, WbImportModal, GlobalEntrySearchModal, WbSnapshotModal, ContextMenu, WbContextMenu, AiTagModal, FullBackupModal, QualityCheckModal, StartupTasksModal, AiTagLogModal, AutoTagRulesModal, AutoGroupModal, WbAutoGroupModal, WbTagEditModal, HeaderBar, SidebarPanel, EditorPanel, PluginWorkspace, CardPluginModal, SnapshotModal, PushModal },
     setup() {
         // 主题状态（localStorage 在自定义协议下可能不可用，做防御性读取；默认暗夜极客）
         let savedTheme = 'dark';
@@ -807,9 +893,10 @@ export default {
          * @param {string} type - 消息类型: 'success' | 'error' | 'info'
          * @param {number} duration - 显示时长(毫秒)，默认 3000
          */
-        const showToast = (message, type = 'success', duration = 3000) => {
+        const showToast = (message, type = 'success', duration = 3000, onClick = null) => {
             const id = toastIdCounter++;
-            toasts.value.push({ id, message, type });
+            // 🚀 v2.3.6：可选第 4 参 `onClick`（启动任务摘要 toast 点击打开质检弹窗）；不传则与旧行为完全一致
+            toasts.value.push({ id, message, type, onClick: typeof onClick === 'function' ? onClick : null });
             // 定时自动移除
             setTimeout(() => {
                 const index = toasts.value.findIndex(t => t.id === id);
@@ -1401,18 +1488,25 @@ export default {
         // 📥 importCards（触发隐藏文件输入）已迁至 useCardCrud 组合式函数（见下文 setup 中部调用）
 
         // 全选当前过滤列表中的所有卡片（并自动进入多选模式）
-        const selectAllCards = () => {
+        /**
+         * ☑️ 全选 / 🔄 反选：口径 = 当前**筛选/搜索结果**（`filteredLibrary`），不是整库
+         * @param {{silentToast?:boolean}} [opts] `silentToast` = 用**非阻塞 toast** 反馈
+         *   （悬浮批量条用；菜单命令不传 ⇒ 保持原有原生提示，行为不变）
+         */
+        const selectAllCards = (opts) => {
             if (!isMultiSelectMode.value) isMultiSelectMode.value = true;
             selectedIds.value = filteredLibrary.value.map(i => i.id);
-            nativeAlert(`已全选 ${selectedIds.value.length} 张卡片。`, 'info');
+            const msg = `已全选 ${selectedIds.value.length} 张卡片。`;
+            if (opts && opts.silentToast) showToast(msg, 'success', 2200); else nativeAlert(msg, 'info');
         };
 
         // ☑️ 反选：当前过滤列表中「已选 → 取消、未选 → 选中」（与全选同一口径：只作用于当前搜索结果）
-        const selectInvertCards = () => {
+        const selectInvertCards = (opts) => {
             if (!isMultiSelectMode.value) isMultiSelectMode.value = true;
             const cur = new Set(selectedIds.value);
             selectedIds.value = filteredLibrary.value.filter(i => !cur.has(i.id)).map(i => i.id);
-            nativeAlert(`已反选：当前选中 ${selectedIds.value.length} 张卡片。`, 'info');
+            const msg = `已反选：当前选中 ${selectedIds.value.length} 张卡片。`;
+            if (opts && opts.silentToast) showToast(msg, 'success', 2200); else nativeAlert(msg, 'info');
         };
 
         // 清理全库所有卡片中的无效标签（空字符串/纯空白），并物理落盘
@@ -2493,6 +2587,18 @@ export default {
                                 if (cfg.ui.snapshotConfig && typeof cfg.ui.snapshotConfig === 'object') {
                                     snapshotConfig.value = { ...snapshotConfig.value, ...cfg.ui.snapshotConfig };
                                 }
+                                // 📦 v2.3.6：整库冷备设置（目录 / 保留份数）
+                                if (cfg.ui.fullBackup && typeof cfg.ui.fullBackup === 'object') {
+                                    if (typeof cfg.ui.fullBackup.dir === 'string') fullBackupDir.value = cfg.ui.fullBackup.dir;
+                                    if (Number.isFinite(Number(cfg.ui.fullBackup.keep))) fullBackupKeep.value = Math.min(10, Math.max(1, Math.round(Number(cfg.ui.fullBackup.keep))));
+                                }
+                                // 🚀 v2.3.6：启动自动任务（老配置无该键 ⇒ normalizeStartupTasks 给全关 ⇒ 行为与旧版一致）
+                                startupTasks.value = normalizeStartupTasks(cfg.ui.startupTasks);
+                                // 🧩 2026-10-03：预填充兼容（模式 + 记忆表；脏值清洗）
+                                if (cfg.ui.prefillCompat && typeof cfg.ui.prefillCompat === 'object') {
+                                    prefillCompatMode.value = normalizePrefillMode(cfg.ui.prefillCompat.mode);
+                                    prefillCompatTable.value = sanitizeCompatTable(cfg.ui.prefillCompat.table);
+                                }
                                 if (cfg.ui.localCategoryMap && typeof cfg.ui.localCategoryMap === 'object') {
                                     localCategoryMap.value = { ...localCategoryMap.value, ...cfg.ui.localCategoryMap };
                                 }
@@ -2502,7 +2608,7 @@ export default {
                                 if (['importTime', 'time', 'name', 'nameDesc', 'mtime', 'ctime', 'sizeDesc', 'sizeAsc', 'tokens'].includes(cfg.ui.sortBy)) sortBy.value = cfg.ui.sortBy;
                                 // 🧠 第二批改造：单套链路（新字段优先）；旧「预设库」字段仍在配置文件里（可回滚）
                                 if (cfg.ui.llmRolePrompts && typeof cfg.ui.llmRolePrompts === 'object') {
-                                    llmRolePrompts.value = cfg.ui.llmRolePrompts;
+                                    llmRolePrompts.value = withWbPromptShape(cfg.ui.llmRolePrompts); // 🌍 AI-15：补 wb 三态（老配置自动补默认）
                                 } else if (Array.isArray(cfg.ui.systemPromptPresets) && cfg.ui.systemPromptPresets.length) {
                                     llmRolePrompts.value = migrateLegacyPresets(cfg.ui.systemPromptPresets);
                                 }
@@ -2510,7 +2616,7 @@ export default {
                                 if (Array.isArray(cfg.ui.tagCustomSegments)) {
                                     tagCustomSegments.value = normalizeCustomSegments(cfg.ui.tagCustomSegments);
                                 }
-                                // � 2026-10-03：程序自动材料的用户覆盖（两层清洗：scope 对象 + 字符串值）
+                                // 📨 2026-10-03：程序自动材料的用户覆盖（两层清洗：scope 对象 + 字符串值）
                                 if (cfg.ui.tagMaterialOverrides && typeof cfg.ui.tagMaterialOverrides === 'object' && !Array.isArray(cfg.ui.tagMaterialOverrides)) {
                                     const cleanOv = {};
                                     for (const [ovScope, ovMap] of Object.entries(cfg.ui.tagMaterialOverrides)) {
@@ -2521,7 +2627,7 @@ export default {
                                     }
                                     tagMaterialOverrides.value = cleanOv;
                                 }
-                                // �🔘 提示词路径单选（2026-10-03；非法值回退 system）
+                                // 🔘 提示词路径单选（2026-10-03；非法值回退 system）
                                 if (cfg.ui.tagPromptMode === 'custom' || cfg.ui.tagPromptMode === 'system') {
                                     tagPromptMode.value = cfg.ui.tagPromptMode;
                                 }
@@ -2533,6 +2639,14 @@ export default {
                                 }
                                 if (typeof cfg.ui.tagSkipTagged === 'boolean') {
                                     tagSkipTagged.value = cfg.ui.tagSkipTagged;
+                                }
+                                // 🌍 Q8（2026-10-03）：大幅书最多分段数（越界 → 回落默认 40 = 旧行为）
+                                if (Number.isFinite(Number(cfg.ui.tagWbSegmentMax))) {
+                                    tagWbSegmentMax.value = Math.min(300, Math.max(1, Math.round(Number(cfg.ui.tagWbSegmentMax))));
+                                }
+                                // 🔗 批次 C：自定义模式「程序材料自动附加」三档（非法值 → compat）
+                                if (['compat', 'semi', 'manual'].includes(cfg.ui.tagAutoMaterial)) {
+                                    tagAutoMaterial.value = cfg.ui.tagAutoMaterial;
                                 }
                                 // 🏷️ S2（2026-09-25）：候选池三状态（老配置无这些键 → 保持默认：池开 / 自由提取开 / 空池）
                                 if (typeof cfg.ui.candidatePoolEnabled === 'boolean') useCandidatePool.value = cfg.ui.candidatePoolEnabled;
@@ -2774,6 +2888,10 @@ export default {
 
             // 🚀 后台静默检测更新（延迟 3 秒，不卡首屏；无新版本不打扰）
             setTimeout(() => { silentCheckForUpdates(); }, 3000);
+
+            // 🚀 v2.3.6 启动自动任务：**在蒙版淡出后**才调度（不在启动早期跑重任务），
+            //    内部还会等「配置恢复 + 首扫完成」双条件 + delayMs；默认全关 ⇒ 与旧版行为完全一致。
+            scheduleStartupTasks();
         });
 
         // 手动贴标签（单张卡片：内存 customTags + 原生 data.tags 双写，并物理落盘）
@@ -3335,10 +3453,17 @@ export default {
         // 🧠 单套提示词链路（第二批改造 · 2026-09-25）：{ system, user, prefill }
         //    跨模块共享状态：被 syncConfigToDisk / 集中 watch 引用，保留在 App.vue（打标操作方法见 useAITools）。
         //    迁移：本地还没有新结构时，用旧「预设库」第一条搬运；旧数据本身保留在配置文件（可回滚）。
+        // 🌍 AI-15（2026-10-03）：补「世界书 System 三态」`wb`——**加法式**（不删任何既有键 ⇒ 可回滚），
+        //    老配置无 `wb` → 自动补 `{ mode: 'default', system: '' }`（= 用内置世界书文案，修口径错配）。
+        function withWbPromptShape(raw) {
+            const p = (raw && typeof raw === 'object') ? { ...raw } : {};
+            p.wb = normalizeWbPrompt(p.wb);
+            return p;
+        }
         const llmRolePrompts = ref((() => {
             try {
                 const saved = JSON.parse(localStorage.getItem('jsTavernLlmRolePrompts'));
-                if (saved && typeof saved === 'object' && typeof saved.system === 'string') return saved;
+                if (saved && typeof saved === 'object' && typeof saved.system === 'string') return withWbPromptShape(saved);
             } catch (e) { /* 忽略 */ }
             let legacy = [];
             try {
@@ -3377,6 +3502,31 @@ export default {
         })());
         watch(tagSkipTagged, (v) => {
             try { localStorage.setItem('jsTavern_tagSkipTagged', v ? 'true' : 'false'); } catch (e) { /* 忽略 */ }
+        });
+        // 🌍 Q8 拍板（c）· 2026-10-03：大幅书「最多分段数」——**可调**（默认 40 = 与旧行为逐字一致；范围 1~300）
+        //    语义：材料分段数超过该值 → 均匀采样（覆盖全书主题）；上限 = 线性买覆盖度（每本请求数 ≈ 上限）。
+        //    与卡片侧无关（卡片分段**无**上限，属既有行为，见方案 §4.3.1 的观察项）。
+        const tagWbSegmentMax = ref((() => {
+            try {
+                const v = parseInt(localStorage.getItem('jsTavern_tagWbSegmentMax'), 10);
+                if (Number.isFinite(v) && v >= 1 && v <= 300) return v;
+            } catch (e) { /* 忽略 */ }
+            return 40;
+        })());
+        watch(tagWbSegmentMax, (v) => {
+            try { localStorage.setItem('jsTavern_tagWbSegmentMax', String(v)); } catch (e) { /* 忽略 */ }
+        });
+        // 🔗 批次 C（方案 v1 §4.2 / Q3）：自定义模式下「程序材料自动附加」三档
+        //    compat（默认 = 与今天逐字一致）/ semi（只自动附加材料 + 候选池）/ manual（全手动，全靠占位符）
+        const tagAutoMaterial = ref((() => {
+            try {
+                const v = localStorage.getItem('jsTavern_tagAutoMaterial');
+                if (['compat', 'semi', 'manual'].includes(v)) return v;
+            } catch (e) { /* 忽略 */ }
+            return 'compat';
+        })());
+        watch(tagAutoMaterial, (v) => {
+            try { localStorage.setItem('jsTavern_tagAutoMaterial', String(v)); } catch (e) { /* 忽略 */ }
         });
         // 🏷️ S2（2026-09-25）：候选池开关 / 允许自由提取 / 候选池本体
         //    定义在 App.vue（而非 useAITools 内部）以便 useConfigPersistence 收集落盘（app_config.json 唯一权威）；
@@ -3761,6 +3911,37 @@ export default {
 
         // 视图切换模式：'characters' (角色卡) | 'worldbooks' (世界书) | 'presets' (预设) | 'plugins' (插件)
         const appMode = ref('characters');
+
+        // ================= [ 📦 v2.3.6 整库冷备（一键全量快照） ] =================
+        //   · 设置（目录 / 保留份数）随 ui 段落盘；恢复后重新扫描库；防呆全在主进程（main/fullBackup.js）
+        const showFullBackupModal = ref(false);
+        const fullBackupDir = ref('');
+        const fullBackupKeep = ref(3);
+        // 🚀 v2.3.6 启动自动任务配置（**必须在 useConfigPersistence({...}) 之前声明** —— 它是该中枢的收集入参，晚声明会踩 TDZ）
+        const startupTasks = ref(normalizeStartupTasks(null));
+        // 🧩 2026-10-03 预填充兼容：模式 + 按「主机|模型」的记忆表（**必须在 useConfigPersistence 之前声明**）
+        const prefillCompatMode = ref('auto');
+        const prefillCompatTable = ref({});
+        const openFullBackupModal = () => {
+            if (!currentFolderPath.value) {
+                nativeAlert('当前未打开库，无法冷备。请先打开一个卡库目录。', 'info');
+                return;
+            }
+            showFullBackupModal.value = true;
+        };
+        const onFullBackupDirChange = (dir) => {
+            fullBackupDir.value = String(dir || '');
+            try { syncConfigToDiskDebounced(); } catch (e) { /* 尚未就绪时忽略 */ }
+        };
+        const onFullBackupKeepChange = (k) => {
+            fullBackupKeep.value = Math.min(10, Math.max(1, Math.round(Number(k) || 3)));
+            try { syncConfigToDiskDebounced(); } catch (e) { /* 尚未就绪时忽略 */ }
+        };
+        const onFullBackupRestored = async (safeCopyPath) => {
+            addLog('📦 整库冷备已恢复' + (safeCopyPath ? '（旧库保留在 ' + safeCopyPath + '）' : ''));
+            try { await refreshLibrary(); } catch (e) { /* 扫描失败也继续给提示 */ }
+            if (typeof showToast === 'function') showToast('整库冷备已恢复，已重新扫描库', 'success');
+        };
 
         const worldbooks = shallowRef([]);   // 🚀 shallowRef：世界书 entries 深层 Proxy 化导致崩溃
         const activeWorldbook = ref(null);   // 当前正在深度编辑的世界书
@@ -4560,7 +4741,7 @@ export default {
         // 与此处建立集中 watch：所有相关 ref 已声明完毕（最后一个为 wbCategoryMap），
         // 回调里的 syncConfigToDisk 已内置 isRestoringConfig guard，恢复期触发的写盘会被自动拦截，无需 immediate。
         watch(
-            [theme, appSettings, sanitizeImportedTags, autoTagOnImport, snapshotConfig, sidebarWidth, viewMode, isCompactMode, sortBy, llmRolePrompts, tagCustomSegments, tagPromptMode, tagMaterialOverrides, tagPackSize, tagSkipTagged, tagResume, lastWorldbookDirPath, lastPresetDirPath, wbCategoryMap, wbTagMap, cardImportTimes],
+            [theme, appSettings, sanitizeImportedTags, autoTagOnImport, snapshotConfig, sidebarWidth, viewMode, isCompactMode, sortBy, llmRolePrompts, tagCustomSegments, tagPromptMode, tagMaterialOverrides, tagPackSize, tagSkipTagged, tagWbSegmentMax, tagAutoMaterial, tagResume, lastWorldbookDirPath, lastPresetDirPath, wbCategoryMap, wbTagMap, cardImportTimes],
             // 🚀 v1.8.5 性能修复：改走 500ms 防抖落盘。旧版直接调 syncConfigToDisk（全量
             //    序列化 appSettings/cardOverlays/wbCategoryMap + 加密 IPC + 同步写盘），
             //    连续 UI 微调（拖侧栏宽度/切主题等）每次都全量写盘，千卡库 overlays 体积
@@ -4946,65 +5127,147 @@ export default {
                 nativeAlert('请至少勾选 2 本世界书进行合并！', 'warning');
                 return;
             }
-
             const targetWbs = worldbooks.value.filter(wb => selectedWbMergePaths.value.includes(wb.path));
-            // 🛑 PK-26：秒开后 `wb.data` 为 null（懒加载）→ 旧写法会**静默合并出空书**（词条全丢）。
-            //    合并必然需要正文，故逐本按需载入（silent：失败在下面统一提示，不逐本弹框）。
-            for (const wb of targetWbs) {
-                if (wb.dataLoaded === false && wb.path && typeof ensureWorldbookLoaded === 'function') {
-                    await ensureWorldbookLoaded(wb, { silent: true });
+            showWbMergeModal.value = false;          // 🔀 v2.3.6：先预览再执行（不再直接合并）
+            await prepareWbMergePreview(targetWbs, { fromDedupe: false });
+        };
+
+        // =========================================================
+        // 🔀 v2.3.6：世界书合并（两个入口共用）+ 执行前预览
+        //   · 算法：纯函数 `js/utils/wbMerge.js`（顺序不敏感去重键 + 冲突统计；uid 全量重生成）
+        //   · 读正文：查重入口必须走 `consumeWorldbookBodies`（批量读守卫 PK-33）；手动入口沿用单本按需载入
+        //   · 防误合并三层：预览 → 源书默认保留 → 清理时走回收站（可回退）
+        // =========================================================
+        const showWbMergePreview = ref(false);
+        const wbMergeBusy = ref(false);
+        const wbMergePreview = ref({ sources: [], stats: null, mergeName: '', wbs: [], fromDedupe: false });
+
+        /** 载入正文（查重入口 = 批量守卫；手动入口 = 单本按需）→ 计算合并 → 打开预览 */
+        const prepareWbMergePreview = async (wbs, opts = {}) => {
+            const fromDedupe = !!(opts && opts.fromDedupe);
+            const targets = (wbs || []).filter(Boolean);
+            if (targets.length < 2) { nativeAlert('至少需要 2 本世界书才能合并。', 'warning'); return; }
+            wbMergeBusy.value = true;
+            try {
+                if (fromDedupe) {
+                    // 🛡️ PK-33：批量读正文唯一入口（顺序消费 + 用后释放）
+                    if (typeof consumeWorldbookBodies !== 'function') {
+                        nativeAlert('合并已中止：批量读正文入口不可用（consumeWorldbookBodies 未注入）。', 'error');
+                        return;
+                    }
+                    await consumeWorldbookBodies(targets, async (wb) => {
+                        // ⚠️ 载入判据必须用「内存里有没有正文」`!wb.data`，**不能**用 `wb.dataLoaded === false`：
+                        //    查重扫描产出的条目**没有 `dataLoaded` 字段**（undefined），而守卫内部的载入判据是
+                        //    `dataLoaded === false` ⇒ 会被**静默跳过**（failed 也是空的）⇒ 合并时全部判为「正文无法读取」。
+                        if (wb && !wb.data && wb.path && typeof ensureWorldbookLoaded === 'function') {
+                            await ensureWorldbookLoaded(wb, { silent: true });
+                        }
+                    }, { release: false });
+                } else {
+                    for (const wb of targets) {
+                        if (wb.dataLoaded === false && wb.path && typeof ensureWorldbookLoaded === 'function') {
+                            await ensureWorldbookLoaded(wb, { silent: true });
+                        }
+                    }
                 }
+                // ⚠️ 判「可读」必须用 `worldbookEntryList`（兼容**数组形态**与 **ST 原生字典形态**，见 DF-21）——
+                //    直接 `Array.isArray(wb.data.entries)` 会把字典形态的书误判成「正文无法读取」而拒绝合并
+                //    （真实库里就有这类书；旧实现的合并入口同样被这个判据拦住）。
+                const entriesOf = (wb) => {
+                    if (!wb || !wb.data) return null;
+                    try { const list = worldbookEntryList(wb.data); return Array.isArray(list) ? list : null; } catch (e) { return null; }
+                };
+                const unreadable = targets.filter(wb => !entriesOf(wb));
+                if (unreadable.length > 0) {
+                    nativeAlert(`合并已中止：有 ${unreadable.length} 本世界书的正文无法读取。\n${unreadable.slice(0, 5).map(w => wbDisplayName(w)).join('、')}\n\n请重新选择世界书目录后再试。`, 'error');
+                    return;
+                }
+                const sources = targets.map(wb => ({ name: wbDisplayName(wb) || wb.name || '未命名', entries: entriesOf(wb) }));
+                const merged = mergeWorldbookEntries(sources);
+                wbMergePreview.value = {
+                    sources: merged.stats.bySource.map((s, i) => Object.assign({}, s, { path: targets[i].path || '' })),
+                    stats: merged.stats,
+                    mergeName: mergeNameOf(targets.length),
+                    wbs: targets,
+                    fromDedupe
+                };
+                showWbMergePreview.value = true;
+            } catch (e) {
+                nativeAlert('合并准备失败：' + ((e && e.message) || String(e)), 'error');
+            } finally {
+                wbMergeBusy.value = false;
             }
-            const unreadable = targetWbs.filter(wb => !wb.data || !Array.isArray(wb.data.entries));
-            if (unreadable.length > 0) {
-                nativeAlert(`合并已中止：有 ${unreadable.length} 本世界书的正文无法读取。\n${unreadable.slice(0, 5).map(w => wbDisplayName(w)).join('、')}\n\n请重新选择世界书目录后再试。`, 'error');
+        };
+
+        /** 取消预览（不动任何数据） */
+        const cancelWbMergePreview = () => { showWbMergePreview.value = false; };
+
+        /** 确认执行合并（可勾选把源书移入回收站） */
+        const confirmWbMerge = async ({ trashSources } = {}) => {
+            const pv = wbMergePreview.value;
+            const targets = pv.wbs || [];
+            if (targets.length < 2) { cancelWbMergePreview(); return; }
+            wbMergeBusy.value = true;
+            try {
+                const sources = targets.map(wb => ({ name: wbDisplayName(wb) || wb.name || '未命名', entries: (function () {
+                    const list = (wb.data && (function () { try { return worldbookEntryList(wb.data); } catch (e) { return null; } })()) || [];
+                    return Array.isArray(list) ? list : [];
+                })() }));
+                const merged = mergeWorldbookEntries(sources);
+                const mergedWbData = {
+                    name: pv.mergeName,
+                    description: mergeDescriptionOf(sources.map(s => s.name), merged.entries.length),
+                    entries: merged.entries
+                };
+                const newWbItem = { path: '', name: `${pv.mergeName}.json`, data: mergedWbData };   // path '' ⇒ 交智能落盘分配
+                worldbooks.value.unshift(newWbItem);
+                activeWorldbook.value = newWbItem;
+                if (typeof syncWorldbooksToDisk === 'function') { try { await syncWorldbooksToDisk(); } catch (e) { /* 落盘失败也不丢内存结果 */ } }
+                let trashedCount = 0;
+                if (trashSources) {
+                    // 🗑️ 清理源书：**走回收站**（可从回收站取回），不是硬删
+                    // ⚠️ DF-27：`trashFiles` 是**分项报告**（{success, count, failed[]}）——
+                    //    失败的必须**留在内存列表里**，否则就是"内存删了、磁盘还在"的幽灵移除。
+                    const paths = targets.map(wb => wb.path).filter(Boolean);
+                    if (paths.length && window.electronAPI && typeof window.electronAPI.trashFiles === 'function') {
+                        const res = await window.electronAPI.trashFiles(paths);
+                        const failedPaths = new Set(((res && res.failed) || []).map(f => f && f.path).filter(Boolean));
+                        const removed = paths.filter(p => !failedPaths.has(p));
+                        trashedCount = removed.length;
+                        if (removed.length) {
+                            worldbooks.value = worldbooks.value.filter(wb => !removed.includes(wb.path));
+                            if (activeWorldbook.value && removed.includes(activeWorldbook.value.path)) activeWorldbook.value = newWbItem;
+                        }
+                        if (failedPaths.size) {
+                            nativeAlert(`⚠️ 有 ${failedPaths.size} 本源书没能移入回收站，已保留在列表中（未做任何内存删除）：\n${[...failedPaths].slice(0, 5).join('\n')}`, 'warning');
+                        }
+                    }
+                }
+                addLog(`🔗 完成世界书合并: ${pv.mergeName}（${targets.length} 本 → ${merged.entries.length} 条，跳过重复 ${merged.stats.skippedDup}${trashedCount ? `，源书 ${trashedCount} 本入回收站` : ''}）`, 'success');
+                if (typeof showToast === 'function') showToast(`已合并 ${targets.length} 本 → ${merged.entries.length} 条（跳过重复 ${merged.stats.skippedDup}）`, 'success');
+                showWbMergePreview.value = false;
+                wbMergePreview.value = { sources: [], stats: null, mergeName: '', wbs: [], fromDedupe: false };
+            } catch (e) {
+                nativeAlert('合并失败：' + ((e && e.message) || String(e)), 'error');
+            } finally {
+                wbMergeBusy.value = false;
+            }
+        };
+
+        /** 🔀 查重入口：组卡片「合并此组」（组数据来自 wbDuplicateGroups） */
+        const mergeWbDedupeGroup = async (gIdx) => {
+            const group = (wbDuplicateGroups.value || [])[Number(gIdx)];
+            if (!group || !Array.isArray(group.list)) return;
+            // 🛡️ 仅同名（内容不同源）**禁止合并**（规格 §2.3）
+            const usable = group.list.filter(wb => !wb._nameOnly);
+            if (usable.length < 2) {
+                nativeAlert('该组不足 2 本「内容同源」的世界书，无法合并。\n（「仅同名」的版本内容不同源，已排除）', 'warning');
                 return;
             }
-            const mergedEntries = [];
-            const seenMap = new Set(); // 指纹去重: Key + Content
-
-            targetWbs.forEach(wb => {
-                const entries = (wb.data && Array.isArray(wb.data.entries)) ? wb.data.entries : [];
-                entries.forEach(e => {
-                    if (!e || typeof e !== 'object') return; // 脏数据条目防护
-                    // 【加固】key/content 可能是数字/对象等非字符串，直接 .trim() 会崩溃
-                    const keysStr = String(Array.isArray(e.key) ? e.key.map(k => String(k)).join(',') : (e.key || '').trim().toLowerCase());
-                    const contentStr = String(e.content || '').trim().toLowerCase();
-                    const signature = `${keysStr}:::${contentStr}`;
-
-                    if (!seenMap.has(signature)) {
-                        seenMap.add(signature);
-                        // 🧹 深拷贝并只剔**词条自身**的前端内部字段
-                        // ⚠️ 不能用 `k.startsWith('_')` 递归剔 —— 会删掉词条 extensions 里的
-                        //    `_filename`（实测 28 张真实卡片）。见 js/utils/cardFields.js 与 DF-14。
-                        const cleanEntry = dropInternalFields(JSON.parse(JSON.stringify(e)));
-                        cleanEntry.uid = `${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
-                        mergedEntries.push(cleanEntry);
-                    }
-                });
-            });
-
-            const mergeName = `合并世界书_${targetWbs.length}本`;
-            const mergedWbData = {
-                name: mergeName,
-                description: `由 [${targetWbs.map(w => wbDisplayName(w) || w.name).join(', ')}] 合并而成，包含 ${mergedEntries.length} 个词条。`,
-                entries: mergedEntries
-            };
-
-            const newWbItem = {
-                // 【修复】path 设为空字符串，让保存系统知道它还从未落盘，
-                // 触发 syncWorldbooksToDisk 的智能落盘分配（否则假路径会让 Electron 报“原文件不存在”）
-                path: '',
-                name: `${mergeName}.json`,
-                data: mergedWbData
-            };
-
-            worldbooks.value.unshift(newWbItem);
-            activeWorldbook.value = newWbItem;
-            showWbMergeModal.value = false;
-
-            nativeAlert(`🎉 成功合并 ${targetWbs.length} 本世界书！共生成 ${mergedEntries.length} 个去重词条。`, 'info');
-            addLog(`🔗 完成多书合并: ${mergeName}`, 'success');
+            // ⚠️ 查重组里是**扫描快照**（没有 dataLoaded 字段）⇒ 优先映射回库里的**活对象**再读正文，
+            //    这样载入后 `worldbooks` 的状态也一致（DF-28：直接用快照会让载入被静默跳过）。
+            const live = usable.map((snap) => worldbooks.value.find(w => w.path && w.path === snap.path) || snap);
+            await prepareWbMergePreview(live, { fromDedupe: true });
         };
 
         // =========================================================
@@ -5217,8 +5480,11 @@ export default {
             wbAutoGroupProfiles, wbAutoGroupLastRun,
             apiEndpoint, apiKey, apiModel, apiType,
             theme, appSettings, sanitizeImportedTags, autoTagOnImport, snapshotConfig, localCategoryMap,
+            fullBackupDir, fullBackupKeep,
+            startupTasks,
+            prefillCompatMode, prefillCompatTable,
             sidebarWidth, viewMode, isCompactMode, sortBy,
-            llmRolePrompts, tagCustomSegments, tagPromptMode, tagMaterialOverrides, tagPackSize, tagSkipTagged, tagResume, lastWorldbookDirPath, lastPresetDirPath, wbCategoryMap, wbTagMap,
+            llmRolePrompts, tagCustomSegments, tagPromptMode, tagMaterialOverrides, tagPackSize, tagSkipTagged, tagWbSegmentMax, tagAutoMaterial, tagResume, lastWorldbookDirPath, lastPresetDirPath, wbCategoryMap, wbTagMap,
             // 🏷️ S2（2026-09-25）：候选池三状态（开关 / 自由提取 / 池本体）随 ui 段落盘
             useCandidatePool, enableAIExtraction, aiCandidateTags,
             cardImportTimes,
@@ -5528,7 +5794,7 @@ export default {
             wbAutoGroupProfiles, wbAutoGroupLastRun,
             worldbooks, activeWorldbook,
             getWbCategory, wbFolderGroupOf, moveWbToFolder, wbDisplayName,
-            ensureWorldbookLoaded, releaseWorldbookBody,
+            consumeWorldbookBodies, // 🩹 PK-33：批量读正文唯一入口（取代自写的 ensure/release 循环）
             nativeAlert, confirmDialog, addLog, syncConfigToDiskDebounced,
             apiEndpoint, apiKey, apiType, resolveApiModel, extractReplyContent
         });
@@ -5622,6 +5888,66 @@ export default {
             batchToggleConstant, batchToggleSelective, batchDuplicateEntries,
             entryHealthReport, runEntryHealthCheck
         } = useWorldbookEntries({ activeWorldbook, addLog, confirmDialog, nativeAlert, ensureWorldbookLoaded });
+
+        // ================= [ 🧪 v2.3.6 一键质检流水线（只读编排 + 综合报告） ] =================
+        //   · 只做编排/汇总，每步复用现有能力（不造第二套口径）；全流程**只读**
+        //   · 依赖在此处都已就绪：refreshLibrary（useDiskScan）/ startSmartDedupe（useDedupe）/
+        //     entryHealthReport（useWorldbookEntries）/ estimateCardTokens（本文件）
+        const {
+            // ⚠️ composable 返回的是原名（steps / run / cancel / locate / buildReport …），此处必须用 `原名: 别名` 解构
+            showQualityCheckModal,
+            steps: qcSteps, currentIndex: qcCurrentIndex, elapsedSec: qcElapsedSec, report: qcReport,
+            enabled: qcEnabled, tokenThreshold: qcTokenThreshold, running: qcRunning,
+            openQualityCheck, closeQualityCheck, run: runQualityCheck, cancel: cancelQualityCheck,
+            locate: locateQualityItem, buildReport: buildQualityReport, QC_STEPS: qcStepsMeta
+        } = useQualityCheck({
+            library, worldbooks, activeWorldbook, estimateCardTokens,
+            refreshLibrary, entryHealthReport,
+            // 🧪 质检 S2 查重：**静默**（不弹查重弹窗 —— 否则会把质检报告弹窗顶掉）
+            startSmartDedupe: async (o) => { await startSmartDedupe(Object.assign({ silent: true }, o || {})); },
+            addLog, showToast,
+            openWbDedupeModal: () => { showWbDedupeModal.value = true; },
+            openCardByPath: async (p) => {
+                const hit = (library.value || []).find((c) => c && c.path === p);
+                if (hit && typeof openFromLibrary === 'function') await openFromLibrary(hit);
+                else if (typeof showToast === 'function') showToast('该卡不在当前库（可能已被移动）', 'warning');
+            }
+        });
+
+        // ================= [ 🚀 v2.3.6 启动自动任务（启动后附加任务：体检 / 冷备 / 查重） ] =================
+        //   · 全默认关（老配置无该键 ⇒ 全关）⇒ 冷启动行为与旧版完全一致
+        //   · 只在 onMounted 尾部（蒙版淡出后）调度；等「配置恢复 + 首扫完成」双条件 + delayMs
+        const showStartupTasksModal = ref(false);
+        const onStartupTasksChange = (next) => {
+            startupTasks.value = normalizeStartupTasks(next);
+            try { syncConfigToDiskDebounced(); } catch (e) { /* 尚未就绪时忽略 */ }
+        };
+        const openStartupTasks = () => { showStartupTasksModal.value = true; };
+        const startupScheduler = createStartupScheduler({
+            // 双条件：配置恢复完成（isRestoringConfig）+ 首屏加载结束（isAppLoading=false，onMounted 尾部调用时已满足）
+            waitReady: () => !isRestoringConfig.value && !isAppLoading.value,
+            computeAudit: async () => {
+                const tg = computeTagStats(library.value || []);
+                const ad = auditCards(library.value || [], { tokenThreshold: qcTokenThreshold.value, estimateCardTokens });
+                return { tagStats: tg, audit: ad };
+            },
+            backupCreate: async () => {
+                const api = window.electronAPI && window.electronAPI.fullBackup;
+                if (!api) return { ok: false, error: '当前环境不支持冷备' };
+                return await api.create({ libraryPath: currentFolderPath.value, destRoot: fullBackupDir.value, keep: fullBackupKeep.value });
+            },
+            backupDir: () => fullBackupDir.value,
+            backupKeep: () => fullBackupKeep.value,
+            // 🚀 启动自动查重：**静默**（不弹查重弹窗，避免刚启动就被弹窗挡住）
+            startDedupe: async () => { await startSmartDedupe({ silent: true }); },
+            isDedupeRunning: () => !!dedupeScanning.value,
+            addLog, showToast,
+            openQualityCheck: () => { showQualityCheckModal.value = true; }
+        });
+        const scheduleStartupTasks = () => {
+            try { return startupScheduler.schedule(startupTasks.value); }
+            catch (e) { addLog('🚀 启动任务调度失败：' + ((e && e.message) || e), 'error'); return { scheduled: false }; }
+        };
 
         // 🔎 全库词条搜索与反向引用：组合式函数注入
         //    ⚡ PK-26：秒开后世界书 `data` 为 null → 索引时必须**按需载入**（否则全库词条搜索恒空）；
@@ -5724,11 +6050,16 @@ export default {
             customAIPrompt, newAICandidateTag,
             addAICandidateTag, addAICandidateTagManual, addAICandidateTagsBatch, removeAICandidateTag,
             getCurrentSystemPromptContent, buildTaggingSystemPrompt, saveRolePrompts,
+            // 🌍 Q8（2026-10-03）：大幅书分段上限可调 —— 取值区间（模板滑块与引擎共用一套口径）
+            WB_SEGMENT_MAX_SEGMENTS_DEFAULT, WB_SEGMENT_MAX_SEGMENTS_MIN, WB_SEGMENT_MAX_SEGMENTS_MAX,
             // 📨 2026-10-03 透明化：发送材料「分段构建」（打标窗口「自定义模式」预览用；与发送同源）
             buildCardPromptParts, buildWbPromptParts,
             // 📨 2026-10-03「全量可编辑 · 全目标展示」：公共段/材料段独立构建（预览区按「公共 + 每目标」分组渲染）
             buildCommonPromptParts, buildCardMaterialPart, buildWbMaterialPart,
+            // 🔗 批次 C（Q10）：全手动档 + 无材料占位符检测（预览警告用）
+            customModeLacksMaterial,
             // 🧠 仅 LLM 层时的分角色链路 + 结构化截取（UI 徽标用）
+            prefillCompatInfo,
             llmOnlyActive,
             // 🔌 连通性测试
             isTestingConn, connTestStatus, testApiConnection,
@@ -5741,12 +6072,15 @@ export default {
         } = useAITools({
             selectedIds, library, cardData, apiEndpoint, apiKey, apiType, resolveApiModel, extractReplyContent,
             persistCardUpdate, refreshCardData, nativeAlert, confirmDialog, showToast,
-            llmRolePrompts, tagCustomSegments, tagPromptMode, tagMaterialOverrides, autoTagRules: compiledAutoTagRules, tagFunnel, tagPackSize, tagSkipTagged, tagResume, syncConfigToDisk,
+            llmRolePrompts, tagCustomSegments, tagPromptMode, tagMaterialOverrides, autoTagRules: compiledAutoTagRules, tagFunnel, tagPackSize, tagSkipTagged, tagWbSegmentMax, tagAutoMaterial, tagResume, syncConfigToDisk,
             // 🏷️ S3：世界书打标接入（与卡片同一条系统；材料/落盘两套适配 + 懒加载/释放在这里注入）
             appMode,
-            wbCtx: { worldbooks, activeWorldbook, filteredWorldbooks, getWbTags, setWbTags, saveWbCategoriesMap, wbDisplayName, ensureWorldbookLoaded, releaseWorldbookBody },
+            // 🌍 AI-12 / AI-13（2026-10-03）：`consumeWorldbookBodies` = **批量读正文唯一入口**
+            //    （① 规则层与 ② 向量层都必须走它，否则未加载的书会静默「未命中」、向量层会整批常驻）
+            wbCtx: { worldbooks, activeWorldbook, filteredWorldbooks, getWbTags, setWbTags, saveWbCategoriesMap, wbDisplayName, ensureWorldbookLoaded, releaseWorldbookBody, consumeWorldbookBodies },
             // 🏷️ S2：候选池相关状态（App.vue 定义并持久化；同一 ref 传回引擎）
-            useCandidatePool, enableAIExtraction, aiCandidateTags
+            useCandidatePool, enableAIExtraction, aiCandidateTags,
+            prefillCompatMode, prefillCompatTable,   // 🧩 预填充兼容自动判定（模式 + 按 API 记忆表）
         });
 
         // 📌 断点续跑入口（弹窗「执行管线」页「继续未完成」按钮）→ fromResume=true
@@ -5754,19 +6088,45 @@ export default {
 
         // ⏸ 打标暂停（2026-09-28）：UI 判「已暂停」态 —— 打标已停、暂停标志未被新任务清除（两个弹窗共用）
         const tagPausedNow = computed(() => !isAITagging.value && tagPauseRequested.value);
+        // ⏸ 2026-10-03：已请求暂停但还在跑（收尾中）—— UI 用它给即时反馈
+        const tagPausing = computed(() => isAITagging.value && tagPauseRequested.value);
 
         // 📨 2026-10-03「完全透明化 · 全目标展示」（用户迭代）：发送材料预览（分组；与打标发送同源——同一批构建函数）
         //    · 公共材料（任务说明/候选池与规则/输出要求）与目标无关 → 单列一组（所有卡/书共用）
         //    · 目标材料：卡片视图 = 全部选中卡；世界书视图 = 打标范围（当前书 / 筛选结果）内全部书
         //    · 每段可编辑（覆盖 → tagMaterialOverrides）与锁定（纯 UI）；随候选池/附加要求/选中目标实时刷新
+        //    🔗 批次 C（2026-10-03）：自定义模式下每段带 `status`（auto 自动附加 / taken 已由占位符接管 /
+        //       dropped 当前档不送）—— 判据与发送侧**同一对纯函数**（parseSegmentVars + splitPartsByVars）。
         const materialPreview = computed(() => {
             try {
+                // 🔔 必须**显式读取** worldbooks（CT-02 同款写法）：
+                //    世界书正文是**按需载入**的（`ensureWorldbookLoaded` 成功后 `triggerRef(worldbooks)`），
+                //    而本 computed 在「当前书」分支只读 `activeWorldbook.value`（一个 ref，不构成依赖）⇒
+                //    正文读完它**不会被标脏**，预览会永久停在「未载入」/旧内容。
+                //    （2026-10-03 真实 UI 手动测试暴露：`dataLoaded=true` 但预览仍显示「词条正文未载入」）
+                void worldbooks.value;
                 const isWb = appMode.value === 'worldbooks';
+                const kind = isWb ? 'wb' : 'card';
+                const isCustom = tagPromptMode.value === 'custom';
+                const mode = tagAutoMaterial.value || 'compat';
+                const segs = Array.isArray(tagCustomSegments.value) ? tagCustomSegments.value : [];
+                const varInfo = isCustom ? parseSegmentVars(segs) : { used: [], unknown: [], perSegment: [] };
                 const sections = [];
+                /** 给一批 parts 打状态标（自定义模式才有意义） */
+                const markStatus = (parts) => {
+                    if (!isCustom) return parts.map(p => ({ ...p, status: 'auto' }));
+                    const split = splitPartsByVars(parts, varInfo.used, mode, kind);
+                    const taken = new Set(split.takenKeys);
+                    const dropped = new Set(split.droppedKeys);
+                    return parts.map(p => ({
+                        ...p,
+                        status: taken.has(p.key) ? 'taken' : (dropped.has(p.key) ? 'dropped' : 'auto')
+                    }));
+                };
                 sections.push({
                     id: 'common', kind: 'common',
                     label: isWb ? '公共材料（所有世界书共用）' : '公共材料（所有卡片共用）',
-                    parts: buildCommonPromptParts(isWb ? 'wb' : 'card', true)
+                    parts: markStatus(buildCommonPromptParts(kind, true))
                 });
                 if (isWb) {
                     const wbs = (wbTagRange.value === 'filtered')
@@ -5777,46 +6137,70 @@ export default {
                         let label = '未命名';
                         try { label = wbDisplayName(wb) || (wb && (wb.wbName || wb.name)) || '未命名'; }
                         catch (e) { label = (wb && (wb.wbName || wb.name)) || '未命名'; }
-                        sections.push({ id: part.scope, kind: 'target', label, parts: [part] });
+                        sections.push({ id: part.scope, kind: 'target', label, parts: markStatus([part]) });
                     }
                 } else {
                     const cards = library.value.filter((c) => (selectedIds.value || []).includes(c.id));
                     for (const card of cards) {
                         const part = buildCardMaterialPart(card);
-                        sections.push({ id: part.scope, kind: 'target', label: card.name || '未知角色', parts: [part] });
+                        sections.push({ id: part.scope, kind: 'target', label: card.name || '未知角色', parts: markStatus([part]) });
                     }
                 }
-                return { sections, targetCount: Math.max(0, sections.length - 1), isWb };
+                return {
+                    sections,
+                    targetCount: Math.max(0, sections.length - 1),
+                    isWb,
+                    // 🔗 批次 C：自定义模式下的占位符信息（段徽标 / 未识别告警 / 接管状态）
+                    varInfo,
+                    autoMaterialMode: isCustom ? mode : '',
+                    lacksMaterial: customModeLacksMaterial()
+                };
             } catch (e) { return { sections: [], targetCount: 0, isWb: false }; }
         });
 
         // 📨 2026-10-03：预览目标「懒加载」——世界书正文按需读取（读完预览自动刷新；与打标发送同一加载器）。
         //    串行 + 令牌取消（目标集变化时放弃旧一轮）；幂等（已加载/无路径跳过）。
+        //  🩹 AI-12 / H2（2026-10-03）两处收口：
+        //    ① **只在打标弹窗打开时**为预览读正文 —— 旧实现只要在世界书视图就无条件读，
+        //       并**碰巧**成了 ① 规则层的正文来源（规则层因此掩盖了自己的缺陷，见 AI-12）；
+        //    ② 弹窗关闭时**只释放「本次为预览而读入」的那批**（用后交还瘦身态；不碰用户正在编辑的书）。
         let wbPreviewLoadToken = 0;
+        const wbPreviewLoaded = new Set(); // 本次「因预览而读入」的书（关闭弹窗时交还）
+        const previewWbTargets = () => (wbTagRange.value === 'filtered')
+            ? (filteredWorldbooks.value || [])
+            : ((activeWorldbook && activeWorldbook.value) ? [activeWorldbook.value] : []);
         watch(
             () => {
-                if (appMode.value !== 'worldbooks') return '';
-                const wbs = (wbTagRange.value === 'filtered')
-                    ? (filteredWorldbooks.value || [])
-                    : ((activeWorldbook && activeWorldbook.value) ? [activeWorldbook.value] : []);
-                return wbs.filter((w) => w && w.dataLoaded === false && w.path).map((w) => w.path).join('|');
+                if (appMode.value !== 'worldbooks' || !showAITagModal.value) return '';
+                return previewWbTargets().filter((w) => w && w.dataLoaded === false && w.path).map((w) => w.path).join('|');
             },
             () => {
                 const token = ++wbPreviewLoadToken;
-                const wbs = (wbTagRange.value === 'filtered')
-                    ? (filteredWorldbooks.value || [])
-                    : ((activeWorldbook && activeWorldbook.value) ? [activeWorldbook.value] : []);
+                const wbs = previewWbTargets();
                 (async () => {
                     for (const wb of wbs) {
                         if (token !== wbPreviewLoadToken) return; // 目标集已变化：让位给最新一轮
                         if (wb && wb.dataLoaded === false && wb.path && typeof ensureWorldbookLoaded === 'function') {
-                            try { await ensureWorldbookLoaded(wb, { silent: true }); } catch (e) { /* 单本失败不影响其余 */ }
+                            try {
+                                await ensureWorldbookLoaded(wb, { silent: true });
+                                wbPreviewLoaded.add(wb); // 记下「是谁读进来的」，关闭时精准交还
+                            } catch (e) { /* 单本失败不影响其余 */ }
                         }
                     }
                 })();
             },
             { immediate: true }
         );
+        // 弹窗关闭 → 作废在途预取 + 交还本次读入的正文（只动这批；releaseWorldbookBody 只对 heavy 生效，幂等）
+        watch(showAITagModal, (open) => {
+            if (open) return;
+            wbPreviewLoadToken++;
+            if (!wbPreviewLoaded.size) return;
+            for (const wb of wbPreviewLoaded) {
+                try { if (typeof releaseWorldbookBody === 'function') releaseWorldbookBody(wb); } catch (e) { /* 忽略 */ }
+            }
+            wbPreviewLoaded.clear();
+        });
 
         // 🏷️ S3（2026-09-25）：打标启动按目标模式分发（角色卡 → startAITagging；世界书 → startWbTagging）
         const handleStartTagging = (fromResume) => {
@@ -5855,6 +6239,21 @@ export default {
                 if (!ok) return;
             }
             tagCustomSegments.value = built;
+        };
+
+        // 📖 2026-10-03（用户需求）：图文教程里的「📥 套用到我的段」—— 已有段时先确认（防误覆盖手写段）
+        //    段对象由弹窗侧用 makeCustomSegment 建好（带 id），这里只负责确认 + 落盘 + 提示
+        const applyGuideRecipe = async (payload) => {
+            const name = (payload && payload.name) || '配方';
+            const segments = (payload && Array.isArray(payload.segments)) ? payload.segments : [];
+            if (!segments.length) return;
+            const n = tagCustomSegments.value.length;
+            if (n > 0) {
+                const ok = await confirmDialog(`将用教程配方「${name}」替换现有 ${n} 段。\n（当前内容会被覆盖；如需保留请先复制出去）\n\n继续？`);
+                if (!ok) return;
+            }
+            tagCustomSegments.value = normalizeCustomSegments(segments);
+            try { showToast(`已套用教程配方：${name}`, 'success'); } catch (e) { /* 忽略 */ }
         };
 
         // 📨 2026-10-03「全量可编辑」：材料段覆盖的写 / 清（不可变更新；集中 watch 自动防抖落盘）
@@ -6121,8 +6520,13 @@ export default {
                             systemLen: String((llmRolePrompts.value && llmRolePrompts.value.system) || '').length,
                             userLen: String((llmRolePrompts.value && llmRolePrompts.value.user) || '').length,
                             prefill: String((llmRolePrompts.value && llmRolePrompts.value.prefill) || ''),
+                            // 🌍 AI-15：世界书 System 三态（探针可断言）
+                            wbMode: String((llmRolePrompts.value && llmRolePrompts.value.wb && llmRolePrompts.value.wb.mode) || ''),
+                            wbSystemLen: String((llmRolePrompts.value && llmRolePrompts.value.wb && llmRolePrompts.value.wb.system) || '').length,
                             packSize: tagPackSize.value,
-                            skipTagged: !!tagSkipTagged.value
+                            skipTagged: !!tagSkipTagged.value,
+                            // 🌍 Q8：大幅书最多分段数（探针可断言）
+                            wbSegMax: tagWbSegmentMax.value
                         }),
                         // e2e 写入链路字段（局部 patch；只认 string / 1~10 的数字）
                         setRolePrompts: (patch) => {
@@ -6346,7 +6750,9 @@ export default {
             viewOptions, importFileInput, handleImportFiles, importCards, downloadCardFromUrl, selectAllCards, selectInvertCards, cleanGlobalTagsPrompt, sanitizeImportedTags,
             // 📇 DF-22：导入 accept（供 HeaderBar 的隐藏 file input 绑定）
             importAccept: cardFormats.IMPORT_ACCEPT,
-            openBakFolder, openTrashFolder, openGlobalTrash, openChatTab,
+            openBakFolder, openTrashFolder, openGlobalTrash, openChatTab, openFullBackupModal, showFullBackupModal, fullBackupDir, fullBackupKeep,
+            // ⚠️ 冷备弹窗的三个回调也必须在这里（模板 @update:backup-dir / @update:keep / @restored 绑的就是它们）
+            onFullBackupDirChange, onFullBackupKeepChange, onFullBackupRestored,
             isScanningDisk, diskScanProgress, useSizeFilter, runDiskScan, showDiskScanModal,
             currentFolderPath, handleScanImported, refreshLibrary,
             isDragging, dragCounter, handleDragEnter, handleDragLeave, cardData, imgUrl, tabs, currentTab, currentTabInfo,
@@ -6418,7 +6824,11 @@ export default {
             nativeAlert, confirmDialog,
             // 🤖 AI 分类弹窗复用：模型解析 + 响应文本提取
             resolveApiModel, extractReplyContent,
-            llmRolePrompts, saveRolePrompts, mapPromptsToSegments, tagCustomSegments, tagPromptMode, tagMaterialOverrides, materialPreview, setMaterialOverride, clearMaterialOverride, tagPackSize, tagSkipTagged, tagResume, resumeTagging,
+            llmRolePrompts, saveRolePrompts, mapPromptsToSegments, applyGuideRecipe, tagCustomSegments, tagPromptMode, tagMaterialOverrides, materialPreview, setMaterialOverride, clearMaterialOverride, tagPackSize, tagSkipTagged, tagWbSegmentMax, tagAutoMaterial, tagResume, resumeTagging,
+            // 🔗 批次 C：自定义模式「全手动档却无材料占位符」的警告（预览区显示；打标前另有二次确认）
+            customModeLacksMaterial,
+            // 🌍 Q8（2026-10-03）：大幅书分段上限的取值范围（模板滑块用）
+            WB_SEGMENT_MAX_SEGMENTS_DEFAULT, WB_SEGMENT_MAX_SEGMENTS_MIN, WB_SEGMENT_MAX_SEGMENTS_MAX,
             pauseTagging, tagPausedNow,
             // 🧠 仅 LLM 层时的分角色链路 + 结构化截取（AITagModal 显示「已启用」徽标）
             llmOnlyActive,
@@ -6642,6 +7052,17 @@ export default {
             updateWbGraphLayout, renderWbGraph, exportWbGraph,
             openGraphSmart,
             showWbMergeModal, selectedWbMergePaths, openWbMergeModal, executeWorldbookMerge,
+            // 🔀 v2.3.6 合并预览（查重组入口 / 预览编排；探针可驱动）
+            showWbMergePreview, wbMergePreview, wbMergeBusy, mergeWbDedupeGroup, cancelWbMergePreview, confirmWbMerge, prepareWbMergePreview,
+            // 🧪 v2.3.6 一键质检（编排状态与动作；探针可驱动）
+            openQualityCheck, showQualityCheckModal, qcSteps, qcStepsMeta, qcReport, qcEnabled, qcTokenThreshold, qcRunning, qcElapsedSec,
+            // ⚠️ `closeQualityCheck` 必须在这里（模板 `@close="closeQualityCheck"` 走的就是这个返回对象）——
+            //    曾漏暴露 ⇒ 点「✕ 关闭 / 知道了」**毫无反应**（弹窗关不掉，用户实测抓获）。
+            closeQualityCheck, runQualityCheck, cancelQualityCheck, locateQualityItem, buildQualityReport, qcCurrentIndex,
+            // 🚀 v2.3.6 启动自动任务（配置 + 调度器；探针可驱动）
+            startupTasks, showStartupTasksModal, openStartupTasks, onStartupTasksChange, scheduleStartupTasks, startupScheduler, STARTUP_TASK_DEFS,
+            // 🧩 2026-10-03 预填充兼容（模式 + 记忆表；探针/UI 可读）
+            prefillCompatMode, prefillCompatTable,
             showWbImportModal, importSourceBook, importCandidates, selectedImportEntries, importableSourceBooks,
             openWbImportModal, pickImportSource, confirmImportEntries,
             // 🚀 系统版本更新检测

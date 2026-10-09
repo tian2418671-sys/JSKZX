@@ -350,13 +350,7 @@
             <button @click="runCommand('edit.aiTag')" class="flex items-center gap-1.5 px-2 py-1 hover:bg-zinc-800 hover:text-zinc-100 rounded text-zinc-400 transition whitespace-nowrap shrink-0" :title="appMode === 'worldbooks' ? '对当前世界书（或当前筛选结果）AI 智能打标' : '对选中卡片 AI 智能打标'">
                 🤖 AI 打标
             </button>
-            <!-- ⛔ 已下线（2026-09-20，用户决定）：全局资产库入口隐藏（浏览器/菜单/快捷键均无其它入口）
-            <button @click="runCommand('toolbar.globalAssets')" class="flex items-center gap-1.5 px-2 py-1 hover:bg-zinc-800 hover:text-zinc-100 rounded text-zinc-400 transition whitespace-nowrap shrink-0" title="查看全库收集的世界书与正则脚本">
-                📚 全局资产库
-            </button>
-            -->
             <!-- 下线提示（一个版本后删除）：让习惯旧位置的你能确认是“功能下线”而不是“按钮丢了” -->
-            <span class="px-2 py-1 text-[10px] text-zinc-600 whitespace-nowrap shrink-0" title="全局资产库功能已关闭（后续将作为「扩展」重新提供）">📚 全局资产库已下线</span>
             <label class="flex items-center gap-1.5 px-2 py-1 hover:bg-zinc-800 hover:text-zinc-100 rounded text-zinc-400 transition cursor-pointer whitespace-nowrap shrink-0">
                 📥 恢复配置 <input type="file" class="hidden" accept=".json" @change="importLibraryDB">
             </label>

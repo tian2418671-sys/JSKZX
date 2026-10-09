@@ -467,3 +467,85 @@ textarea, input, select { transition: border-color 0.15s ease-in-out; }
    light 主题白底维持 indigo-600（≈4.4:1，无需覆盖）。 */
 [data-theme="dark"] .jsk-preview-target,
 [data-theme="slate"] .jsk-preview-target { color: #818cf8; }
+
+/* ---------- 🔗 2026-10-03：打标弹窗「🌍 世界书专用 System」块（teal 家族） ----------
+   为什么单独写：本应用的主题覆盖只重映射了 `bg-white` / `bg-gray-*` / `rose` / `emerald` / `amber` / `indigo`，
+   **`teal-*` 从未覆盖** ⇒ 该块（`bg-teal-50/60` + `border-teal-200` + `text-teal-700/900` + `bg-teal-100` 徽标）
+   在深色主题下会变成「浅色卡片贴在深色背景上」（用户 2026-10-03 反馈「主题颜色有问题」）。
+   与 `.jsk-preview-target` 同款做法：**专用类 + 按主题覆盖**（不动全局 teal，避免误伤别处）。
+   注：其余新增块（材料占位符 / 三档 / 状态角标 / 预览段卡片）已改用**已主题化的家族**（bg-white / gray-*），
+   无需在此覆盖。light 主题本就是浅色底，维持原样。 */
+[data-theme="dark"] .jsk-wb-block,
+[data-theme="slate"] .jsk-wb-block { background-color: rgba(13, 148, 136, 0.14); border-color: rgba(45, 212, 191, 0.34); }
+[data-theme="dark"] .jsk-wb-block .text-teal-900,
+[data-theme="dark"] .jsk-wb-block .text-teal-800,
+[data-theme="dark"] .jsk-wb-block .text-teal-700,
+[data-theme="slate"] .jsk-wb-block .text-teal-900,
+[data-theme="slate"] .jsk-wb-block .text-teal-800,
+[data-theme="slate"] .jsk-wb-block .text-teal-700 { color: #5eead4; }
+[data-theme="dark"] .jsk-wb-block .text-teal-600,
+[data-theme="dark"] .jsk-wb-block .text-teal-600\/70,
+[data-theme="dark"] .jsk-wb-block .text-teal-700\/70,
+[data-theme="slate"] .jsk-wb-block .text-teal-600,
+[data-theme="slate"] .jsk-wb-block .text-teal-600\/70,
+[data-theme="slate"] .jsk-wb-block .text-teal-700\/70 { color: rgba(94, 234, 212, 0.82); }
+[data-theme="dark"] .jsk-wb-block .border-teal-200,
+[data-theme="dark"] .jsk-wb-block .border-teal-300,
+[data-theme="slate"] .jsk-wb-block .border-teal-200,
+[data-theme="slate"] .jsk-wb-block .border-teal-300 { border-color: rgba(45, 212, 191, 0.45); }
+[data-theme="dark"] .jsk-wb-block .bg-teal-100,
+[data-theme="slate"] .jsk-wb-block .bg-teal-100 { background-color: rgba(13, 148, 136, 0.3); border-color: rgba(45, 212, 191, 0.45); }
+
+/* ---------- 🎨 2026-10-03：打标弹窗「深色主题未覆盖的浅色类」系统补齐 ----------
+   起因：用户反馈「主题颜色有问题」。逐类审计发现弹窗里有 20 个**浅色意图**工具类（浅底 / 深字 / 浅边）
+   在 `[data-theme="dark"]` 与 `[data-theme="slate"]` 两套块里**从未被重映射** ⇒ 深色下呈现
+   「浅底贴深底」或「深字压深底」。这里按两套块**已有的取值约定**补齐（同一 family 用同一档色）。
+   ⚠️ 只补 dark / slate；light 主题这些类本来就是对的，**一条都不动**。
+   ⚠️ 新增浅色类时先跑 `node scripts/probes/_probe-tagmodal-theme-audit.mjs`（静态审计：有没有漏映射），
+      再用 `_probe-tagmodal-theme-measure.mjs` 实测三主题对比度（半透明底逐层合成）。 */
+/* 浅底（-50/60 半透明变体，与既有 bg-indigo-50\/70 同档） */
+[data-theme="dark"] .bg-indigo-50\/60,
+[data-theme="slate"] .bg-indigo-50\/60 { background-color: rgba(30, 58, 95, 0.32); }
+[data-theme="dark"] .bg-emerald-50\/60,
+[data-theme="slate"] .bg-emerald-50\/60 { background-color: rgba(16, 78, 60, 0.32); }
+[data-theme="dark"] .bg-amber-50\/60,
+[data-theme="slate"] .bg-amber-50\/60 { background-color: rgba(30, 58, 95, 0.32); }
+/* 深字 / 深强调色 → 提亮到该 family 的 300~400 档（与既有映射同值） */
+[data-theme="dark"] .text-indigo-900,
+[data-theme="slate"] .text-indigo-900 { color: #a5b4fc; }
+[data-theme="dark"] .text-indigo-600,
+[data-theme="slate"] .text-indigo-600 { color: #818cf8; }
+[data-theme="dark"] .text-indigo-700\/70,
+[data-theme="slate"] .text-indigo-700\/70 { color: rgba(129, 140, 248, 0.85); }
+[data-theme="dark"] .text-amber-900,
+[data-theme="dark"] .text-amber-800,
+[data-theme="dark"] .text-amber-700,
+[data-theme="slate"] .text-amber-900,
+[data-theme="slate"] .text-amber-800,
+[data-theme="slate"] .text-amber-700 { color: #fbbf24; }
+[data-theme="dark"] .text-amber-700\/80,
+[data-theme="slate"] .text-amber-700\/80 { color: rgba(251, 191, 36, 0.85); }
+[data-theme="dark"] .text-blue-700,
+[data-theme="dark"] .text-blue-600,
+[data-theme="slate"] .text-blue-700,
+[data-theme="slate"] .text-blue-600 { color: #93c5fd; }
+[data-theme="dark"] .text-purple-600,
+[data-theme="slate"] .text-purple-600 { color: #c084fc; }
+[data-theme="dark"] .text-green-600,
+[data-theme="slate"] .text-green-600 { color: #4ade80; }
+[data-theme="dark"] .text-emerald-600,
+[data-theme="slate"] .text-emerald-600 { color: #34d399; }
+/* 浅色面板的**半透明变体**：50% 白叠在深面板上会变成「亮灰药丸」（实测 dark 对比仅 2.54 / slate 2.56）
+   ⇒ 换成同向的「深面半透明」，既保住"内凹面板"观感，又把灰字对比拉到 ≥6:1。
+   ⚠️ `bg-white/25`（导航徽标，叠在固定色 indigo-600 上）与 `bg-blue-200`（进度条轨道，恒在深色头部）
+      属**白名单、故意不覆盖** —— 见 `_probe-tagmodal-theme-audit.mjs` 的 WHITELIST（每条都写了原因）。 */
+[data-theme="dark"] .bg-white\/50 { background-color: rgba(17, 24, 39, 0.5); }
+[data-theme="slate"] .bg-white\/50 { background-color: rgba(15, 23, 42, 0.5); }
+/* 教程按钮 hover（bg-amber-100）：浅琥珀在深底上会闪成亮块 ⇒ 换成半透明琥珀 */
+[data-theme="dark"] .bg-amber-100,
+[data-theme="slate"] .bg-amber-100 { background-color: rgba(245, 158, 11, 0.25); }
+/* 浅边 → 同 family 半透明（-300 档比 -200 更实） */
+[data-theme="dark"] .border-indigo-300,
+[data-theme="slate"] .border-indigo-300 { border-color: rgba(99, 102, 241, 0.6); }
+[data-theme="dark"] .border-purple-300,
+[data-theme="slate"] .border-purple-300 { border-color: rgba(168, 85, 247, 0.6); }

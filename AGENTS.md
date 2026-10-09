@@ -10,7 +10,7 @@
 
 | 找什么 | 去哪 |
 |---|---|
-| 历史缺陷与坑（156 条，按领域 + 设计原因） | [`docs/bugs/README.md`](docs/bugs/README.md) |
+| 历史缺陷与坑（168 条，按领域 + 设计原因） | [`docs/bugs/README.md`](docs/bugs/README.md) |
 | 代码片段 / 实测技术数据 / 外部 API / 脚本清单 | [`docs/技术支持/README.md`](docs/技术支持/README.md) |
 | 发版一条龙（含内部 vs 对外文档分工） | [`docs/发布/规范与流程/一条龙-发布流程.md`](docs/发布/规范与流程/一条龙-发布流程.md) |
 | 实现规格与后续计划 | [`docs/规格与计划/`](docs/规格与计划/README.md) |
@@ -21,12 +21,19 @@
 
 1. **没收到用户明确的推送 / 打包指令，禁止 push、打包、发 Release。**
 2. **改动后必须真实启动冒烟**（`npm start` 或 `npx electron . --disable-gpu --enable-logging`）—— `vite build` 只验编译不验运行时。
-3. **对外文档（`RELEASE_NOTES.md` / GitHub Release 正文）不写内部细节**（文件名、函数名、脚本名、内存 MB、阶段耗时、崩溃原文），那些只进 `CHANGELOG.md` 与 `docs/**`。
+3. **文档分工铁律（对外 vs 内部）**：`RELEASE_NOTES.md` 与 GitHub Release 正文 = **对外**，只写「用户点哪里、看到什么变化、对他有什么用」；
+      `CHANGELOG.md` 与 `docs/**` = **内部**，技术细节全写那里。
+      **对外一律不写**：文件名（`.js` / `.vue` / `.mjs`）、函数与变量名、脚本与 IPC 名、内存/体积的 MB 数、毫秒与阶段耗时、崩溃原文与堆栈、缺陷编号（AR-54 之类）、单测与探针的条数。
+      **写对外时逐条自问**：这条用户**在哪点**、**看到什么不同**？答不出来就删掉或改写。
+      **发布前必查**：`Select-String -Path RELEASE_NOTES.md -Pattern '\.js|\.vue|\.mjs|\.ps1|MB|ms\b|crash\.log|heap|堆'`（只应命中历史段落）
+      ＋ `node scripts/extract-release-notes.mjs vX.Y.Z` 抽正文（**不许手抄**）。细则见 `docs/发布/规范与流程/内部信息.md` 与 `用户可看信息.md`。
 4. 🚫 **测试一律上真实库，禁止「隔离 / 模拟」糊弄** —— **读操作**（扫描 / 搜索 / 索引 / 渲染 / 统计）必须跑真实库；
    **写操作**（改标签 / 删卡 / 保存 / 移动）仍用隔离库，防误删真数据。
    **禁止**用假卡 / 空库 / 小样本替代真实库来「证明功能正常」—— 历史多次教训（DF-18 大库闸门、PK-19 索引规模、DF-17 字段口径）都是**只在真库才暴露**。
    > 📌 真实库：角色卡 `E:\AI\酒馆工具\角色卡`（89 张）/ 压测大库 `I:\03\角色色卡`（11,849 张）/ 世界书 `H:\01\全局世界书`（41 本，含 6 本 ≥6MB）。
-   > 📌 **配置仍隔离**（`--user-data-dir=%TEMP%\xxx`）—— 只隔离配置/缓存，**不隔离卡库**。详见 [`AI交接指导.md`](AI交接指导.md) 铁律 9。
+   > 📌 **配置隔离的正确做法（2026-10-03 实测纠正）**：`--user-data-dir` **不改变 `app.getPath('userData')`** ——
+   > 本项目 userData 恒为 `%APPDATA%\sillytavern-card-manager`（由 package.json name 决定），换 profile 跑**并不隔离 `app_config.json`**。
+   > 写配置类验收要么在真实 profile 上做 + **事后复位并核验落盘内容**，要么先给主进程加真正的 userData 覆盖开关。详见 [`AI交接指导.md`](AI交接指导.md) 铁律 9。
 5. 🧩 **扩展缺了自己装，不许降级糊弄** —— 需要某扩展能力而**本机没装、装不全、或换了台机器**时，
    **AI 自行下载安装后再用它把任务做完**：查已装 `code --list-extensions --show-versions` →
    安装 `code --install-extension <publisher.id>`（更新须带 `@<版本>`）→ 装完新开终端，

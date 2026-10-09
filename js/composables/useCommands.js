@@ -320,6 +320,14 @@ export function registerAppCommands(registry, ctx) {
             run: () => { ctx.showApiModal.value = true; }
         },
         {
+            id: 'settings.startupTasks', title: '🚀 启动任务…', category: '设置',
+            // ⚠️ 渲染器只画 HeaderBar 里列出的 9 个菜单（file/tags/groups/push/view/tools/maintenance/lab/help）——
+            //    `menu: 'settings'` **不会显示**（设置下拉是硬编码两项）⇒ 挂到「工具」菜单保证可达；category 仍记「设置」。
+            menu: 'tools', section: 2, order: 60,
+            tooltip: '配置启动后自动做的事：轻量体检 / 自动冷备 / 自动查重（默认全关；只影响下次启动）',
+            run: () => ctx.openStartupTasks()
+        },
+        {
             id: 'settings.resetApi', title: '🔄 重置 API 接口参数', category: '设置',
             menu: 'settings', section: 1, order: 20, danger: true, extraClass: 'hover:bg-rose-600 text-rose-400',
             run: () => ctx.resetApiSettings()
@@ -353,6 +361,18 @@ export function registerAppCommands(registry, ctx) {
             menu: 'maintenance', section: 1, order: 50, danger: true,
             tooltip: '仅删除「对应卡片已被删除」的孤儿快照目录，仍有卡片存活的快照会保留',
             run: () => ctx.cleanOrphanSnapshots()
+        },
+        {
+            id: 'settings.fullBackup', title: '📦 整库冷备…', category: '维护',
+            menu: 'maintenance', section: 1, order: 60,
+            tooltip: '把当前库整个目录树冷备到指定目录（可放备份盘）；保留最近 N 份自动轮转，可浏览/恢复/删除',
+            run: () => ctx.openFullBackupModal()
+        },
+        {
+            id: 'settings.qualityCheck', title: '🧪 一键质检…', category: '维护',
+            menu: 'maintenance', section: 1, order: 70,
+            tooltip: '只读流水线：重扫 → 查重 → 标签分析 → 卡片巡检 → 世界书体检，出一份可复制/导出的综合报告（不动库、不删文件）',
+            run: () => ctx.openQualityCheck()
         },
         {
             id: 'settings.checkUpdate', title: '🔄 检查应用更新...', category: '帮助',

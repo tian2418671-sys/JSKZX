@@ -277,14 +277,20 @@ export function useDedupe({
     };
 
     // ── 统一执行（忙标志 / 进度 / 降级与提示上报收尾） ──
-    const executeScan = async (kind) => {
+    /**
+     * @param {'card'|'wb'|'preset'|'content'} kind
+     * @param {{silent?:boolean}} [opts] silent=true ⇒ **不自动弹出查重弹窗**（供「一键质检流水线」「启动自动任务」
+     *   等编排场景使用：它们有自己的界面，弹窗会把报告顶掉）。
+     */
+    const executeScan = async (kind, opts) => {
+        const silent = !!(opts && opts.silent);
         skipped.count = 0; skipped.reasons = Object.create(null); skipped.samples = [];
         notices.length = 0;
         setDedupeBusy(true);
         try {
             if (kind === 'card') {
                 duplicateGroups.value = [];
-                showDedupeModal.value = true;
+                if (!silent) showDedupeModal.value = true;
                 dedupeScanning.value = true;
                 dedupeScanDone.value = 0; dedupeScanTotal.value = 0; dedupeScanPercent.value = 0;
                 dedupeScanLabel.value = '正在扫描卡片库…';
@@ -309,7 +315,7 @@ export function useDedupe({
                 }
             } else if (kind === 'wb') {
                 wbDuplicateGroups.value = [];
-                showWbDedupeModal.value = true;
+                if (!silent) showWbDedupeModal.value = true;
                 dedupeScanning.value = true;
                 dedupeScanLabel.value = '正在比对世界书索引（L1，不读正文）…';
                 const items = runWbPipeline();
@@ -325,7 +331,7 @@ export function useDedupe({
                 }
             } else if (kind === 'preset') {
                 presetDuplicateGroups.value = [];
-                showPresetDedupeModal.value = true;
+                if (!silent) showPresetDedupeModal.value = true;
                 dedupeScanning.value = true;
                 dedupeScanLabel.value = '正在比对预设内容…';
                 const items = runPresetPipeline();
@@ -341,7 +347,7 @@ export function useDedupe({
                 }
             } else if (kind === 'content') {
                 contentDuplicateGroups.value = [];
-                showContentDedupeModal.value = true;
+                if (!silent) showContentDedupeModal.value = true;
                 dedupeScanning.value = true;
                 dedupeScanLabel.value = '正在比对内容指纹…';
                 const mode = appMode && appMode.value;
@@ -368,10 +374,10 @@ export function useDedupe({
     };
 
     // ── 入口（四个 + 三合一；全部无参 —— 与 HeaderBar / 命令面板调用一致） ──
-    const startDedupeScan = () => executeScan('card');
-    const startWorldbookDedupeScan = () => executeScan('wb');
-    const startPresetDedupeScan = () => executeScan('preset');
-    const startContentDedupeScan = () => executeScan('content');
+    const startDedupeScan = (opts) => executeScan('card', opts);
+    const startWorldbookDedupeScan = (opts) => executeScan('wb', opts);
+    const startPresetDedupeScan = (opts) => executeScan('preset', opts);
+    const startContentDedupeScan = (opts) => executeScan('content', opts);
 
     /** 🎯 三合一切换（用户点名保留）：按当前库类型分发 */
     const startSmartDedupe = () => {

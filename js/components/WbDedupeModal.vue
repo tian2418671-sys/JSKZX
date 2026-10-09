@@ -38,7 +38,15 @@
                                 ⚠️ {{ group.nameOnlyCount }} 本仅书名相同
                             </span>
                         </span>
-                        <span class="text-xs text-zinc-500">共 {{ group.list.length }} 个重名版本</span>
+                        <div class="flex items-center gap-2">
+                            <span class="text-xs text-zinc-500">共 {{ group.list.length }} 个重名版本</span>
+                            <!-- 🔀 v2.3.6：查重组一键合并（仅同名组禁用；成员 ≥2 才可用） -->
+                            <button v-if="group.list.length >= 2 && (group.list.length - (group.nameOnlyCount || 0)) >= 2"
+                                    @click="$emit('merge-group', gIdx)"
+                                    title="把本组合并成一本新书（执行前会先给预览：产出词条数 / 跳过重复 / 键冲突）"
+                                    class="text-[11px] px-2 py-1 rounded bg-indigo-600 hover:bg-indigo-500 text-white font-bold transition">🔀 合并此组</button>
+                            <span v-else-if="group.list.length >= 2" class="text-[10px] text-rose-400" title="「仅同名」的版本内容不同源，禁止合并">⚠️ 仅同名 · 不可合并</span>
+                        </div>
                     </div>
 
                     <div class="flex gap-3 overflow-x-auto custom-scrollbar pb-2">
@@ -112,6 +120,6 @@ export default {
         // 不定态：底层重扫无进度通道时用滑动动画，不编假百分比
         indeterminate: { type: Boolean, default: false }
     },
-    emits: ['close', 'open-diff', 'resolve-group']
+    emits: ['close', 'open-diff', 'resolve-group', 'merge-group']
 };
 </script>

@@ -55,6 +55,23 @@ contextBridge.exposeInMainWorld('electronAPI', {
     // readTextBatch(paths[]) → [{path,text,ok}]；readEmbeddedBatch([{path,size}]) → [{path,data,ok}]
     readTextBatch: (paths) => ipcRenderer.invoke('files:readTextBatch', paths),
     readEmbeddedBatch: (paths) => ipcRenderer.invoke('files:readEmbeddedBatch', paths),
+    // ⬇️ v2.3.6 通用「保存文本文件」（系统保存对话框；不接收任意目标路径）
+    // 用法：saveTextFile({ defaultName, content, filters?, encoding? }) → { ok, canceled, path, bytes?, error? }
+    saveTextFile: (params) => ipcRenderer.invoke('file:saveTextFile', params),
+    // 📦 v2.3.6 整库冷备（一键全量快照）—— 逐文件复制 + 进度 + 轮转；恢复 = 改名 + 复制
+    //   create({libraryPath,destRoot,keep,label}) → {ok,backupDir,fileCount,bytes,trashed[],error?}
+    //   list({destRoot}) → {ok,items[{dir,name,createdAt,fileCount,bytes,libraryPath,appVersion}]}
+    //   restore({backupDir,libraryPath}) → {ok,safeCopyPath,error?} ｜ remove({backupDir}) → {ok}
+    //   cancel() ｜ onProgress(cb) 订阅 'backup:full:progress'（{phase,done,total,bytesDone,bytesTotal}）
+    fullBackup: {
+        create: (params) => ipcRenderer.invoke('backup:full:create', params),
+        list: (params) => ipcRenderer.invoke('backup:full:list', params),
+        restore: (params) => ipcRenderer.invoke('backup:full:restore', params),
+        remove: (params) => ipcRenderer.invoke('backup:full:delete', params),
+        cancel: () => ipcRenderer.invoke('backup:full:cancel'),
+        openDir: (targetPath) => ipcRenderer.invoke('backup:full:openDir', targetPath),
+        onProgress: (callback) => { ipcRenderer.on('backup:full:progress', (event, data) => callback(data)); }
+    },
     // 保存卡片 JSON 到本地文件
     saveCard: (filePath, updatedJson) => ipcRenderer.invoke('file:saveCard', filePath, updatedJson),
     // 📸 换角色卡图：选择新图并替换，返回新路径与校验校准报告
@@ -69,6 +86,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getPathForFile: (file) => webUtils.getPathForFile(file),
     // 聊天测试接口（OpenAI 兼容 / Anthropic 双协议，经主进程转发以绕过 CORS；apiType: 'openai' | 'anthropic'）
     sendChatMessage: (endpoint, payload, apiKey, apiType) => ipcRenderer.invoke('chat:send', endpoint, payload, apiKey, apiType),
+    // 🛑 立即中断在途 chat 请求（打标「⏸ 暂停」用）→ { ok, aborted }
+    abortChatMessage: () => ipcRenderer.invoke('chat:abort'),
     // 拉取服务端可用模型列表（GET /v1/models，经主进程转发以绕过 CORS）
     fetchModels: (endpoint, apiKey, apiType) => ipcRenderer.invoke('models:fetch', endpoint, apiKey, apiType),
     // 彻底删除本地文件（高危操作，需前端确认后调用）

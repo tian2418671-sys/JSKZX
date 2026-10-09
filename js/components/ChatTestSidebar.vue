@@ -150,7 +150,7 @@
                     <span class="text-[10px] font-bold text-zinc-400">世界书条目（{{ arr(wbList).length }}）</span>
                     <span class="text-[9px] text-zinc-600">{{ wbConstantCount }} 条常驻</span>
                 </div>
-                <p v-if="!arr(wbList).length" class="text-[10px] text-zinc-500">本卡未内嵌世界书，且未加载独立世界书。测卡时不会注入世界书设定。</p>
+                <p v-if="!arr(wbList).length" class="text-[10px] text-zinc-500">本卡没有内嵌世界书。测卡时不会注入世界书设定。（<b>独立世界书不参与测卡注入</b>）</p>
                 <div v-for="e in wbList" :key="e.key"
                      class="bg-zinc-900/60 border border-zinc-800 rounded px-2 py-1.5 space-y-1">
                     <div class="flex items-center gap-1.5">
@@ -227,6 +227,21 @@
             <template v-else-if="activeTab === 'chat'">
                 <button @click="createNewSession"
                         class="w-full px-2 py-1.5 rounded text-[11px] font-bold bg-cyan-600 hover:bg-cyan-500 text-white transition">＋ 新建聊天</button>
+
+                <!-- ⬇️ v2.3.6：导出当前会话（Markdown / HTML 单文件 / 纯文本）—— 空会话禁用 -->
+                <div class="flex items-center gap-1.5">
+                    <select v-model="exportFormat" :disabled="!canExportSession || exporting"
+                            class="flex-1 bg-zinc-900 border border-zinc-700 rounded px-1.5 py-1 text-[11px] text-zinc-300 disabled:opacity-50">
+                        <option v-for="f in exportFormats" :key="f.id" :value="f.id">{{ f.label }}</option>
+                    </select>
+                    <button @click="exportSession()" :disabled="!canExportSession || exporting"
+                            :title="canExportSession ? ('导出当前会话（' + exportFormats.find(f => f.id === exportFormat).label + '）—— 导出当前激活的分支') : '当前会话没有消息，无法导出'"
+                            class="px-2 py-1 rounded text-[11px] font-bold bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-zinc-200 disabled:opacity-40 disabled:cursor-not-allowed transition shrink-0">
+                        {{ exporting ? '导出中…' : '⬇️ 导出' }}
+                    </button>
+                </div>
+                <p v-if="exportMsg" class="text-[10px]" :class="/失败|错误/.test(exportMsg) ? 'text-red-400' : 'text-emerald-400'">{{ exportMsg }}</p>
+
                 <p v-if="!arr(sessions).length" class="text-[10px] text-zinc-500">还没有会话。发送第一条消息时会自动创建。</p>
                 <div v-for="s in sessions" :key="s.id"
                      @click="switchSession(s.id)"
@@ -469,6 +484,8 @@ import {
 } from '../composables/chat/useChatPlugins.js';
 import { PLACEMENT_LABELS } from '../composables/chat/useChatRegex.js';
 import { chatStorage, chatStorageVersion, getChatFlag, setChatFlag } from '../composables/chat/chatStorage.js';
+// ⬇️ v2.3.6 · 会话导出（Markdown / HTML 单文件 / 纯文本；纯函数在 js/utils/chatExport.js）
+import { buildSessionExport, buildExportFileName, EXPORT_FORMATS, isLargeExport, varsToYaml } from '../utils/chatExport.js';
 
 /**
  * ⚠️ 拖拽调宽把手：与桌面 SidebarPanel 同机制的极简实现
@@ -520,6 +537,14 @@ export default {
     data() {
         return {
             activeTab: 'config',
+            // ⬇️ v2.3.6 会话导出（纯 UI 态；导出只产生文件，不写任何应用配置）
+            exportFormats: EXPORT_FORMATS,
+            exportFormat: 'md',
+            exporting: false,
+            exportMsg: '',
+            // ⚠️ 超长导出（>10MB）的两步式确认态（第一次点击只提示，第二次才真导出）
+            pendingLargeExport: false,
+            _exportMsgTimer: null,
             SECTIONS: [
                 { key: 'config', label: '配置', icon: '⚙' },
                 { key: 'regex', label: '正则', icon: '🧩' },
@@ -576,7 +601,27 @@ export default {
         };
     },
     computed: {
-        /** 当前激活预设（从 chatStorage 恢复） */
+        /** ⬇️ v2.3.6：当前会话（优先 props.sessions；缺 messages 时回落到本地读盘） */
+        activeSession() {
+            const id = String(this.activeSessionId || '');
+            const list = this.arr(this.sessions).length ? this.arr(this.sessions) : this.arr(this.localSessions);
+            let s = id ? list.find((x) => x && x.id === id) : null;
+            if (!s && list.length) s = list[list.length - 1];
+            return s || null;
+        },
+        /** 有消息才允许导出（规格 §3.3：空会话禁用） */
+        canExportSession() {
+            const s = this.activeSession;
+            return !!(s && this.arr(s.messages).length);
+        },
+        /** 变量快照（yaml；供导出末尾附上） */
+        varsSnapshotText() {
+            try {
+                const tree = this.varsTree;
+                if (!tree || typeof tree !== 'object' || !Object.keys(tree).length) return '';
+                return varsToYaml(tree);
+            } catch (e) { return ''; }
+        },
         /** 当前激活预设（从 chatStorage 恢复）
          *  ⚠️ 必须 void 一下 chatStorageVersion：getter 读的是同步存储，无响应式依赖时
          *     Vue 会永久缓存首次结果（实测：本组件选了预设、引擎却一直读到 null）。 */
@@ -649,7 +694,68 @@ export default {
     created() {
         this.refreshLocal();
     },
+    beforeUnmount() {
+        if (this._exportMsgTimer) { clearTimeout(this._exportMsgTimer); this._exportMsgTimer = null; }
+    },
     methods: {
+        // ---------------- ⬇️ v2.3.6 会话导出 ----------------
+        /** 导出提示（自动消失） */
+        setExportMsg(text) {
+            this.exportMsg = String(text || '');
+            if (this._exportMsgTimer) { clearTimeout(this._exportMsgTimer); this._exportMsgTimer = null; }
+            if (this.exportMsg) this._exportMsgTimer = setTimeout(() => { this.exportMsg = ''; }, 8000);
+        },
+        /**
+         * 导出当前会话（Markdown / HTML / 纯文本）
+         * 流程：取当前会话（含**当前激活的 swipe 分支**）→ 纯函数生成文本 → 超长确认 → 系统保存对话框
+         * ⚠️ 只写用户显式选择的路径（`file:saveTextFile` 不接任意路径）；不写任何应用配置。
+         */
+        async exportSession() {
+            if (this.exporting) return;
+            const s = this.activeSession;
+            if (!s || !this.arr(s.messages).length) { this.setExportMsg('当前会话没有消息，无法导出'); return; }
+            const fmt = this.exportFormats.find((f) => f.id === this.exportFormat) || this.exportFormats[0];
+            this.exporting = true;
+            try {
+                const content = buildSessionExport(s, fmt.id, {
+                    charName: this.cardName,
+                    userName: this.userName,
+                    model: this.apiModel,
+                    preset: this.activePresetName,
+                    varsSnapshot: this.varsSnapshotText,
+                    includeVars: true
+                });
+                // ⚠️ 超长会话（>10MB）用**两步式内联确认**：仓库不用 `window.confirm`（会阻塞渲染层，
+                  //    且项目统一走主进程 confirmDialog）；这里只需"再点一次"的低成本确认，故不引入弹窗依赖。
+                if (isLargeExport(content) && !this.pendingLargeExport) {
+                    this.pendingLargeExport = true;
+                    this.setExportMsg(`⚠️ 本次导出约 ${(content.length / 1024 / 1024).toFixed(1)} MB —— 再点一次「⬇️ 导出」确认`);
+                    this.exporting = false;
+                    return;
+                }
+                this.pendingLargeExport = false;
+                const api = window.electronAPI;
+                if (!api || typeof api.saveTextFile !== 'function') { this.setExportMsg('导出失败：当前环境不支持保存文件'); this.exporting = false; return; }
+                const r = await api.saveTextFile({
+                    defaultName: buildExportFileName({ cardName: this.cardName, sessionName: s.name, format: fmt.id }),
+                    content,
+                    filters: [{ name: fmt.filterName, extensions: [fmt.ext] }]
+                });
+                if (r && r.ok) {
+                    const kb = Math.max(1, Math.round((r.bytes || content.length) / 1024));
+                    this.setExportMsg(`已导出 ${kb} KB（${fmt.label}）`);
+                } else if (r && r.canceled) {
+                    this.setExportMsg('');
+                } else {
+                    this.setExportMsg('导出失败：' + ((r && r.error) || '未知错误'));
+                }
+            } catch (e) {
+                this.setExportMsg('导出失败：' + ((e && e.message) || String(e)));
+            } finally {
+                this.exporting = false;
+            }
+        },
+
         // ---------------- 本地副本同步 ----------------
         refreshLocal() {
             try { this.localSessions = loadSessions(this.cardPath) || []; } catch (e) { this.localSessions = []; }

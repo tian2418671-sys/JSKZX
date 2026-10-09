@@ -11,10 +11,12 @@
  * ✅ 修：**结构化输出契约** —— 让模型把结果包在 `<tags>[...]</tags>` 里，
  *    解析用**非贪婪**精确边界；再保留两层降级（JSON 正则 → 暴力拆分），任一层成功即可。
  *
- * � **链路（2026-09-25 定稿）**：⚠️ 破限（拼到 System 末尾）→ 🧠 System → 👤 User → ⚡ 预填充（可选）
+ * 🔗 **链路（2026-09-25 定稿）**：⚠️ 破限（拼到 System 末尾）→ 🧠 System → 👤 User → ⚡ 预填充（可选）
  *
- * · **单套**：全局只有一套提示词（`llmRolePrompts = { system, user, prefill }`）——
+ * · **单套**：全局只有一套提示词（`llmRolePrompts = { system, user, prefill, wb }`）——
  *   预设库 / 五小页签 / Assistant 段 / 思维链段 **全部取消**（D2 / D14）。
+ *   🌍 **`wb`（2026-10-03 / AI-15 追加）**：世界书打标的 System **三态**（`default` 内置世界书文案 /
+ *   `inherit` 沿用通用 System / `custom` 自己写）；`user` 与 `prefill` 仍与卡片侧共用。
  *
  * · `<tags>` 三层解析 / 剥思考块（`思考…` / `<thinking>…</thinking>`）/ 预填充 ——
  *   与上一批（R1+R2）一致，未动；解析前先剥思考块，剥完失败回退原始文本。
@@ -104,12 +106,71 @@ export const SYSTEM_PROMPT_VARIANTS = [
  * 判断当前 System 文本命中了哪个内置变体（供下拉框回显）；
  * 与任何一个变体都不完全一致 → `'custom'`（✏️ 自定义）。
  * @param {string} system
+ * @param {Array<{id:string,content:string}>} [variants] 变体表（默认卡片侧；世界书传 `WB_SYSTEM_PROMPT_VARIANTS`）
  * @returns {string} 变体 id 或 'custom'
  */
-export function resolveSystemVariantId(system) {
+export function resolveSystemVariantId(system, variants) {
+    const list = Array.isArray(variants) ? variants : SYSTEM_PROMPT_VARIANTS;
     const s = String(system == null ? '' : system);
-    const hit = SYSTEM_PROMPT_VARIANTS.find(v => v.content === s);
+    const hit = list.find(v => v.content === s);
     return hit ? hit.id : 'custom';
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 🌍 世界书专用 System 文案 + 三态来源（P2 / AI-15，2026-10-03）
+// ───────────────────────────────────────────────────────────────
+// 🩹 病根（AI-15）：世界书打标**沿用角色卡口径**（「你是角色卡标签分析助手…你会收到：描述/首句/性格/卡名」），
+//    而实际材料是「书名 + 简介 + 词条」⇒ 口径错配，标签维度错位。
+// 🔧 修法：世界书的 System **默认**用下面这套世界书文案；用户可在「提示词」页
+//    三选一：`default`（内置世界书文案，**默认**）/ `inherit`（沿用通用 System，一套通吃）/ `custom`（自己写）。
+// ⚠️ 三态**显式**取代了方案 v1 里「留空 = 隐式回落主套」的写法 —— 隐式回落会让老用户
+//    （主套是角色卡口径）**继续错配**，等于病根没修。偏差已记入方案文档 §4.4。
+// ═══════════════════════════════════════════════════════════════
+
+/** 世界书三态来源（`default` = 内置世界书文案；`inherit` = 沿用通用 System；`custom` = 自己写） */
+export const WB_SYSTEM_MODES = ['default', 'inherit', 'custom'];
+
+/** **世界书默认文案**（世界书打标在 `mode='default'` 时使用） */
+export const DEFAULT_SYSTEM_PROMPT_WB = `你是「世界书设定标签分析助手」，为 SillyTavern 世界书（世界观 / 设定集）生成便于检索的标签。
+你会收到一本世界书：书名、简介，以及若干词条 —— 每条含【词条名】、触发词（可能还有次级触发词 / 常驻标记）与正文。
+打标原则：
+1. 只依据材料里真实出现或可直接推断的内容，不脑补、不臆造；
+2. 标签为简短中文词或词组（2~6 字），不写句子、不堆同义词；
+3. 覆盖维度：题材 / 世界观、势力与阵营、地点与场景、人物与身份、能力与体系、事件与剧情、风格与氛围；
+4. 词条名与触发词是定位线索：词条名体现作者如何归纳该词条，触发词反映它在对话里何时被唤起；
+5. 避免过泛（如「设定」「内容」）；库内常用「大类/子类」写法（如「仙侠/修真」），候选池里有的优先复用，没有再用自己的词；
+6. 输出前先在内部完成推理（主题 → 势力 → 地点 → 关键词 → 归纳），只输出最终标签，不输出推理过程。`;
+
+/** 世界书预设套用：3 个内置变体（与卡片侧同款交互；文案为草案，可随时改） */
+export const WB_SYSTEM_PROMPT_VARIANTS = [
+    { id: 'standard-wb', name: '🎯 标准世界书（默认）', content: DEFAULT_SYSTEM_PROMPT_WB },
+    {
+        id: 'deep-wb',
+        name: '🧭 深度解析（设定密集 / 大书）',
+        content: DEFAULT_SYSTEM_PROMPT_WB.replace(
+            '2. 标签为简短中文词或词组（2~6 字），不写句子、不堆同义词；',
+            '2. 标签为简短中文词或词组（2~6 字），不写句子；设定密集的世界书输出 10~15 个更细的标签（专有名词 / 势力名 / 地名 / 体系名），但不要堆同义词；'
+        )
+    },
+    {
+        id: 'brief-wb',
+        name: '✂️ 精简标签（只要核心 5~8 个）',
+        content: DEFAULT_SYSTEM_PROMPT_WB.replace(
+            '2. 标签为简短中文词或词组（2~6 字），不写句子、不堆同义词；',
+            '2. 标签为简短中文词或词组（2~6 字）；只保留最能概括全书主题的 5~8 个标签，宁缺毋滥，同类合并；'
+        )
+    }
+];
+
+/**
+ * 归一化「世界书 System 三态」（容错脏值）。
+ * @param {object} raw 形如 `{ mode?: 'default'|'inherit'|'custom', system?: string }`
+ * @returns {{mode:string, system:string}} 非法 mode 回退 `'default'`
+ */
+export function normalizeWbPrompt(raw) {
+    const w = (raw && typeof raw === 'object') ? raw : {};
+    const mode = WB_SYSTEM_MODES.includes(w.mode) ? w.mode : 'default';
+    return { mode, system: typeof w.system === 'string' ? w.system : '' };
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -120,16 +181,50 @@ export function resolveSystemVariantId(system) {
  * 归一化「单套提示词链路」对象（容错调用方传入 undefined / 脏值）。
  * ⚠️ 注意：**`prefill` 为空字符串 = 关闭预填充**（不是「用默认」）——
  *    默认值（`<tags>[`）在迁移 / 新装时写入，运行期以用户当前值为准。
+ * 🌍 **`wb`（2026-10-03 / AI-15）**：世界书专用 System 三态（`{ mode, system }`），
+ *    缺省 `mode='default'`（= 用内置世界书文案，修口径错配）；老配置无此字段时自动补默认。
  * @param {object} raw
- * @returns {{system:string, user:string, prefill:string}}
+ * @returns {{system:string, user:string, prefill:string, wb:{mode:string, system:string}}}
  */
 export function normalizeRolePrompts(raw) {
     const p = (raw && typeof raw === 'object') ? raw : {};
     return {
         system: typeof p.system === 'string' ? p.system : '',
         user: typeof p.user === 'string' ? p.user : '',
-        prefill: typeof p.prefill === 'string' ? p.prefill : ''
+        prefill: typeof p.prefill === 'string' ? p.prefill : '',
+        wb: normalizeWbPrompt(p.wb)
     };
+}
+
+/**
+ * 🌍 按**打标目标类型**取出本次实际使用的提示词（AI-15）。
+ *   · `kind !== 'wb'`（卡片 / 打包 / 分段）→ 原样返回主套（**零变化**）
+ *   · `kind === 'wb'`（世界书）→ System 按三态解析；`user` / `prefill` 仍与主套共用
+ *     （任务指令与预填充本就与目标无关，不重复造第二套字段）
+ * @param {object} raw `llmRolePrompts`
+ * @param {'card'|'wb'} [kind]
+ * @returns {{system:string, user:string, prefill:string, systemSource:string}}
+ *   `systemSource` ∈ `'main'`（卡片 / 沿用通用）/ `'wb-default'` / `'wb-inherit'` / `'wb-custom'`
+ */
+export function resolveRolePromptsForKind(raw, kind) {
+    const p = normalizeRolePrompts(raw);
+    if (kind !== 'wb') {
+        return { system: p.system, user: p.user, prefill: p.prefill, systemSource: 'main' };
+    }
+    let system;
+    let systemSource;
+    if (p.wb.mode === 'inherit') {
+        system = p.system;
+        systemSource = 'wb-inherit';
+    } else if (p.wb.mode === 'custom' && p.wb.system.trim()) {
+        system = p.wb.system;
+        systemSource = 'wb-custom';
+    } else {
+        // `default`，或 `custom` 但内容为空 ⇒ 兜底内置世界书文案（**绝不静默失效**）
+        system = DEFAULT_SYSTEM_PROMPT_WB;
+        systemSource = 'wb-default';
+    }
+    return { system, user: p.user, prefill: p.prefill, systemSource };
 }
 
 /**
@@ -148,7 +243,8 @@ export function migrateLegacyPresets(list) {
     return {
         system: system.trim() ? system : DEFAULT_SYSTEM_PROMPT,
         user: typeof p.user === 'string' ? p.user : '',
-        prefill: (typeof p.prefill === 'string' && p.prefill.trim()) ? p.prefill : DEFAULT_PREFILL
+        prefill: (typeof p.prefill === 'string' && p.prefill.trim()) ? p.prefill : DEFAULT_PREFILL,
+        wb: normalizeWbPrompt(null)   // 🌍 AI-15：世界书三态缺省 = default（内置世界书文案）
     };
 }
 
@@ -211,14 +307,15 @@ export function isLlmOnlyPlan(plan) {
  * ```
  *
  * @param {object} p
- * @param {object} p.rolePrompts 单套提示词（`{system, user, prefill}`）
+ * @param {object} p.rolePrompts 单套提示词（`{system, user, prefill, wb?}`）
  * @param {string} [p.jailbreak] 破限词（非空则追加到 system 末尾）
  * @param {string} p.defaultUser 程序生成的默认 user 内容（预设 user 段留空时使用；非空时附加在其后）
  * @param {boolean} [p.usePrefill] 是否使用预填充（false = 不用，用于「预填充被拒后重试」）
+ * @param {'card'|'wb'} [p.kind] 打标目标类型（🌍 AI-15：`'wb'` 时 System 走世界书三态）
  * @returns {Array<{role:string, content:string}>}
  */
-export function buildLlmMessages({ rolePrompts, jailbreak, defaultUser, usePrefill = true } = {}) {
-    const p = normalizeRolePrompts(rolePrompts);
+export function buildLlmMessages({ rolePrompts, jailbreak, defaultUser, usePrefill = true, kind = 'card' } = {}) {
+    const p = resolveRolePromptsForKind(rolePrompts, kind);
     const msgs = [];
 
     // ① system：主提示词 + 破限（破限**必须**在末尾 —— 注意力权重最高）

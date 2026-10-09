@@ -10,7 +10,7 @@
 > | 待做功能与排期 | `docs/规格与计划/计划与记录/后续升级计划.md` |
 > | 文档总地图 | `docs/README.md` |
 >
-> 最后更新：2026-10-03 ｜ 当前版本 **v2.3.5**（已发布 + OTA）
+> 最后更新：2026-10-03 ｜ 当前版本 **v2.3.9**（⬜ 待发布：一条龙已就绪，等发布指令；上一版 v2.3.5 已发布 + OTA 验证）
 
 ---
 
@@ -23,7 +23,7 @@
 | 仓库 | `https://github.com/tian2418671-sys/JSKZX.git`（远端 `origin`） |
 | 分支 | 本地 `master`（与 origin 同步） |
 | 构建产物 | `sillytavern-card-manager-<版本>.exe`（NSIS 安装版）+ `latest.yml` + `.exe.blockmap` + zip 绿色版 |
-| 测试 | `npm test` = `node --test "test/**/*.test.mjs"` → 当前 **824 用例全绿**（62 个测试文件） |
+| 测试 | `npm test` = `node --test "test/**/*.test.mjs"` → 当前 **973 用例全绿**（71 个测试文件） |
 | 规模 | `js/components/` 47 个 SFC、`js/composables/` 41 个模块（顶层 24 + `chat/` 引擎 17）、`js/utils/` 解析与索引工具 |
 | 用户习惯 | 说「**一条龙服务**」= 升版本号 → 更新文档三件套 → 打包 → 提交推送 → 发 GitHub Release（含 `latest.yml` 保 OTA） |
 | 典型库 | 日常小库 `E:\AI\酒馆工具\角色卡`（75 张）；压测大库 `I:\03\角色色卡`（11,186 张 / 9.76GB）；2 万卡副本由脚本现造 |
@@ -46,7 +46,12 @@ node scripts/release-check.mjs                   # 语法 + 单测 + 构建 + �
 3. 用户给的代码方案要**适配本项目架构**再落地：Electron IPC（禁传响应式 Proxy）、`app://` 协议、路径白名单、`confirmDialog`/`nativeAlert`、Options API 组件规范。
 4. 改动后必须过三关：`get_errors` → `npm run build:web` → **真实启动冒烟**（`npx electron . --disable-gpu --enable-logging`）。`vite build` 只验编译，**不验运行时**（TDZ、渲染崩溃都是编译期看不出来的）。
 5. 改文件前先 grep 现状；`replace` 的 oldString 与文件不符会直接失败。大段替换后立即复查。
-6. 文档分工不得越界：`RELEASE_NOTES.md` 是**对外**的（只写用户能感知的变化），`CHANGELOG.md` 与 `docs/**` 是**内部**的。详见 `docs/发布/规范与流程/内部信息.md` 与 `docs/发布/规范与流程/用户可看信息.md`。
+6. **文档分工铁律（对外 vs 内部）**：`RELEASE_NOTES.md` 与 GitHub Release 正文 = **对外**，只写「用户点哪里、看到什么变化、对他有什么用」；
+      `CHANGELOG.md` 与 `docs/**` = **内部**，技术细节全写那里。
+      **对外一律不写**：文件名（`.js` / `.vue` / `.mjs`）、函数与变量名、脚本与 IPC 名、内存/体积的 MB 数、毫秒与阶段耗时、崩溃原文与堆栈、缺陷编号（AR-54 之类）、单测与探针的条数。
+      **写对外时逐条自问**：这条用户**在哪点**、**看到什么不同**？答不出来就删掉或改写。
+      **发布前必查**：`Select-String -Path RELEASE_NOTES.md -Pattern '\.js|\.vue|\.mjs|\.ps1|MB|ms\b|crash\.log|heap|堆'`（只应命中历史段落）
+      ＋ `node scripts/extract-release-notes.mjs vX.Y.Z` 抽正文（**不许手抄**）。细则见 `docs/发布/规范与流程/内部信息.md` 与 `用户可看信息.md`。
 7. 涉及**物理路径会变的操作**（移动分组 / 重命名 / 换卡图）必须同步迁移**所有**按 path 派生的键（会话、变量树、覆盖层配置），否则用户看到的是「数据凭空消失」。
 8. 动工前先扫一眼 `docs/bugs/` 对应领域的历史缺陷 —— 很多坑会**重复踩**（尤其 Vue 响应式、世界书字段口径、打包发布）。
 9. 🚫 **测试一律上真实库，禁止「隔离 / 模拟」糊弄** —— 分读写两档：
@@ -138,7 +143,7 @@ js/utils/          cardLoader.js（卡解析/规范化）、pngParser.js、searc
 main/              vectorManager.js / vectorWorker.js / memoryStore.js（向量与长期记忆存储层）
 css/               tailwind.css（源）/ style.css（自定义）
 web/               vite build 产物（生产加载，gitignore）
-test/              62 个测试文件 / 824 用例（node:test，`npm test`）
+test/              71 个测试文件 / 973 用例（node:test，`npm test`）
 scripts/           压测与探针（library-dup-*、capacity-check.ps1、measure-startup.mjs、
                    release-check.mjs、_cdp-*.mjs 等）
 ```
@@ -276,3 +281,9 @@ node --check <file>                            # 语法检查
 ---
 
 *本文件由 AI 助手整理自项目历史交接材料；缺陷、技术数据与代码片段已全部并入 `docs/bugs/`、`docs/技术支持/`、`docs/发布/` 与 `docs/规格与计划/`。*
+
+> ⚠️ **2026-10-03 实测纠正**：`--user-data-dir=<dir>` **不改变 `app.getPath('userData')`** ——
+> 本项目 userData 恒为 `%APPDATA%\sillytavern-card-manager`（由 package.json 的 name 决定）。
+> 所以「换个 `--user-data-dir` 跑」**并不能隔离 `app_config.json`**（只隔离 Chromium 侧缓存/localStorage）。
+> **写配置类验收**要么在真实 profile 上做 + 事后复位并**核验落盘内容**，要么先给主进程加一个真正的 userData 覆盖开关。
+

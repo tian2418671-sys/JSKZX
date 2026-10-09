@@ -1068,6 +1068,25 @@
 
 ---
 
+### AR-53 ｜ 🟡 守卫 `guard:scope` 漏检「箭头函数/闭包内的未定义引用」⇒ 名字对不上只靠探针抓到
+
+- **现象**（2026-10-03，v2.3.6 五功能实现期，**两次同类**）：
+  ① `App.vue` 里在传给组合式函数的箭头函数体内用了 `computeTagStats` / `auditCards`，但**没导入**
+  ⇒ 启动体检跑到时抛 `computeTagStats is not defined`；
+  ② `useConfigPersistence` 的入参名写成 `fullBackup`，而 `App.vue` 传的是 `fullBackupDir` / `fullBackupKeep`
+  ⇒ 解构得到 `undefined` ⇒ **落盘恒为 `{}`**（功能能用、设置不持久化，最难发现的一类）。
+  两次 `npm run guard:scope` 都报「未定义标识符 **0** 个」✗ —— 是**真机探针**抓到的
+  （日志 `computeTagStats is not defined` / 配置落盘读回 `{}`）。
+- **根因**：守卫是**静态扫描**（顶层作用域 + 模板字面量），不解析「作为参数传进 composable 的箭头函数体」里的自由变量；
+  且「参数名 / ref 名不一致」在 JS 里**不是错误**（解构不存在的属性 = `undefined`），静态守卫无从判断。
+- **✅ 处理（本轮不改守卫本体，避免误报扩大；改为纪律 + 兜底）**：
+  ① **注入名必须逐字一致**：composable 的形参名 = 调用方传入的 ref/函数名；别名只允许写在**调用方**（`原名: 别名`）；
+  ② 新增/修改 composable 接线后，**必须**在真机跑一次相关探针（本轮两次都是这么抓到的）；
+  ③ 真机探针对「新接线」至少断言一个**端到端可见结果**（配置落盘内容 / 日志行 / DOM），**不得**把「守卫通过」当验证。
+- **来源**：v2.3.6 ④⑤ 两次踩（探针：`scripts/probes/_probe-quality-check.mjs` / `_probe-startup-tasks.mjs`）
+
+---
+
 ## 四、约定
 
 - 新增渲染层逻辑前，先确认**是否需要版本号/`triggerRef`** 打破 computed 缓存（AR-12、AR-18 是同一类病的两种表现）。

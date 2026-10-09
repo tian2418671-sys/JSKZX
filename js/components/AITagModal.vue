@@ -25,7 +25,7 @@
                         <span v-if="isWbMode" class="font-normal text-gray-300">范围：{{ wbTagRange === 'filtered' ? `筛选结果 ${wbTagRangeInfo.filteredCount} 本` : `当前书 · ${wbTagRangeInfo.activeName || '未选择'}` }}</span>
                         <span v-else>(已选 {{ selectedCount }} 张)</span>
                     </h3>
-                    <button @click="$emit('close')" :disabled="isAITagging" class="text-gray-400 hover:text-white disabled:opacity-50">✕ 关闭</button>
+                    <button @click="$emit('close')" :disabled="isAITagging && !tagPausing" class="text-gray-400 hover:text-white disabled:opacity-50">✕ 关闭</button>
                 </div>
 
                 <!-- 🚀 进度条常驻区：打标时在顶部（此前在最底部，用户必须滚到底才能看到进度） -->
@@ -135,6 +135,51 @@
                                    @input="$emit('update:tagPackSize', parseInt($event.target.value))" class="w-28 accent-indigo-600">
                             <span class="font-bold text-indigo-700">{{ tagPackSize }} 张/请求</span>
                             <span class="text-[9px] text-gray-400">默认 1 = 与旧行为一致；建议 3~5；只打包短卡，失败自动拆单</span>
+                        </div>
+                        <!-- 🌍 Q8（2026-10-03）：大幅书最多分段数（**可调**；默认 40 = 与旧行为逐字一致） -->
+                        <div class="mt-2 flex items-center gap-2 text-[11px] flex-wrap">
+                            <span class="text-gray-600 shrink-0">🌍 大幅书最多分段数</span>
+                            <input type="range" :min="wbSegMin" :max="wbSegMax" step="1" :value="tagWbSegmentMax" :disabled="isAITagging"
+                                   @input="$emit('update:tagWbSegmentMax', parseInt($event.target.value))" class="w-28 accent-indigo-600">
+                            <input type="number" :min="wbSegMin" :max="wbSegMax" :value="tagWbSegmentMax" :disabled="isAITagging"
+                                   @input="$emit('update:tagWbSegmentMax', parseInt($event.target.value))"
+                                   class="w-14 h-6 border border-gray-300 rounded px-1 text-[11px] text-indigo-700">
+                            <span class="font-bold text-indigo-700">段/本</span>
+                            <button v-if="tagWbSegmentMax !== wbSegDefault" @click="$emit('update:tagWbSegmentMax', wbSegDefault)"
+                                    class="text-[9px] px-1.5 py-0.5 rounded border border-gray-300 bg-white text-indigo-600 hover:border-indigo-400 transition">⟲ 默认 {{ wbSegDefault }}</button>
+                            <span class="text-[9px] text-gray-400">
+                                超长世界书材料按段落切分后，超过此值就<b>均匀采样</b>若干段打标；上限越高覆盖越全、请求越多（每本最多 ≈ 该值次请求）；仅世界书打标适用
+                            </span>
+                        </div>
+
+                        <!-- 💰 2026-10-03（用户需求）：本次「要花多少 / 覆盖多少」预估 —— **纯显示，不影响发送** -->
+                        <div class="mt-2.5 rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 space-y-1">
+                            <div class="flex items-center justify-between gap-2 flex-wrap">
+                                <span class="text-[11px] font-bold text-indigo-700">💰 本次预计（仅显示 · 不影响发送）</span>
+                                <span class="text-[9px] text-gray-500">
+                                    口径：实测校准 0.65 token/字 ·
+                                    {{ isWbMode ? ('分段上限 ' + tagWbSegmentMax + ' 段/本') : ('打包 ' + tagPackSize + ' 张/请求') }}
+                                </span>
+                            </div>
+                            <div v-if="costEstimate.targets > 0" class="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-gray-700">
+                                <span>目标 <b>{{ costEstimate.targets }}</b> {{ isWbMode ? '本' : '张' }}</span>
+                                <span>请求数 <b class="text-indigo-700">≈ {{ fmtNum(costEstimate.requests) }}</b></span>
+                                <span>token <b class="text-indigo-700">≈ {{ fmtNum(costEstimate.promptTokens) }}</b></span>
+                                <span>覆盖 <b :class="coverageClass(costEstimate.coverage)">{{ pct(costEstimate.coverage) }}</b>
+                                    <span class="text-[9px] text-gray-500">（实发 {{ fmtNum(costEstimate.sentChars) }} / 全量 {{ fmtNum(costEstimate.totalChars) }} 字）</span>
+                                </span>
+                                <span v-if="!isWbMode && costEstimate.packedUnits">打包成组 <b>{{ costEstimate.packedUnits }}</b> 个</span>
+                                <span v-if="!isWbMode && costEstimate.segmentedCards">超长卡分段 <b>{{ costEstimate.segmentedCards }}</b> 张</span>
+                            </div>
+                            <p v-else class="text-[11px] text-gray-500">尚未选择目标（选中卡片 / 世界书后这里会显示预估）。</p>
+                            <p v-if="costEstimate.heavy && costEstimate.heavy.length" class="text-[10px] text-amber-600 leading-relaxed">
+                                ⚠️ {{ isWbMode ? '被采样（未全送）' : '超长（会分段）' }}：
+                                <span v-for="(h, i) in costEstimate.heavy" :key="'h' + i">{{ i ? ' · ' : '' }}{{ h.label }}（{{ isWbMode ? pct(h.coverage) : (fmtNum(h.materialChars) + ' 字') }}）</span>
+                            </p>
+                            <p class="text-[9px] text-gray-500 leading-relaxed">
+                                估算依据：当前目标材料 + 分段上限 / 打包张数 + 每请求固定开销 {{ fmtNum(costEstimate.fixedTokens) }} token；
+                                <b>实际用量以 API 返回为准</b>。世界书「覆盖」= 实发材料字数 ÷ 全书材料字数（超上限会均匀采样）。
+                            </p>
                         </div>
                         <!-- ⏭️ 增量模式：跳过已有标签的卡（Q7） -->
                         <label class="mt-1.5 flex items-center gap-2 text-[11px] cursor-pointer">
@@ -359,6 +404,51 @@
                                           placeholder="给 AI 的角色设定与打标规则…"></textarea>
                                 <p class="text-[9px] text-gray-500">💡 选预设 = 一键填入；「✏️ 自定义」= 用下方自己写的内容。开启破限时，破限词自动拼在本段最末尾（注意力权重最高）。</p>
                             </div>
+
+                            <!-- 🌍 AI-15（2026-10-03）：**世界书专用 System** —— 三态（默认内置世界书文案 / 沿用上面的通用 System / 自定义）
+                                 背景：世界书打标曾沿用「角色卡」口径（描述/首句/性格/卡名），与实际材料（书名+词条）错配 ⇒ 打标偏泛。 -->
+                            <div class="mx-2.5 border-t border-dashed border-gray-200"></div>
+                            <div class="m-2.5 p-2.5 rounded-lg border border-teal-200 bg-teal-50/60 space-y-2 jsk-wb-block">
+                                <div class="flex items-center justify-between gap-2 flex-wrap">
+                                    <span class="text-xs font-bold text-teal-700">🌍 世界书专用 System <span class="font-normal text-teal-600/70 text-[10px]">仅世界书打标生效 · 卡片不受影响</span></span>
+                                    <span class="text-[9px] px-1.5 py-0.5 rounded border"
+                                          :class="isWbMode ? 'bg-teal-100 text-teal-800 border-teal-300' : 'bg-gray-100 text-gray-500 border-gray-200'">
+                                        {{ isWbMode ? '当前视图：世界书' : '当前视图：角色卡（暂不使用）' }}
+                                    </span>
+                                </div>
+                                <div class="flex flex-col gap-1 text-[11px]">
+                                    <label class="flex items-start gap-1.5 cursor-pointer">
+                                        <input type="radio" value="default" :checked="wbMode === 'default'" :disabled="isAITagging"
+                                               @change="setWbMode('default')" class="mt-0.5 accent-teal-600">
+                                        <span class="text-teal-900">用内置「<b>世界书设定标签分析助手</b>」文案（<b>推荐 · 默认</b>）<span class="text-teal-700/70 text-[10px]">—— 打世界书不再套用角色卡口径</span></span>
+                                    </label>
+                                    <label class="flex items-start gap-1.5 cursor-pointer">
+                                        <input type="radio" value="inherit" :checked="wbMode === 'inherit'" :disabled="isAITagging"
+                                               @change="setWbMode('inherit')" class="mt-0.5 accent-teal-600">
+                                        <span class="text-teal-900">沿用上面的通用 System（一套通吃卡片与世界书）</span>
+                                    </label>
+                                    <label class="flex items-start gap-1.5 cursor-pointer">
+                                        <input type="radio" value="custom" :checked="wbMode === 'custom'" :disabled="isAITagging"
+                                               @change="setWbMode('custom')" class="mt-0.5 accent-teal-600">
+                                        <span class="text-teal-900">自定义（用下面的输入框）</span>
+                                    </label>
+                                </div>
+                                <template v-if="wbMode === 'custom'">
+                                    <div class="flex items-center gap-2">
+                                        <label class="text-[10px] text-teal-600 shrink-0">📚 预设套用:</label>
+                                        <select :value="wbVariantId" @change="onPickWbVariant($event.target.value)" :disabled="isAITagging"
+                                                class="flex-1 h-7 bg-white border border-teal-300 rounded px-1.5 text-xs text-teal-700 focus:outline-none focus:border-teal-500">
+                                            <option v-for="v in wbSystemVariants" :key="v.id" :value="v.id">{{ v.name }}</option>
+                                            <option value="custom">✏️ 自定义（用下方输入框自己的内容）</option>
+                                        </select>
+                                    </div>
+                                    <textarea :value="wbSystemValue" @input="setWbSystem($event.target.value)" :disabled="isAITagging" rows="6"
+                                              class="w-full bg-white border border-teal-300 rounded p-2 text-gray-700 font-mono text-[11px] leading-relaxed focus:border-teal-500 focus:outline-none resize-y shadow-sm custom-scrollbar"
+                                              placeholder="给 AI 的世界书打标角色设定与规则…（留空 = 回退内置世界书文案，不会静默失效）"></textarea>
+                                    <p class="text-[9px] text-gray-500">💡 留空 = 自动回退内置世界书文案；「✏️ 自定义」= 用你自己写的内容。</p>
+                                </template>
+                                <p v-else class="text-[9px] text-gray-500">💡 当前不使用自定义输入框；上面的通用 System 只服务角色卡打标。</p>
+                            </div>
                         </div>
 
                         <div class="text-center text-gray-300 text-[11px] leading-none">↓</div>
@@ -398,6 +488,21 @@
                                        class="w-full bg-white border border-gray-300 rounded px-2 py-1 text-gray-700 font-mono text-[11px] focus:border-indigo-500 focus:outline-none"
                                        placeholder="默认：<tags>[">
                                 <p class="text-[9px] text-gray-500">💡 强制模型从这个开头往下写（默认 <code class="text-indigo-600">&lt;tags&gt;[</code>），大幅提高结构化输出遵守率；留空 = 取消预填充。</p>
+                                <!-- 🧩 2026-10-03：预填充兼容自动判定（按「主机 + 模型」记忆；部分上游不允许「以模型轮结尾」） -->
+                                <div class="pt-1 border-t border-gray-100 space-y-1">
+                                    <div class="flex items-center gap-2 flex-wrap">
+                                        <span class="text-[10px] font-bold text-gray-600">API 兼容</span>
+                                        <select :value="prefillCompatMode" :disabled="isAITagging"
+                                                @change="$emit('update:prefillCompatMode', $event.target.value)"
+                                                class="bg-white border border-gray-300 rounded px-1.5 py-0.5 text-[10px] text-gray-700">
+                                            <option v-for="m in prefillModes" :key="m.id" :value="m.id">{{ m.title }}</option>
+                                        </select>
+                                        <span class="text-[9px]" :class="compatToneClass">{{ compatText }}</span>
+                                    </div>
+                                    <p class="text-[9px] text-gray-500">
+                                        自动档按「主机 + 模型」记住判定：首次被上游以「以模型轮结尾不支持」拒绝后，后续请求**直接不带预填充**，不再白撞一次。
+                                    </p>
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -409,12 +514,61 @@
                                 <span class="text-[10px] text-indigo-500 font-normal bg-indigo-50 px-2 py-0.5 rounded border border-indigo-200">自由编排提示词段（角色 / 顺序 / 内容）</span>
                             </label>
                             <div class="flex items-center gap-1.5 shrink-0">
+                                <!-- 📖 2026-10-03（用户需求）：教程入口放在「⟸ 映射当前提示词」**前面** -->
+                                <button @click="showCustomGuide = true" :disabled="isAITagging"
+                                        title="打开图文教程：段与角色 / 预填充 / 自动材料 / 三档 / 占位符 / 三个可套用配方 / 排错清单"
+                                        class="px-2.5 py-1.5 bg-amber-50 hover:bg-amber-100 border border-amber-200 text-amber-600 text-[11px] font-medium rounded shadow-sm flex items-center gap-1 transition disabled:opacity-50 disabled:cursor-not-allowed">📖 教程</button>
                                 <button @click="$emit('map-prompts')" :disabled="isAITagging"
                                         title="把「系统提示词」页的 系统 / 破限 / User / 预填充 映射为段，作为初始默认内容（已有段时会先确认替换）"
                                         class="px-2.5 py-1.5 bg-white hover:bg-indigo-50 border border-indigo-300 text-indigo-600 text-[11px] font-medium rounded shadow-sm flex items-center gap-1 transition disabled:opacity-50 disabled:cursor-not-allowed">⟸ 映射当前提示词</button>
                                 <button @click="addCustomSegment" :disabled="isAITagging"
                                         class="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 disabled:bg-gray-300 disabled:cursor-not-allowed text-white text-[11px] font-medium rounded shadow flex items-center gap-1 transition shrink-0">＋ 在最上方插入</button>
                             </div>
+                        </div>
+
+                        <!-- 🔗 批次 C（Q3）：程序材料「自动附加」三档 —— 默认档 = 与旧行为逐字一致 -->
+                        <div class="bg-white border border-gray-200 rounded-lg p-2.5 space-y-1.5">
+                            <div class="flex items-center justify-between gap-2 flex-wrap">
+                                <span class="text-xs font-bold text-gray-700">📎 程序材料自动附加</span>
+                                <span class="text-[9px] text-gray-400">段里写了占位符的那一类<b>不再</b>自动附加（接管即抑制）</span>
+                            </div>
+                            <div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px]">
+                                <label v-for="m in autoMaterialModes" :key="m.id" class="flex items-center gap-1.5 cursor-pointer">
+                                    <input type="radio" :value="m.id" :checked="tagAutoMaterial === m.id" :disabled="isAITagging"
+                                           @change="$emit('update:tagAutoMaterial', m.id)" class="accent-indigo-600">
+                                    <span class="text-gray-700">{{ m.label }}</span>
+                                </label>
+                            </div>
+                            <p class="text-[9px] text-gray-500">{{ autoMaterialModeHint }}</p>
+                            <p v-if="materialPreview.lacksMaterial" class="text-[10px] text-rose-700 bg-rose-50 border border-rose-200 rounded px-2 py-1">
+                                ⚠️ 当前是「⚪ 全手动」档，但<b>没有任何段</b>引用 <code>&#123;&#123;材料&#125;&#125;</code> —— 本次不会发送卡/书内容（打标前会再确认一次）。
+                            </p>
+                        </div>
+
+                        <!-- 🔗 批次 C：占位符图例（点一下即插入到「最后一段」末尾；也可手写）
+                             🎨 2026-10-03 主题修复：一律用**已被主题覆盖的家族**（bg-white / gray-* / amber-600），
+                             不用 slate-*（主题系统未覆盖 ⇒ 深色下会"浅色卡片贴深色背景"） -->
+                        <div class="bg-white border border-gray-200 rounded-lg p-2.5 space-y-1.5">
+                            <div class="flex items-center justify-between gap-2 flex-wrap">
+                                <span class="text-xs font-bold text-gray-700">🔗 材料占位符</span>
+                                <span class="text-[9px] text-gray-500">写进任意段的正文里，发送时就地替换成对应材料（可放进 SYSTEM 段）</span>
+                            </div>
+                            <div class="flex flex-wrap gap-1.5">
+                                <button v-for="v in varLegend" :key="v.key" type="button" :disabled="isAITagging || tagCustomSegments.length === 0"
+                                        @click="insertVar(v.placeholder)"
+                                        :title="'插入到最后一个段的末尾：' + v.placeholder + '（' + v.label + '）'"
+                                        class="px-1.5 py-0.5 rounded border border-gray-300 bg-white text-gray-700 text-[10px] hover:border-indigo-400 hover:text-indigo-600 disabled:opacity-40 disabled:cursor-not-allowed transition font-mono">
+                                    {{ v.placeholder }}
+                                </button>
+                            </div>
+                            <p class="text-[9px] text-gray-500">
+                                💡 <code>$1</code> 与 <code>&#123;&#123;材料&#125;&#125;</code> 等价（若你的提示词里有正则反向引用 <code>$1</code>，请改用花括号写法）；
+                                <code>&#123;&#123;破限&#125;&#125;</code> 取当前破限词（未启用破限时为空）。共 {{ varLegend.length }} 个占位符可用。
+                            </p>
+                            <p v-if="materialPreview.varInfo && materialPreview.varInfo.unknown && materialPreview.varInfo.unknown.length"
+                               class="text-[10px] text-amber-600 bg-amber-50 border border-amber-200 rounded px-2 py-1">
+                                ⚠️ 未识别的占位符：{{ unknownVarsText }} —— 会<b>按原文</b>发送
+                            </p>
                         </div>
 
                         <!-- 空状态 -->
@@ -437,6 +591,10 @@
                                     <option value="user">USER</option>
                                     <option value="assistant">ASSISTANT</option>
                                 </select>
+                                <!-- 🔗 批次 C：该段用到的占位符徽标（发送时会被替换成对应材料） -->
+                                <span v-for="k in segmentVarKeys(seg)" :key="k"
+                                      class="text-[9px] px-1 py-0.5 rounded bg-gray-100 text-gray-600 border border-gray-300 font-mono shrink-0"
+                                      :title="'本段含占位符：' + varLabelOf(k) + '（发送时就地替换）'">🔗 {{ varLabelOf(k) }}</span>
                                 <div class="ml-auto flex items-center gap-1">
                                     <button @click="moveCustomSegment(i, -1)" :disabled="i === 0 || isAITagging" title="上移"
                                             class="w-6 h-6 flex items-center justify-center rounded border border-gray-300 bg-white text-indigo-600 hover:border-indigo-400 hover:text-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed transition text-[11px] leading-none">↑</button>
@@ -463,7 +621,7 @@
                                 </label>
                                 <span class="text-[10px] text-gray-400 shrink-0 flex items-center gap-1.5">
                                     <template v-if="materialPreview.targetCount > 0">
-                                        <button @click="expandAllSecs" title="展开全部材料（组与段内容）" class="px-1.5 py-0.5 rounded border border-gray-300 bg-white text-gray-500 hover:border-indigo-400 hover:text-indigo-600 transition">全部展开</button>
+                                        <button @click="expandAllSecs" title="展开全部材料（组与段内容；超长段只展开「摘要」防止百万级字符装载卡顿，可逐段点「📥 载入全部」）" class="px-1.5 py-0.5 rounded border border-gray-300 bg-white text-gray-500 hover:border-indigo-400 hover:text-indigo-600 transition">全部展开</button>
                                         <button @click="collapseAllSecs" title="折叠全部材料（组与段内容；大选择集推荐）" class="px-1.5 py-0.5 rounded border border-gray-300 bg-white text-gray-500 hover:border-indigo-400 hover:text-indigo-600 transition">全部折叠</button>
                                     </template>
                                     <span>{{ isWbMode ? '世界书打标材料' : '卡片打标材料' }}</span>
@@ -479,8 +637,8 @@
                                      data-sec-head="1"
                                      :title="isSecCollapsed(sec) ? '点击展开该组材料' : '点击折叠该组材料'"
                                      @click="toggleSec(sec)">
-                                    <span class="text-[10px] font-mono shrink-0" :class="sec.kind === 'common' ? 'text-slate-400' : 'text-indigo-500'">{{ isSecCollapsed(sec) ? '▸' : '▾' }}</span>
-                                    <span class="text-[10px] font-bold shrink-0" :class="sec.kind === 'common' ? 'text-slate-500' : 'text-indigo-600 jsk-preview-target'">
+                                    <span class="text-[10px] font-mono shrink-0" :class="sec.kind === 'common' ? 'text-gray-400' : 'text-indigo-500'">{{ isSecCollapsed(sec) ? '▸' : '▾' }}</span>
+                                    <span class="text-[10px] font-bold shrink-0" :class="sec.kind === 'common' ? 'text-gray-500' : 'text-indigo-600 jsk-preview-target'">
                                         {{ sec.kind === 'common' ? '🧱 ' + sec.label : '📄 ' + sec.label }}
                                     </span>
                                     <span v-if="sec.kind === 'target'" class="text-[9px] text-gray-400 shrink-0">独立发送</span>
@@ -489,19 +647,23 @@
                                     <span class="text-[9px] text-gray-300 group-hover:text-gray-500 shrink-0">{{ isSecCollapsed(sec) ? '展开' : '收起' }}</span>
                                 </div>
                                 <div v-if="!isSecCollapsed(sec)" class="space-y-2">
-                                <div v-for="part in sec.parts" :key="sec.id + '|' + part.key" class="bg-slate-50 border border-slate-200 rounded-lg overflow-hidden">
-                                    <div class="px-2.5 py-1.5 bg-slate-100 border-b border-slate-200 flex items-center gap-2 cursor-pointer select-none group"
+                                <div v-for="part in sec.parts" :key="sec.id + '|' + part.key" class="bg-gray-50 border border-gray-200 rounded-lg overflow-hidden">
+                                    <div class="px-2.5 py-1.5 bg-gray-100 border-b border-gray-200 flex items-center gap-2 cursor-pointer select-none group"
                                          data-part-head="1"
                                          :title="isPartFolded(sec, part) ? '点击展开该段内容' : '点击折叠该段内容'"
                                          @click="togglePartFold(sec, part)">
-                                        <span class="text-[10px] text-slate-400 shrink-0">{{ isPartFolded(sec, part) ? '▸' : '▾' }}</span>
+                                        <span class="text-[10px] text-gray-400 shrink-0">{{ isPartFolded(sec, part) ? '▸' : '▾' }}</span>
                                         <button @click.stop="togglePartLock(sec, part)" :title="isPartLocked(sec, part) ? '已锁定（只读）：点击解锁编辑' : '可编辑：点击锁定（防误改）'"
                                                 class="w-6 h-6 flex items-center justify-center rounded border border-gray-300 bg-white hover:border-indigo-400 transition text-[11px] leading-none shrink-0">{{ isPartLocked(sec, part) ? '🔒' : '🔓' }}</button>
-                                        <span class="text-[10px] font-bold text-slate-600">{{ part.title }}</span>
-                                        <span v-if="part.overridden" class="text-[9px] px-1 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200 shrink-0">已修改</span>
-                                        <span v-else-if="part.mode === 'override'" class="text-[9px] text-slate-400 shrink-0">程序自动生成</span>
-                                        <span v-else class="text-[9px] text-slate-400 shrink-0">取自「附加要求」</span>
-                                        <span class="text-[9px] text-slate-400 shrink-0">{{ partValue(part).length }} 字</span>
+                                        <span class="text-[10px] font-bold text-gray-600">{{ part.title }}</span>
+                                        <span v-if="part.overridden" class="text-[9px] px-1 py-0.5 rounded bg-amber-50 text-amber-600 border border-amber-200 shrink-0">已修改</span>
+                                        <span v-else-if="part.mode === 'override'" class="text-[9px] text-gray-400 shrink-0">程序自动生成</span>
+                                        <span v-else class="text-[9px] text-gray-400 shrink-0">取自「附加要求」</span>
+                                        <!-- 🔗 批次 C：自定义模式下的三类状态（与发送侧同一判据） -->
+                                        <span v-if="part.status === 'taken'" class="text-[9px] px-1 py-0.5 rounded bg-gray-200 text-gray-700 border border-gray-300 shrink-0" title="本段已被段内占位符接管 —— 不会再自动附加到 USER 消息">🔗 已由占位符接管</span>
+                                        <span v-else-if="part.status === 'dropped'" class="text-[9px] px-1 py-0.5 rounded bg-rose-50 text-rose-700 border border-rose-200 shrink-0" title="当前「程序材料自动附加」档位不送这一段">🚫 当前档不送</span>
+                                        <span v-else-if="part.status === 'auto' && materialPreview.autoMaterialMode" class="text-[9px] text-emerald-700 shrink-0">自动附加</span>
+                                        <span class="text-[9px] text-gray-400 shrink-0">{{ partValue(part).length }} 字</span>
                                         <span class="ml-auto flex items-center gap-1 shrink-0">
                                             <button v-if="part.overridden" @click.stop="clearMaterialOverride(sec, part)" title="删除本段编辑，回到程序自动生成"
                                                     class="text-[9px] px-1.5 py-0.5 rounded border border-gray-300 bg-white text-indigo-600 hover:border-indigo-400 transition">⟲ 恢复自动</button>
@@ -510,7 +672,22 @@
                                     </div>
                                     <div class="p-2.5 space-y-1.5">
                                         <template v-if="!isPartFolded(sec, part)">
-                                        <textarea v-if="!isPartLocked(sec, part)" :value="partValue(part)" @input="onPartInput(sec, part, $event.target.value)"
+                                        <!-- 🐌 2026-10-03 性能修复（实测「全部展开」最长 16.4s 长任务）：
+                                             病根 = 一次创建 43 个 textarea、里面塞 491 万字（代价≈3.3μs/字符，与字符量线性）。
+                                             对策 = **超长段默认只渲染「摘要视图」（只读 + 截断）**，要看/改全文必须显式点
+                                             「📥 载入全部」（一次只放行一段，把百万级字符的卡顿变成用户主动选择）。
+                                             注意：摘要只用 `<pre>` 只读渲染 —— **绝不能把截断文本塞进 textarea**，
+                                             否则用户一编辑就会把截断内容写回 override（数据损坏）。 -->
+                                        <template v-if="isHeavyPart(part) && !fullParts[partLockId(sec, part)]">
+                                            <pre class="whitespace-pre-wrap font-mono text-[10px] leading-relaxed text-gray-600 max-h-56 overflow-y-auto custom-scrollbar bg-white border border-gray-200 rounded p-2">{{ partSummaryText(part) }}</pre>
+                                            <div class="flex items-center justify-between gap-2 flex-wrap">
+                                                <span class="text-[9px] text-amber-600">🐌 超长段（共 {{ partValue(part).length }} 字）：为防卡顿只显示前 {{ partSummaryChars }} 字</span>
+                                                <button @click.stop="loadFullPart(sec, part)"
+                                                        :title="isPartLocked(sec, part) ? '载入全文查看（本段已锁定，仍为只读）' : '载入全文并进入编辑（超长段可能卡顿数秒）'"
+                                                        class="text-[9px] px-1.5 py-0.5 rounded border border-indigo-300 bg-white text-indigo-700 hover:bg-indigo-50 transition shrink-0">📥 载入全部{{ isPartLocked(sec, part) ? '（只读）' : '并编辑' }}</button>
+                                            </div>
+                                        </template>
+                                        <textarea v-else-if="!isPartLocked(sec, part)" :value="partValue(part)" @input="onPartInput(sec, part, $event.target.value)"
                                                   :disabled="isAITagging" :rows="partTextareaRows(part)" spellcheck="false"
                                                   class="w-full bg-white border border-gray-300 rounded p-2 text-gray-700 font-mono text-[10px] leading-relaxed focus:border-indigo-500 focus:outline-none resize-y max-h-64 overflow-y-auto custom-scrollbar"></textarea>
                                         <pre v-else class="whitespace-pre-wrap font-mono text-[10px] leading-relaxed text-gray-600 max-h-56 overflow-y-auto custom-scrollbar bg-white border border-gray-200 rounded p-2">{{ partValue(part) }}</pre>
@@ -590,11 +767,16 @@
                 <div class="px-5 py-4 bg-gray-50 border-t border-gray-200 flex justify-end gap-3 shrink-0">
                     <button @click="$emit('close')" :disabled="isAITagging" class="px-5 py-2 bg-white border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-100 disabled:opacity-50 transition">取消</button>
                     <!-- ⏸ 打标进行中：暂停（安全收尾：当前卡片/请求完成后停下，进度保留） -->
+                    <p v-if="tagPausing" class="text-[10px] text-amber-600 mt-1">⏸ 已请求暂停：正在中断当前请求，完成后立即停下（该卡不记完成，可「继续未完成」重跑）</p>
                     <button v-if="isAITagging" @click="$emit('pause-tagging')" title="当前卡片/请求完成后停下，进度与已完成结果保留"
-                            class="px-5 py-2 bg-amber-500 hover:bg-amber-600 text-white rounded-lg font-bold shadow-md transition">⏸ 暂停</button>
+                            class="px-5 py-2 bg-amber-500 hover:bg-amber-600 text-white rounded-lg font-bold shadow-md transition">{{ tagPausing ? '⏸ 正在收尾…（等当前请求中断）' : '⏸ 暂停' }}</button>
                     <!-- ⏸ 已暂停（有未完成账本）：继续入口（与「执行管线」页按钮互补） -->
                     <button v-if="tagPaused && resumePending > 0 && !isWbMode" @click="$emit('resume-tagging')"
                             class="px-5 py-2 bg-amber-600 hover:bg-amber-500 text-white rounded-lg font-bold shadow-md transition">▶ 继续未完成（{{ resumePending }} 张）</button>
+                    <!-- 💰 2026-10-03：把预估放在「开始智能打标」旁边（决策点可见 · 纯显示） -->
+                    <span v-if="costEstimate.targets > 0" class="text-[10px] text-gray-500 mr-auto pl-1" title="本次预估（仅显示，不影响发送）；详见「⚙️ 执行管线」页">
+                        💰 ≈{{ fmtNum(costEstimate.requests) }} 请求 · ≈{{ fmtNum(costEstimate.promptTokens) }} token · 覆盖 {{ pct(costEstimate.coverage) }}
+                    </span>
                     <button @click="$emit('start-tagging')" :disabled="isAITagging || funnelEmpty"
                             :title="funnelEmpty ? '三层打标管线均已关闭 —— 请在上方执行管线或「设置 → 🏷️ 打标与分类」至少启用一层' : ''"
                             class="px-5 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-bold disabled:opacity-75 disabled:cursor-not-allowed flex items-center gap-2 shadow-md transition">
@@ -603,6 +785,11 @@
                     </button>
                 </div>
             </div>
+
+            <!-- 📖 自定义模式图文教程（叠在打标窗之上 z-[60]；只读 + 可套用配方） -->
+            <CustomModeGuide :show="showCustomGuide"
+                             @close="showCustomGuide = false"
+                             @apply-recipe="onApplyGuideRecipe" />
         </div>
     </transition>
 </template>
@@ -610,12 +797,19 @@
 <script>
 import { groupTagsByCategory } from '../utils/tagCategories.js';
 // 🧠 单套提示词链路：内置 System 预设变体（下拉套用）
-import { SYSTEM_PROMPT_VARIANTS, resolveSystemVariantId } from '../utils/llmPromptRoles.js';
+import { SYSTEM_PROMPT_VARIANTS, resolveSystemVariantId, WB_SYSTEM_PROMPT_VARIANTS, DEFAULT_SYSTEM_PROMPT_WB, resolveRolePromptsForKind } from '../utils/llmPromptRoles.js';
+// 💰 2026-10-03（用户需求）：本次「要花多少 / 覆盖多少」预估（**纯显示**，不改任何发送行为）
+import { estimateWbCost, estimateCardCost, stripMaterialPrefix } from '../utils/tagCostEstimate.js';
 // ✨ 自定义模式（2026-10-03）：多段提示词段的增删移改（纯函数，不可变更新）
-import { insertSegmentAtTop, removeSegmentAt, moveSegment, patchSegment } from '../utils/customPromptSegments.js';
+import { insertSegmentAtTop, removeSegmentAt, moveSegment, patchSegment, makeCustomSegment } from '../utils/customPromptSegments.js';
+// 🔗 批次 C：材料占位符（段徽标 / 图例 / 插入按钮与发送侧同一套定义）
+import { VAR_DEFS, parseSegmentVars } from '../utils/tagPromptVars.js';
+// 📖 2026-10-03（用户需求）：自定义模式「图文教程」弹窗（内联 SVG 图解 + 可套用配方）
+import CustomModeGuide from './CustomModeGuide.vue';
 
 export default {
     name: 'AITagModal',
+    components: { CustomModeGuide }, // 📖 自定义模式图文教程
     props: {
         show: { type: Boolean, default: false },
         selectedCount: { type: Number, default: 0 },
@@ -629,6 +823,9 @@ export default {
         jailbreakPresets: { type: Array, default: () => [] },
         // 🧠 第二批改造：单套提示词链路（{ system, user, prefill }；由 App.vue 持有）
         llmRolePrompts: { type: Object, default: () => ({ system: '', user: '', prefill: '' }) },
+        // 🧩 2026-10-03：预填充兼容（三态模式 + 判定信息，状态由引擎提供）
+        prefillCompatMode: { type: String, default: 'auto' },
+        prefillCompatInfo: { type: Object, default: () => ({ key: '', mode: 'auto', entry: null }) },
         // ✨ 自定义模式（2026-10-03）：多段提示词列表（[{id, role, content}]；由 App.vue 持有并持久化）
         tagCustomSegments: { type: Array, default: () => [] },
         // 📨 2026-10-03 透明化 · 全目标展示：发送材料「分组预览」（{ sections, targetCount, isWb }；与打标发送同源生成）
@@ -638,6 +835,14 @@ export default {
         tagPromptMode: { type: String, default: 'system' },
         // 📦 每请求打包卡数（1~10；1 = 与旧行为一致）
         tagPackSize: { type: Number, default: 1 },
+        // 🌍 Q8（2026-10-03）：大幅书「最多分段数」（可调；默认 40 = 与旧行为逐字一致）
+        tagWbSegmentMax: { type: Number, default: 40 },
+        wbSegMin: { type: Number, default: 1 },
+        wbSegMax: { type: Number, default: 300 },
+        wbSegDefault: { type: Number, default: 40 },
+        // 🔗 批次 C（2026-10-03）：自定义模式下「程序材料自动附加」三档
+        //    compat（默认 = 与今天逐字一致）/ semi / manual
+        tagAutoMaterial: { type: String, default: 'compat' },
         // 📌 断点续跑账本（null = 无未完成任务）
         tagResume: { type: Object, default: null },
         // ⏭️ 增量模式：跳过已打标卡（Q7）
@@ -654,6 +859,8 @@ export default {
         isFetchingModels: { type: Boolean, default: false },
         fetchModelStatus: { type: String, default: '' },
         isAITagging: { type: Boolean, default: false },
+        // ⏸ 2026-10-03：已请求暂停、正在等当前请求收尾（UI 即时反馈用）
+        tagPausing: { type: Boolean, default: false },
         // ⏸ 打标暂停（2026-09-28）：已暂停态（底部显示「继续未完成」入口；与执行管线页按钮互补）
         tagPaused: { type: Boolean, default: false },
         aiTaggingProgress: { type: Object, default: () => ({ current: 0, total: 0, status: '' }) },
@@ -684,6 +891,8 @@ export default {
         'add-ai-candidate-tag', 'update:enableAIExtraction', 'update:customAIPrompt',
         'update:useJailbreak', 'update:jailbreakPrompt',
         'save-role-prompts', 'update:tagCustomSegments', 'map-prompts', 'set-prompt-mode',
+        // 📖 2026-10-03：教程里的「套用配方」（由 App.vue 确认后落盘）
+        'apply-guide-recipe',
         // 📨 2026-10-03「全量可编辑」：材料段覆盖 写/清（scope/key 由段对象携带）
         'set-material-override', 'clear-material-override',
         'update:tagPackSize', 'update:tagSkipTagged', 'resume-tagging', 'pause-tagging', 'fetch-available-models', 'update:apiEndpoint',
@@ -702,6 +911,42 @@ export default {
     ],
     // 🏷️ [标签大分类] 系统标签池按大分类分组（人物关系/角色设定/外貌身材...），候选标签更好找
     computed: {
+        /**
+         * 💰 本次预估（**只显示**）：请求数 / token / 覆盖度 / 被采样与分段的名单。
+         * ⚠️ 数据源与发送同源 —— 目标材料直接取自「📨 程序自动材料（发送预览）」的 target 段
+         *    （剥掉材料前缀 = 真正会被切段的正文）；固定开销取「未被丢弃」的公共材料 + 段/角色提示词。
+         *    算力在纯函数 `js/utils/tagCostEstimate.js`（含实测校准 0.65 token/字），本 computed 只做拼装。
+         */
+        costEstimate() {
+            try {
+                const mp = this.materialPreview || {};
+                const secs = Array.isArray(mp.sections) ? mp.sections : [];
+                const common = secs.filter((s) => s.kind === 'common')[0] || { parts: [] };
+                const targets = secs.filter((s) => s.kind === 'target').map((sec) => {
+                    const parts = Array.isArray(sec.parts) ? sec.parts : [];
+                    return { label: sec.label || '未命名', material: stripMaterialPrefix((parts[0] || {}).body || '') };
+                }).filter((t) => t.material.length > 0);
+
+                const isCustom = !!mp.autoMaterialMode;
+                const segs = Array.isArray(this.tagCustomSegments) ? this.tagCustomSegments : [];
+                let fixedText = '';
+                if (isCustom) {
+                    fixedText = segs.filter((s) => s.role === 'system' || s.role === 'user').map((s) => String(s.content || '')).join('\n');
+                } else {
+                    let role = { system: '', user: '' };
+                    try { role = resolveRolePromptsForKind(this.llmRolePrompts || {}, this.isWbMode ? 'wb' : 'card') || role; } catch (e) { /* 回退为空 */ }
+                    fixedText = String(role.system || '') + '\n' + String(role.user || '');
+                }
+                // 公共材料：'dropped' 不送；'taken'（已被占位符接管）与 'auto' 都算一次
+                fixedText += (common.parts || []).filter((p) => p.status !== 'dropped').map((p) => String(p.body || '')).join('');
+
+                const opts = { fixedText, segmentMax: this.tagWbSegmentMax, packSize: this.tagPackSize };
+                return this.isWbMode ? estimateWbCost({ targets, ...opts }) : estimateCardCost({ targets, ...opts });
+            } catch (e) {
+                console.warn('成本预估失败（已忽略，不影响打标）:', e);
+                return { targets: 0, requests: 0, sentChars: 0, totalChars: 0, coverage: 1, promptTokens: 0, fixedTokens: 0, heavy: [] };
+            }
+        },
         groupedSystemTags() {
             return groupTagsByCategory(this.systemCommonTags || []);
         },
@@ -724,10 +969,42 @@ export default {
             const rp = this.llmRolePrompts || {};
             return resolveSystemVariantId(rp.system || '');
         },
+        // 🌍 AI-15：世界书 System 三态（缺省 default = 内置世界书文案）
+        wbMode() {
+            const wb = (this.llmRolePrompts && this.llmRolePrompts.wb) || {};
+            return ['default', 'inherit', 'custom'].includes(wb.mode) ? wb.mode : 'default';
+        },
+        wbSystemValue() {
+            const wb = (this.llmRolePrompts && this.llmRolePrompts.wb) || {};
+            return typeof wb.system === 'string' ? wb.system : '';
+        },
+        // 🌍 世界书预设套用回显（与卡片侧同一函数，只是换一套变体表）
+        wbVariantId() {
+            return resolveSystemVariantId(this.wbSystemValue, WB_SYSTEM_PROMPT_VARIANTS);
+        },
         // ⚡ 预填充预览文字（'' = 关闭）
         trimmedPrefill() {
             const rp = this.llmRolePrompts || {};
             return String(rp.prefill || '').trim();
+        },
+        // 🔗 批次 C：占位符图例（顺序即展示顺序；`$1` 作为「材料」的别名单独提示文案）
+        varLegend() {
+            return VAR_DEFS.filter((d) => d.key !== 'jailbreak').map((d) => ({
+                key: d.key,
+                label: d.label,
+                placeholder: `{{${d.aliases[0]}}}`
+            })).concat([{ key: 'material-dollar', label: '目标材料（$1 别名）', placeholder: '$1' }]);
+        },
+        // 🔗 批次 C：未识别占位符的展示文本（在 JS 里拼好，避免模板里出现嵌套花括号导致编译失败）
+        unknownVarsText() {
+            const unk = (this.materialPreview && this.materialPreview.varInfo && this.materialPreview.varInfo.unknown) || [];
+            return unk.map((u) => '{' + '{' + u + '}' + '}').join('、');
+        },
+        // 🔗 批次 C：当前档位的一句话说明
+        autoMaterialModeHint() {            const m = this.tagAutoMaterial || 'compat';
+            if (m === 'semi') return '🟡 半自动：只有「目标材料」和「候选池与规则」自动尾随；任务说明与输出要求需你自己在段里写（或用占位符引用）。';
+            if (m === 'manual') return '⚪ 全手动：程序材料一律不自动附加 —— 记得在段里用 {{材料}} 引用内容，否则 AI 收不到任何材料。';
+            return '🟢 兼容（默认）：与你没写占位符之前的行为完全一致 —— 段内「写了」占位符的那一类会自动改为「就地插入」。';
         },
         // 📌 断点续跑：还剩多少张未完成（无任务 = 0）
         resumePending() {
@@ -752,7 +1029,21 @@ export default {
             // ⚡ 预填充折叠面板（高级，默认收起）
             prefillOpen: false,
             // 🧠 内置 System 预设变体（下拉数据源）
-            systemVariants: SYSTEM_PROMPT_VARIANTS
+            systemVariants: SYSTEM_PROMPT_VARIANTS,
+            // 🌍 AI-15：内置**世界书** System 预设变体（下拉数据源）
+            wbSystemVariants: WB_SYSTEM_PROMPT_VARIANTS,
+            // 🔗 批次 C：程序材料自动附加三档（UI 文案 + 值）
+            autoMaterialModes: [
+                { id: 'compat', label: '🟢 兼容（默认）—— 全自动附加，与旧行为一致' },
+                { id: 'semi', label: '🟡 半自动 —— 只自动附加「目标材料 + 候选池」，任务说明 / 输出要求不送' },
+                { id: 'manual', label: '⚪ 全手动 —— 一类都不自动附加，全靠段内占位符' }
+            ],
+            // 📖 2026-10-03：自定义模式图文教程弹窗显隐（纯 UI 态）
+            showCustomGuide: false,
+            // 🐌 2026-10-03 性能：超长段「已显式放行全文」表（partLockId → true）；不持久化（纯 UI 态）
+            fullParts: {},
+            // 摘要视图显示的前 N 字（模板读数用）
+            partSummaryChars: 2000
         };
     },
     methods: {
@@ -776,6 +1067,58 @@ export default {
             const v = SYSTEM_PROMPT_VARIANTS.find(x => x.id === id);
             if (!v) return;
             this.setRolePrompt('system', v.content);
+        },
+        // 🌍 AI-15：世界书 System 三态读写（与卡片侧共用同一持久化出口 `save-role-prompts`）
+        ensureWbGroup() {
+            const rp = this.llmRolePrompts;
+            if (!rp) return null;
+            if (!rp.wb || typeof rp.wb !== 'object') rp.wb = { mode: 'default', system: '' };
+            return rp.wb;
+        },
+        setWbMode(mode) {
+            const wb = this.ensureWbGroup();
+            if (!wb) return;
+            wb.mode = ['default', 'inherit', 'custom'].includes(mode) ? mode : 'default';
+            // 切到「自定义」且内容为空 → 用内置世界书文案打底（用户从默认改起，而不是面对空框）
+            if (wb.mode === 'custom' && !wb.system.trim()) wb.system = DEFAULT_SYSTEM_PROMPT_WB;
+            this.$emit('save-role-prompts');
+        },
+        setWbSystem(value) {
+            const wb = this.ensureWbGroup();
+            if (!wb) return;
+            wb.system = String(value == null ? '' : value);
+            this.$emit('save-role-prompts');
+        },
+        onPickWbVariant(id) {
+            if (id === 'custom') return;
+            const v = WB_SYSTEM_PROMPT_VARIANTS.find(x => x.id === id);
+            if (!v) return;
+            this.setWbSystem(v.content);
+        },
+        // 🔗 批次 C：材料占位符 —— 段徽标 / 图例标签 / 一键插入（插入到**最后一个段**的末尾）
+        segmentVarKeys(seg) {
+            try { return parseSegmentVars([seg]).perSegment[0].keys || []; } catch (e) { return []; }
+        },
+        varLabelOf(key) {
+            const d = VAR_DEFS.find((x) => x.key === key);
+            return d ? d.label : key;
+        },
+        insertVar(placeholder) {
+            const list = this.tagCustomSegments || [];
+            if (!list.length || !placeholder) return;
+            const last = list.length - 1;
+            const content = String(list[last].content || '');
+            const next = content ? content.replace(/\s*$/, '') + '\n' + placeholder : placeholder;
+            this.patchCustomSegment(last, { content: next });
+        },
+        // 📖 2026-10-03：教程里的配方 → 交给 App.vue 确认 + 落盘（走既有「段」持久化出口）
+        onApplyGuideRecipe(recipe) {
+            if (!recipe || !Array.isArray(recipe.segments) || !recipe.segments.length) return;
+            const segments = recipe.segments.map((s) => ({
+                ...makeCustomSegment(s && s.role ? s.role : 'system'),
+                content: String((s && s.content) || '')
+            }));
+            this.$emit('apply-guide-recipe', { name: recipe.name || '配方', segments });
         },
         // 🚨 破限预设套用：选中即覆盖当前破限词；「自定义」= 用输入框里自己的词
         onPickJailbreakPreset(id) {
@@ -847,8 +1190,23 @@ export default {
             if (!part) return '';
             return part.mode === 'live' ? String(part.liveValue || '') : String(part.body || '');
         },
+        // 🐌 2026-10-03 性能：超长段的「摘要视图」判据与文本（实测依据见 docs/bugs/BUG-性能与大库.md PK-34）
+        //    · 摘要阈值 8000 字：超过它就不再默认创建 textarea（世界书材料普遍 1 万~96 万字，角色卡多在 8 千以内 ⇒ 卡编辑体验不受影响）
+        //    · 摘要只截前 2000 字：37 段全部展开时总文本量从 491 万字降到 ~7 万字量级
+        isHeavyPart(part) {
+            return this.partValue(part).length > 8000;
+        },
+        partSummaryText(part) {
+            const t = this.partValue(part);
+            return t.length > 2000 ? t.slice(0, 2000) + '\n\n……（此处省略 ' + (t.length - 2000) + ' 字，点「📥 载入全部」查看）' : t;
+        },
+        /** 显式放行某一段的全文（只放行这一段，避免「全部展开」再触发百万级字符装载） */
+        loadFullPart(sec, part) {
+            this.fullParts[this.partLockId(sec, part)] = true;
+        },
         partTextareaRows(part) {
-            const t = this.partValue(part).replace(/\s+$/, '');
+            // ⚠️ 不要把整段（可能百万字）喂给 split：只取前 20K 字估算行数（行高按 45 字/行 + 换行数）
+            const t = this.partValue(part).slice(0, 20000).replace(/\s+$/, '');
             const est = Math.ceil(t.length / 45) + (t.split('\n').length - 1);
             return Math.max(3, Math.min(16, est || 3));
         },
@@ -859,6 +1217,24 @@ export default {
             } else {
                 this.$emit('set-material-override', { scope: part.scope, key: part.key, text });
             }
+        },
+        // 💰 2026-10-03：预估面板的显示辅助（千分位 / 百分比 / 覆盖率配色）
+        fmtNum(n) {
+            const v = Number(n);
+            if (!Number.isFinite(v)) return '0';
+            return v.toLocaleString('en-US');
+        },
+        pct(x) {
+            const v = Number(x);
+            if (!Number.isFinite(v)) return '—';
+            return (v * 100).toFixed(v >= 0.995 ? 0 : 1) + '%';
+        },
+        coverageClass(cov) {
+            const v = Number(cov);
+            if (!Number.isFinite(v)) return 'text-gray-700';
+            if (v >= 0.9) return 'text-emerald-700';
+            if (v >= 0.3) return 'text-indigo-700';
+            return 'text-amber-600';
         },
         clearMaterialOverride(sec, part) {
             this.$emit('clear-material-override', { scope: part.scope, key: part.key });

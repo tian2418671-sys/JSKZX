@@ -27,7 +27,8 @@ export function useWbAutoGroup({
     // —— 共享状态 / 工具 ——
     worldbooks, activeWorldbook,
     getWbCategory, wbFolderGroupOf, moveWbToFolder, wbDisplayName,
-    ensureWorldbookLoaded, releaseWorldbookBody,
+    // 🩹 PK-33（2026-10-03）：批量读正文走**唯一入口**（原先注入 ensure/release 自写循环 ⇒ guard:batch-read 红灯）
+    consumeWorldbookBodies,
     nativeAlert, confirmDialog, addLog, syncConfigToDiskDebounced,
     // —— 🤖 LLM 判定层：统一 API 通道 ——
     apiEndpoint, apiKey, apiType, resolveApiModel, extractReplyContent
@@ -58,32 +59,27 @@ export function useWbAutoGroup({
     const collectBookMaterials = async (onProgress) => {
         const out = [];
         const list = Array.isArray(worldbooks.value) ? worldbooks.value : [];
-        for (let i = 0; i < list.length; i++) {
-            const wb = list[i];
-            if (!wb) continue;
+        let idx = 0;
+        /** 单本：提取 key 集（**正文由唯一入口负责读入 / 用后释放**） */
+        const consumeOne = async (wb) => {
+            const i = idx++;
+            if (!wb) return;
             const key = wb.path || wb.name || '';
-            if (!key) continue;
+            if (!key) return;
             let keys = wbKeysCache.get(key);
             if (!keys) {
-                try {
-                    if (typeof ensureWorldbookLoaded === 'function') await ensureWorldbookLoaded(wb);
-                    const data = wb && wb.data ? wb.data : null;
-                    let entries = [];
-                    if (data) {
-                        if (Array.isArray(data.entries)) entries = data.entries;
-                        else if (data.entries && typeof data.entries === 'object') entries = Object.values(data.entries);
-                    }
-                    keys = [];
-                    for (const e of entries) {
-                        if (!e || typeof e !== 'object') continue;
-                        if (Array.isArray(e.key)) keys.push(...e.key.filter(Boolean).map(String));
-                        else if (e.key) keys.push(String(e.key));
-                        if (e.comment) keys.push(String(e.comment));
-                    }
-                } catch (e) {
-                    keys = [];
-                } finally {
-                    try { if (typeof releaseWorldbookBody === 'function') releaseWorldbookBody(wb); } catch (e) { /* 忽略 */ }
+                const data = wb && wb.data ? wb.data : null;
+                let entries = [];
+                if (data) {
+                    if (Array.isArray(data.entries)) entries = data.entries;
+                    else if (data.entries && typeof data.entries === 'object') entries = Object.values(data.entries);
+                }
+                keys = [];
+                for (const e of entries) {
+                    if (!e || typeof e !== 'object') continue;
+                    if (Array.isArray(e.key)) keys.push(...e.key.filter(Boolean).map(String));
+                    else if (e.key) keys.push(String(e.key));
+                    if (e.comment) keys.push(String(e.comment));
                 }
                 wbKeysCache.set(key, keys);
             }
@@ -95,6 +91,13 @@ export function useWbAutoGroup({
                 ref: wb
             });
             if (typeof onProgress === 'function' && (i & 7) === 7) onProgress(i + 1, list.length);
+        };
+        // 🩹 PK-33：走唯一入口（顺序消费 + 用后释放 + 逐本失败不中断）；缺注入时**告警不静默**
+        if (typeof consumeWorldbookBodies === 'function') {
+            await consumeWorldbookBodies(list, consumeOne, { release: true });
+        } else {
+            try { addLog('⚠️ 批量读正文入口未注入（consumeWorldbookBodies）—— 自动分组将只用内存中已有正文', 'warning'); } catch (e) { /* 忽略 */ }
+            for (const wb of list) await consumeOne(wb);
         }
         return out;
     };

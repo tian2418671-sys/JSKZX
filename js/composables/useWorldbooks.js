@@ -250,7 +250,12 @@ export function useWorldbooks({
 
         const runOne = async (item, index) => {
             try {
-                if (item && item.dataLoaded === false && item.path && typeof ensureWorldbookLoaded === 'function') {
+                // ⚠️ DF-28：判据从 `dataLoaded === false` 改为「**内存里没有正文** + 有 path」——
+                //    查重扫描等路径产出的条目**没有 `dataLoaded` 字段**（undefined），而
+                //    `ensureWorldbookLoaded` 的早退条件是 `dataLoaded !== false` ⇒ 会被**静默跳过**：
+                //    表现为「本批 failed 为空、done 计满，但 wb.data 一直是 null」，下游误判「正文无法读取」。
+                if (item && item.path && !item.data && typeof ensureWorldbookLoaded === 'function') {
+                    if (item.dataLoaded !== false) item.dataLoaded = false;   // 让载入函数的早退条件不成立
                     // batch：不逐本刷日志、不逐本 triggerRef（千本会触发千次侧栏重渲染）
                     await ensureWorldbookLoaded(item, { silent: true, batch: true });
                 }

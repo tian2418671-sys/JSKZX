@@ -117,6 +117,8 @@ const { stripInternalFields, restoreEntriesDict } = require('./main/cardFieldSan
 // 🛡️ PK-32（2026-09-25）：保存闸门（拒绝「正文集体变空」的写入）——抽到独立模块便于单测。
 //    用**真实卡片**做样本的单测见 `test/cardBodyGuard.test.mjs`。
 const { checkBodyDegrade } = require('./main/cardBodyGuard.js');
+// 📦 v2.3.6：整库冷备（一键全量快照）—— 主进程实现见 main/fullBackup.js
+const { createFullBackupService } = require('./main/fullBackup.js');
 
 
 // ================= [ 📸 历史快照配置与节流阀（可在设置面板动态更新） ] =================
@@ -655,6 +657,19 @@ function cleanupStaleConfigTmp() {
 }
 cleanupStaleConfigTmp();
 
+// 🛑 手动中断（2026-10-03 用户要求）：打标「⏸ 暂停」要**立即**掐掉在途请求，
+//    否则用户得等 120s 超时才有反应（体验=暂停失效）。
+//    只登记走 chat 通道的请求（导入 URL 等其它 fetch 不受影响）。
+const _chatAborters = new Set();
+function abortAllChatRequests(reason = '用户中断') {
+  let n = 0;
+  for (const c of Array.from(_chatAborters)) {
+    try { c.abort(new Error(reason)); n++; } catch (e) { /* 忽略 */ }
+  }
+  _chatAborters.clear();
+  return n;
+}
+
 // 🔁 通用退避重试（代码审查修复 8）：仅对 5xx / 网络错误重试，业务错误（4xx）立即返回
 async function fetchWithRetry(url, options, retries = 2, backoffMs = 800) {
   const REQUEST_TIMEOUT_MS = 120000; // ⏱️ 上游黑洞保护：120s 无响应即中止
@@ -662,14 +677,34 @@ async function fetchWithRetry(url, options, retries = 2, backoffMs = 800) {
   //    表现为"点了没反应"只转圈。加超时后明确报错，不再无限挂起）
   let lastError;
   for (let i = 0; i <= retries; i++) {
+      let __ctrl = null;   // 🛑 提升：catch 里要用 signal.reason 判「用户中断」
     try {
-      const res = await fetch(url, { ...options, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+      // 🛑 可中断：chat 通道登记 AbortController（用户点「⏸ 暂停」→ chat:abort 立即掐断，不等 120s）
+      __ctrl = (options && options.__chat === true) ? new AbortController() : null;
+      let __timer = null;
+      if (__ctrl) { _chatAborters.add(__ctrl); __timer = setTimeout(() => { try { __ctrl.abort(new Error('请求超时（120 秒无响应）')); } catch (e) { /* 忽略 */ } }, REQUEST_TIMEOUT_MS); }
+      const __opts = { ...options }; delete __opts.__chat;
+      if (__ctrl) __opts.signal = __ctrl.signal;
+      else __opts.signal = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+      let res;
+      try {
+        res = await fetch(url, __opts);
+      } finally {
+        if (__timer) clearTimeout(__timer);
+        if (__ctrl) _chatAborters.delete(__ctrl);
+      }
       if (res.ok || res.status < 500) return res; // 仅对 5xx / 网络错误重试
       lastError = new Error(`HTTP ${res.status}`);
     } catch (e) {
+      // 🛑 用户中断判定：Node fetch abort 的 e.message 是 'This operation was aborted'，
+      //    我们自己传的原因在 e.cause 或 __ctrl.signal.reason 里 ⇒ 命中就直接抛「已中断」且**不重试**
+      const __why = String((e && e.cause && (e.cause.message || e.cause)) || (e && e.message) || '')
+        + ' ' + String((__ctrl && __ctrl.signal && __ctrl.signal.reason && (__ctrl.signal.reason.message || __ctrl.signal.reason)) || '');
+      if (/用户中断/.test(__why)) throw new Error('已中断（用户暂停）');
       lastError = (e && (e.name === 'TimeoutError' || e.name === 'AbortError'))
-        ? new Error('请求超时（120 秒无响应），请检查网络或中转服务是否可用')
+        ? new Error(/用户中断/.test((e && e.message) || '') ? '已中断（用户暂停）' : '请求超时（120 秒无响应），请检查网络或中转服务是否可用')
         : e;
+      if (/已中断（用户暂停）/.test((lastError && lastError.message) || '')) throw lastError;   // 🛑 手动中断不重试
     }
     if (i < retries) {
       await new Promise(r => setTimeout(r, backoffMs * (i + 1)));
@@ -1810,6 +1845,82 @@ app.whenReady().then(() => {
       return { success: true, text };
     } catch (e) {
       return { success: false, error: e.message };
+    }
+  });
+
+  // ================= [ ⬇️ v2.3.6 通用「保存文本文件」底座 ] =================
+  // 来历：测卡会话导出（Markdown / HTML / 纯文本）需要落盘，而此前只有卡/书/预设的**专用**导出包，
+  //      没有通用文本保存通道；「一键质检流水线」的报告导出也复用本通道。
+  // 安全：**不接收任意目标路径** —— 只把内容交给系统保存对话框，由用户显式选路径（防止变成写文件后门）；
+  //      默认目录 = 下载目录（取不到再退桌面 / userData），默认文件名清洗 Windows 非法字符并截断。
+  ipcMain.handle('file:saveTextFile', async (event, params) => {
+    try {
+      const p = params || {};
+      const content = String(p.content == null ? '' : p.content);
+      const rawName = String(p.defaultName || 'export.txt');
+      const cleanName = rawName.replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_').trim().slice(0, 120) || 'export.txt';
+      let dir = '';
+      try { dir = app.getPath('downloads'); } catch (e) { dir = ''; }
+      if (!dir) { try { dir = app.getPath('desktop'); } catch (e) { dir = ''; } }
+      if (!dir) { try { dir = app.getPath('userData'); } catch (e) { dir = ''; } }
+      const filters = Array.isArray(p.filters) && p.filters.length
+        ? p.filters
+        : [{ name: '文本文件', extensions: ['txt'] }];
+      // 🧪 e2e/探针专用（默认关闭）：`JSK_TEST_SAVE_PATH=<绝对路径>` 时**跳过保存对话框**直接写该路径，
+      //    供 CDP 探针无人值守验证「导出真的落盘、字节数正确」（原生模态窗无法被自动化点击）。
+      //    ⚠️ 仅该环境变量开启时生效；正常运行（未设变量）行为**完全不变**（仍走系统对话框 + 用户显式选路径）。
+      const testPath = process.env.JSK_TEST_SAVE_PATH;
+      let filePath = '';
+      if (testPath) {
+        filePath = String(testPath);
+      } else {
+        const picked = await dialog.showSaveDialog({
+          title: '保存导出文件',
+          defaultPath: dir ? path.join(dir, cleanName) : cleanName,
+          filters
+        });
+        if (picked.canceled || !picked.filePath) return { ok: false, canceled: true, path: '' };
+        filePath = picked.filePath;
+      }
+      const encoding = p.encoding === 'base64' ? 'base64' : 'utf-8';
+      await fs.promises.writeFile(filePath, content, encoding);
+      return { ok: true, canceled: false, path: filePath, bytes: Buffer.byteLength(content, 'utf-8'), testPath: !!testPath };
+    } catch (e) {
+      return { ok: false, canceled: false, path: '', error: (e && e.message) ? e.message : String(e) };
+    }
+  });
+
+  // ================= [ 📦 v2.3.6 整库冷备（一键全量快照） ] =================
+  // 定位：配置备份 / 单文件快照之上的「整库时间点」。规格见 docs/规格与计划/功能规格/整库冷备-实现规格.md
+  //   · 逐文件复制 + 进度事件（可取消）；`_manifest.json` 是唯一权威（中断的冷备不会被 list 认可）
+  //   · 防呆全部在**主进程**（目标嵌套 / 空间不足 / 同时只允许一个任务 / 备份中禁恢复）
+  //   · 恢复 = 改名 + 复制（安全优先，失败不删任何备份）；删除走 shell.trashItem（回收站，不硬删）
+  const fullBackupService = createFullBackupService({
+    appVersion: (() => { try { return app.getVersion(); } catch (e) { return ''; } })(),
+    shell,
+    onProgress: (payload) => {
+      try {
+        for (const w of BrowserWindow.getAllWindows()) {
+          if (w && !w.isDestroyed() && w.webContents) w.webContents.send('backup:full:progress', payload);
+        }
+      } catch (e) { /* 进度事件失败不影响冷备本身 */ }
+    }
+  });
+  ipcMain.handle('backup:full:create', async (event, params) => fullBackupService.createBackup(params || {}));
+  ipcMain.handle('backup:full:list', async (event, params) => fullBackupService.listBackups(params || {}));
+  ipcMain.handle('backup:full:restore', async (event, params) => fullBackupService.restoreBackup(params || {}));
+  ipcMain.handle('backup:full:delete', async (event, params) => fullBackupService.deleteBackup(params || {}));
+  ipcMain.handle('backup:full:cancel', async () => fullBackupService.cancel());
+  // 打开冷备目录（`system:openPath` 有白名单，冷备目录通常不在白名单内 ⇒ 单独给一个只认冷备根的入口）
+  ipcMain.handle('backup:full:openDir', async (event, targetPath) => {
+    try {
+      const p = String(targetPath || '');
+      if (!p) return { ok: false, error: '未指定目录' };
+      await fs.promises.mkdir(p, { recursive: true }).catch(() => {});
+      const err = await shell.openPath(p);
+      return err ? { ok: false, error: err } : { ok: true };
+    } catch (e) {
+      return { ok: false, error: (e && e.message) ? e.message : String(e) };
     }
   });
 
@@ -4542,6 +4653,12 @@ app.whenReady().then(() => {
   };
 
   // IPC：发送大模型 API 请求（经主进程转发，绕过前端 CORS 限制；支持 OpenAI 兼容 / Anthropic 双协议）
+  // 🛑 手动中断在途 chat 请求（打标「⏸ 暂停」用）：立即 abort，不等 120s 超时
+  ipcMain.handle('chat:abort', async () => {
+    const n = abortAllChatRequests('用户中断');
+    return { ok: true, aborted: n };
+  });
+
   ipcMain.handle('chat:send', async (event, endpoint, payload, apiKey, apiType) => {
     try {
       const type = apiType === 'anthropic' ? 'anthropic' : 'openai';
@@ -4585,7 +4702,7 @@ app.whenReady().then(() => {
         bodyData = payload;
       }
 
-      const response = await fetchWithRetry(fetchUrl, {
+      const response = await fetchWithRetry(fetchUrl, { __chat: true,
         method: 'POST',
         headers: headers,
         body: JSON.stringify(bodyData)
