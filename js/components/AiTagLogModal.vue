@@ -95,6 +95,8 @@ export default {
         log: { type: Array, default: () => [] },                  // [{ at, level, text }]
         running: { type: Boolean, default: false },               // 打标进行中
         paused: { type: Boolean, default: false },                // ⏸ 已暂停（可继续）
+        // ⏸ 2026-10-03：已请求暂停、正在收尾（App 传了；漏声明会 Vue warn）
+        tagPausing: { type: Boolean, default: false },
         progress: { type: Object, default: () => ({}) }           // { current, total, status }
     },
     emits: ['close', 'clear', 'pause-tagging'],

@@ -252,20 +252,28 @@ export function migrateLegacyPresets(list) {
  * 思考型模型会把推理包在这些标签里（大小写不敏感）。
  * 解析前先剥掉，减少噪声；**剥完解析失败则回退到原始文本**（防误剥真结果）。
  */
-export const THINK_BLOCK_NAMES = ['think', 'thinking', 'reasoning', 'thought', 'analysis', '思考', '推理', '分析'];
+export const THINK_BLOCK_NAMES = ['think', 'thinking', 'reasoning', 'thought', 'analysis', 'cot', '思考', '推理', '分析', '思考过程', '推理过程'];
+
+/** 🧠 AI-19：无标记推理的 **代码围栏** 形态（```` ```think ```` / ```` ```reasoning ```` / ```` ```思考 ````） */
+const THINK_FENCE_RE = /```[ \t]*(?:think|thinking|reasoning|thought|analysis|cot|思考|推理|分析)[^\n]*\n([\s\S]*?)```/gi;
 
 /**
  * 剥掉模型输出的「思考块」。
  *
- * 支持两种常见包裹形式（都是实测见过的）：
+ * 支持三种常见包裹形式（都是实测见过的）：
  * · **尖括号**：` thinking…` / `<thinking>…</thinking>` / `<reasoning>…</reasoning>`
  * · **中文方头括号**：`【思考】…【/思考】` / `【推理】…【/推理】`（部分中文模型用这个）
+ * · **🧠 代码围栏（AI-19 补）**：` ```think ` / ` ```reasoning ` / ` ```思考 ` 包裹的推理块
+ *   （用户实测的思维链泄漏形态之一；`parseFromCleanText` 只剥 ` ```json ` 与裸 ` ``` `，
+ *    围栏里的推理文字**会原样留在文本里**）
  *
  * @param {string} text
  * @returns {string}
  */
 export function stripThinkingBlocks(text) {
     let out = String(text == null ? '' : text);
+    // ⓪ 🧠 AI-19：代码围栏形态的推理块（先剥 —— 否则整块会被层③当自由文本拆成标签）
+    out = out.replace(THINK_FENCE_RE, '');
     for (const name of THINK_BLOCK_NAMES) {
         // ① 尖括号形式：<name>…</name>
         out = out.replace(new RegExp(`<\\s*${name}\\s*>[\\s\\S]*?<\\s*/\\s*${name}\\s*>`, 'gi'), '');
@@ -407,7 +415,13 @@ export function parseStructuredTags(rawReply, opts = {}) {
  * |---|---|
  * | ① | `<tags>…</tags>` / `<标签>…</标签>` 精确边界（**取最后一个有效包裹**） |
  * | ② | JSON 数组正则（**从后往前**找第一个能解析成数组的方括号组 → 贪婪兜底处理嵌套） |
- * | ③ | 按 `[,，、\n]` 暴力拆分 |
+ * | ③ | **逐行**取候选（只认「像标签」的项；疑似的句子 / 推理**一律丢弃**） |
+ *
+ * 🧠 **AI-19（2026-10-04）**：层③ 原来是「对**整段** `split(/[,，、\n]/)`」——
+ *    对**没有标记的纯文本推理**（无 `[`、无 `<thinking>`）等于把推理句切开后逐片当标签返回
+ *    （实测 7/7 条全是推理）。现在改为：**按「行 / 列表项」取候选**（整行像句子/推理 ⇒ 整行 1 候选，
+ *    不再被 `，` 切碎），候选统一过 `sanitizeTagList`（新增推理特征判据），
+ *    **残留占比 ≥ 30% ⇒ 整条判失败**。
  *
  * @param {string} raw
  * @returns {{tags:string[], layer:1|2|3, ok:boolean, reason?:string}}
@@ -432,7 +446,7 @@ function parseFromCleanText(raw) {
     // ①-a 优先：包裹内是**合法 JSON 数组**的（从后往前找 —— 真答案通常在最末）
     for (let i = wraps.length - 1; i >= 0; i--) {
         const arr = parseJsonArray(wraps[i][1]);
-        if (arr.length) return { tags: arr, layer: 1, ok: true };
+        if (arr.length) return { tags: sanitizeTagList(arr), layer: 1, ok: true };
     }
     // ①-b 退一步：包裹内是**纯文本列表**（如 `奇幻, 骑士`）—— 同样从后往前
     for (let i = wraps.length - 1; i >= 0; i--) {
@@ -446,22 +460,65 @@ function parseFromCleanText(raw) {
     const brackets = Array.from(text.matchAll(/\[[\s\S]*?\]/g));
     for (let i = brackets.length - 1; i >= 0; i--) {
         const arr = parseJsonArray(brackets[i][0]);
-        if (arr.length) return { tags: arr, layer: 2, ok: true };
+        if (arr.length) return { tags: sanitizeTagList(arr), layer: 2, ok: true };
     }
     // ②-b 二次兜底：**贪婪**匹配（处理嵌套数组 `["a",["b"]]` —— 非贪婪会截断成非法 JSON）
     const greedy = text.match(/\[[\s\S]*\]/);
     if (greedy) {
         const arr = parseJsonArray(greedy[0]);
-        if (arr.length) return { tags: arr, layer: 2, ok: true };
+        if (arr.length) return { tags: sanitizeTagList(arr), layer: 2, ok: true };
+    }
+    // ②-c 裸 JSON 数组（**无方括号匹配歧义时才可能**，如 `["a","b"]` 整串——
+    //   ②-a 的非贪婪 `\[[\s\S]*?\]` 会截成非法 JSON）：
+    //   🧠 AI-19：非 llmOnly 链路旧实现是「贪婪正则 + JSON.parse」，收紧前须补上这一层，
+    //   否则「最标准输出」反而掉进层③被按行拆开。
+    if (/^[[{]/.test(text)) {
+        const arr = parseJsonArray(text);
+        if (arr.length) return { tags: sanitizeTagList(arr), layer: 2, ok: true };
     }
 
-    // ── 层③：暴力拆分（最后兜底）──
-    //   ⚠️ 只有前两层都失败才走这里 —— 它**无法区分标签与解释文字**，是最脏的一层
-    //   🧽 结果必须过 sanitizeTagList（AI-10 实测：模型续写常残留 `</tags>`、中文引号、中文字间空格，
-    //      不清理会被当成标签物理写入卡）
-    const brute = sanitizeTagList(text.split(/[,，、\n]/));
+    // ── 层③：逐行兜底（最后兜底）──
+    //   ⚠️ 只有前两层都失败才走这里 —— 它**无法区分标签与解释文字**，是最脏的一层。
+    //   🧠 AI-19：**按「行 / 列表项」切候选，而不是整段 split** ——
+    //      · 行本身像句子 / 推理（`tagResidueReasons` 宽松档）⇒ **整行当 1 个候选**（随后被项级判据丢弃，
+    //        不会被 `，` 切成一堆「看起来像标签」的推理碎片）；
+    //      · 否则按 `,，、` 拆；行首列表符（`1.` / `- `）先剥再拆；
+    //      · 候选统一过 `sanitizeTagList`（含推理判据）；**残留占比 ≥ 30% 或全被判推理 ⇒ 整条判失败**。
+    const rawCandidates = [];
+    for (const line of text.split(/\r?\n/)) {
+        const L = line.trim();
+        if (!L) continue;
+        if (tagResidueReasons(L, { lenient: true }).length) { rawCandidates.push(L); continue; } // 🗑️ 疑似整行推理
+        const bare = L.replace(/^[-•·*]+\s+/, '').replace(/^\d+\s*[.、)）]\s*/, '').trim();
+        rawCandidates.push(...splitCandidateLine(bare));
+    }
+    const brute = sanitizeTagList(rawCandidates, { strict: true });
     if (brute.length) return { tags: brute, layer: 3, ok: true };
+    if (rawCandidates.length) {
+        // 🛑 AI-19：候选被「推理 / 句子残留」判据清空 ⇒ **如实判失败**，宁缺毋滥
+        return { tags: [], layer: 3, ok: false, reason: '疑似思维链被当作标签（已拒绝写入）' };
+    }
     return { tags: [], layer: 3, ok: false, reason: '三层解析均未取到标签' };
+}
+
+/**
+ * 🧠 AI-19：把**一行**（已剥列表符）文本拆成候选标签。
+ *
+ * 规则：带分隔符（`,，、；;`）⇒ 按分隔符拆；单段（无分隔符）⇒ 整段 1 个候选
+ * （交给项级判据判定「像不像标签」）。
+ *
+ * 为什么单段不再按空格拆：中文推理常写成「首先看描述 这是一个剑与魔法世界」，
+ * 按空格拆会产生「看起来像标签」的碎片；而真标签里的空格是**词内**空格
+ * （`Sci-Fi (科幻)` / `现代 都市`）——被 `sanitizeTagList` 折叠为中文无空格形态。
+ *
+ * @param {string} line
+ * @returns {string[]}
+ */
+function splitCandidateLine(line) {
+    const L = String(line == null ? '' : line).trim();
+    if (!L) return [];
+    if (/[,，、；;]/.test(L)) return L.split(/[,，、；;]/).map(s => s.trim()).filter(Boolean);
+    return [L];
 }
 
 /**
@@ -495,38 +552,90 @@ function parseArrayLike(text) {
     // 优先按 JSON 解析（`["a","b"]`）
     try {
         const parsed = JSON.parse(t);
-        if (Array.isArray(parsed)) return parsed.map(x => String(x == null ? '' : x).trim()).filter(Boolean);
+        if (Array.isArray(parsed)) return sanitizeTagList(parsed.flat(Infinity));
         if (typeof parsed === 'string') return [parsed.trim()].filter(Boolean);
     } catch (e) { /* 不是 JSON，继续 */ }
     // 退化为「按标点拆分」（`a, b, c` 或 `a、b`）—— 统一过 sanitizeTagList
     // （🧩 根治配套：预填充拼接后，层①-b「包裹内纯文本」成为常规命中路径——如 `<tags>[现代/…、</tags>`；
     //   若不过清洗，`[`、中文字间空格等会随标签落盘）
-    return sanitizeTagList(t.split(/[,，、\n]/));
+    // 🧠 AI-19：这里的输入同样是「最脏候选」（包裹内也可能是一整段推理）⇒ `strict`
+    return sanitizeTagList(t.split(/[,，、\n]/), { strict: true });
 }
+
+/**
+ * 🧠 AI-19：**推理 / 句子残留判据** —— 判断一个「准标签」是不是模型思维链或解释文字的碎片。
+ *
+ * 背景（2026-10-04 用户实测「把我一大堆思维链提取出来了」）：旧 `sanitizeTagList` 的项级门槛
+ * 只有「空 / 纯数字 / > 40 字」，于是**无标记的纯文本推理**（没有 `[`、没有 `<thinking>`）
+ * 被层③ `split(/[,，、\n]/)` 切成 ≤ 40 字的片段后**全部当标签返回**。本函数就是那条缺失的判据。
+ *
+ * 判据（任一命中即「疑似推理残留」）：
+ *   A. **跨行**：标签里不可能有换行（多行 = 段落）；
+ *   B. **句子标点**：含 `。！？`（**最多容忍 1 个** —— 容忍 `复仇。重生` 这类顿挫式标签）；单候选里同类分隔标点 ≥ 2 个；
+ *   C. **推理特征开头** 且剩余 ≥ 2 字：`让我 / 首先 / 其次 / 然后 / 接下来 / 最后 / 因此 / 综上 / 属于 /
+ *      需要 / 可以看 / 这段 / 这张 / 该卡 / 材料 / 编号 / step N / ^answer:` 等；
+ *   D. **句特征**：`这张卡 / 这张卡片 / 这段描述 / 该卡 / 上述 / 上下文 / 前文 / 材料中`，
+ *      或「因此…所以 / 因为…所以」这类因果句；
+ *   E. **超长**：> `MAX_TAG_LEN`（正常标签 ≤ 20 字）。
+ *
+ * @param {string} text 已做过字符级清理的候选标签
+ * @param {{lenient?:boolean}} [opts] `lenient` = 宽松档（用于**逐行判定**：忽略超长 —— 真列表行常较长）
+ * @returns {string[]} 命中的判据名（空数组 = 通过）
+ */
+export function tagResidueReasons(text, opts = {}) {
+    const t = String(text == null ? '' : text);
+    if (!t) return [];
+    const reasons = [];
+    if (/[\r\n]/.test(t)) reasons.push('跨行');
+    const endMarks = (t.match(/[。！？!?]/g) || []).length;
+    if (endMarks > 1) reasons.push('多句标点');
+    else if (endMarks === 1 && t.length <= 2) reasons.push('纯标点');
+    // 推理特征开头（须剩余 ≥ 2 字 —— 覆盖「其次看性格」这类推理碎片；
+    //   代价：`最后的人类幸存者` 这类**以顺序词开头的长标签**会被丢弃 —— 层③本就是最脏兜底，宁缺毋滥）
+    const head = t.match(/^(?:让我|让我先|我先|首先|其次|再次|然后|接下来|最后|因此|所以|综上|总结|需要|可以看|可以看到|能看出|这段|这张|该卡|这本|此卡|材料|编号|answer|step\s*\d|\d+\s*[.、)）])/i);
+    if (head && t.slice(head[0].length).trim().length >= 2) reasons.push('推理特征开头');
+    if (/^属于/.test(t) && t.length >= 4) reasons.push('推理特征开头');
+    // 句特征（多分隔标点只在**单候选**里才判 —— 整行列表由调用方先拆，不在此处误杀）
+    if ((t.match(/[，,；;]/g) || []).length >= 2) reasons.push('多分隔标点');
+    if (/(?:这张卡|这张卡片|这段描述|这段文字|该卡|上述|上下文|前文|材料中|原文中)/.test(t)) reasons.push('句特征');
+    if (/因此.*所以|因为.*所以/.test(t)) reasons.push('因果句');
+    // 超长（宽松档只跳过这一条 —— 逐行判定时真列表行可能整行较长，拆分后由项级门槛兜底）
+    if (!opts.lenient && t.length > MAX_TAG_LEN) reasons.push('超长');
+    return reasons;
+}
+
+/** 🧠 AI-19：项级长度上限（超长项基本是解释文字；正常标签 ≤ 20 字） */
+export const MAX_TAG_LEN = 40;
 
 /**
  * 🧽 标签清洗：把「准标签」列表过一遍统一清理 → 干净、去重（保序）的标签数组。
  *
- * 第③层（暴力拆分）拿到的就是**模型最不守规矩**的输出——它无法区分「标签」与「解释文字」，
+ * 第③层（逐行兜底）拿到的就是**模型最不守规矩**的输出——它无法区分「标签」与「解释文字」，
  * 因此约束必须**按最脏输入设计，一次做全**（2026-09-25 真实打标实测 · AI-10）：
  *   A. 字符级：白空格变形（NBSP / 全角空格 / 零宽 / Tab）归一 → 剥 `<tags>/</tags>/<标签>` 包装标记
  *      → 剥引号（中英 `“”‘’「」『』` 与 ASCII）与方括号 → 剥 Markdown 粗斜体（`**` / `__`）
  *      → 剥行首列表符 / 编号（`- ` / `• ` / `1. ` / `2、`）→ 剥首尾残留标点（`、，,；;：:。`）
  *      → 折叠斜杠两侧与中文字间空格；
- *   B. 项级门槛：空项 / 纯标记 / 纯数字 / 超长（> 40 字符，基本是解释文字）→ 直接丢弃；
+ *   B. 项级门槛：空项 / 纯标记 / 纯数字 / 超长（> 40 字符）/ **🧠 AI-19：推理·句子残留**（`tagResidueReasons`）→ 丢弃；
  *   C. 去重（保序）。
  *
  * @param {Iterable<string>} list 准标签列表（可为任意脏值）
+ * @param {{strict?:boolean, lenient?:boolean}} [opts] 🧠 AI-19：`strict` = **请求方声明「这批候选最脏」**
+ *   （层③ / 非结构化拆分的调用方）⇒ **推理残留占比 ≥ 30% 时整批清空**（宁缺毋滥）。
  * @returns {string[]}
  */
-export function sanitizeTagList(list) {
+export function sanitizeTagList(list, opts = {}) {
     const out = [];
     const seen = new Set();
     const MARK_RE = /<\s*\/?\s*(?:tags?|标签)\s*>/gi;
-    const MAX_TAG_LEN = 40; // 超长项基本是解释文字（正常标签 ≤ 20 字），宁缺毋滥
+    let droppedResidue = 0;
+    let total = 0;
     for (const raw of Array.isArray(list) ? list : []) {
+        const src = String(raw == null ? '' : raw);
+        if (!src.trim()) continue;
+        total++;
         // ── A. 字符级清理 ──
-        let t = String(raw == null ? '' : raw)
+        let t = src
             .replace(/[\u00a0\u3000]/g, ' ')            // NBSP / 全角空格 → 普通空格
             .replace(/[\u200b-\u200d\ufeff]/g, '')      // 零宽字符删除
             .replace(/\t/g, ' ')                        // Tab → 空格
@@ -545,12 +654,15 @@ export function sanitizeTagList(list) {
         // ── B. 项级门槛 ──
         if (!t) continue;                               // 空 / 纯标记
         if (/^\d+$/.test(t)) continue;                  // 纯数字（编号残留）
-        if (t.length > MAX_TAG_LEN) continue;           // 超长（疑似解释文字）
+        if (t.length > MAX_TAG_LEN) { droppedResidue++; continue; }  // 超长（疑似解释文字）
+        if (tagResidueReasons(t, opts).length) { droppedResidue++; continue; } // 🧠 AI-19：推理 / 句子残留
         // ── C. 去重（保序）──
         if (seen.has(t)) continue;
         seen.add(t);
         out.push(t);
     }
+    // 🧠 AI-19：最脏候选里推理残留占比过高 ⇒ 整批判废（调用方据此返回失败 / 告警，而不是把推理写盘）
+    if (opts.strict && total > 0 && droppedResidue / total >= 0.3) return [];
     return out;
 }
 

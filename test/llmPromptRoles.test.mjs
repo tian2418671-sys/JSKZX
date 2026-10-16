@@ -23,6 +23,7 @@ import {
     normalizeWbPrompt, resolveRolePromptsForKind,
     buildLlmMessages, willUsePrefill, parseStructuredTags, outputFormatRule,
     packedOutputRule, parsePackedTags, stripThinkingBlocks, sanitizeTagList,
+    tagResidueReasons,
     composeTagPromptHead, composeTagPromptHeadParts, splitTextSegments
 } from '../js/utils/llmPromptRoles.js';
 
@@ -711,6 +712,223 @@ describe('composeTagPromptHead — 池开关 / 自由提取 / 附加要求', () 
         assert.ok(h.includes('【规则】'));
         assert.ok(!h.includes('严格限制'));
         assert.equal(composeTagPromptHead({}), composeTagPromptHead());
+    });
+});
+
+// ═══════════════════════════════════════════════════════════════
+// 🧠 AI-19（2026-10-04）：思维链污染防线 —— 用户实测「把我一大堆思维链提取出来了」
+//    · 症状：AI 打标把模型的**思维链/思考过程**当成标签提取出来（打出的标签里混进一大段推理文字）
+//    · 病灶：第③层兜底对**任意文本**做 `split(/[,，、\n]/)`，只靠「空 / 纯数字 / > 40 字」过滤 ⇒
+//      无标记的纯文本推理被切成 ≤40 字的片段后**全部当标签返回**（且 ok=true）
+//    · 修：层③改「按行 / 列表项取候选」+ `sanitizeTagList` 新增推理特征判据 + **残留占比 ≥30% 判失败**
+// ═══════════════════════════════════════════════════════════════
+describe('AI-19 思维链污染防线 — 形态①：正常 JSON 数组（回归）', () => {
+    test('纯 JSON 数组 → 干净标签，层②', () => {
+        const r = parseStructuredTags('["奇幻","骑士"]');
+        assert.equal(r.ok, true);
+        assert.deepEqual(r.tags, ['奇幻', '骑士']);
+    });
+    test('🛡️ 裸 JSON 数组（整串）→ 不得掉进层③按行拆（AI-19 收紧后必须补的口子）', () => {
+        const r = parseStructuredTags('["现代/都市", "奇幻/异世界"]');
+        assert.equal(r.ok, true);
+        assert.equal(r.layer, 2);
+        assert.deepEqual(r.tags, ['现代/都市', '奇幻/异世界']);
+    });
+    test('嵌套数组（`["a",["b","c"]]`）→ 展平且全部为字符串', () => {
+        const r = parseStructuredTags('["a",["b","c"]]');
+        assert.deepEqual(r.tags, ['a', 'b', 'c']);
+        for (const t of r.tags) assert.equal(typeof t, 'string');
+    });
+    test('<tags> 包裹的 JSON 数组 → 干净标签，层①', () => {
+        const r = parseStructuredTags('<tags>["奇幻","骑士"]</tags>');
+        assert.equal(r.ok, true);
+        assert.equal(r.layer, 1);
+        assert.deepEqual(r.tags, ['奇幻', '骑士']);
+    });
+    test('代码围栏包裹的数组 → 干净标签', () => {
+        const r = parseStructuredTags('```json\n["奇幻","骑士"]\n```');
+        assert.deepEqual(r.tags, ['奇幻', '骑士']);
+    });
+});
+
+describe('AI-19 思维链污染防线 — 形态②：数组前后带大段中文推理', () => {
+    const raw = [
+        '让我先分析一下这张卡。',
+        '1. 首先看描述：这是一个剑与魔法的世界，有骑士团与魔法学院；',
+        '2. 然后看性格：冷静、理性、重视秩序，属于守序阵营；',
+        '3. 因此可以归纳出奇幻、骑士这两个标签。',
+        '最终结果：',
+        '["奇幻", "骑士"]',
+        '以上就是我的分析。'
+    ].join('\n');
+    test('层② 命中最末数组 → 标签干净、无推理残留', () => {
+        const r = parseStructuredTags(raw);
+        assert.equal(r.ok, true);
+        assert.deepEqual(r.tags, ['奇幻', '骑士']);
+        for (const t of r.tags) assert.ok(!/首先|然后|因此|让我|分析/.test(t), `标签含推理残留：${t}`);
+    });
+    test('思维链里的 `[1]` 编号不会污染（从后往前取合法数组）', () => {
+        const r = parseStructuredTags('步骤 [1] 完成\n参考 [示例]\n结果：["奇幻","骑士"]');
+        assert.deepEqual(r.tags, ['奇幻', '骑士']);
+    });
+});
+
+describe('AI-19 思维链污染防线 — 形态③：带 <thinking> / ```think 标记', () => {
+    test('<thinking> 块被剥离 → 只取 <tags> 里的标签', () => {
+        const raw = '<thinking>我先看看描述内容。这段文字提到了魔法学院和骑士团，所以题材应该是奇幻。同时性格冷静理性。</thinking>\n<tags>["奇幻","骑士"]</tags>';
+        const r = parseStructuredTags(raw);
+        assert.equal(r.ok, true);
+        assert.deepEqual(r.tags, ['奇幻', '骑士']);
+    });
+    test('```think 围栏（无尖括号标记）会被剥掉，不落第③层', () => {
+        const raw = '```think\n我需要先判断题材，再判断身份。题材是奇幻，身份是骑士，属于守序阵营。\n```\n["奇幻","骑士"]';
+        const r = parseStructuredTags(raw);
+        assert.equal(r.ok, true);
+        assert.deepEqual(r.tags, ['奇幻', '骑士']);
+    });
+    test('剥完没有标签（只有推理块）⇒ ok=false，不把推理当标签', () => {
+        const r = parseStructuredTags('<thinking>这段描述提到了魔法学院与骑士团，所以题材属于奇幻，身份属于骑士。</thinking>');
+        assert.equal(r.ok, false);
+        assert.deepEqual(r.tags, []);
+    });
+    test('🛡️ 剥过头时回退原文仍能取到数组（防误剥真结果）', () => {
+        const raw = '<thinking>草稿</thinking>["奇幻"]';
+        assert.deepEqual(parseStructuredTags(raw).tags, ['奇幻']);
+    });
+});
+
+describe('AI-19 思维链污染防线 — 形态④：思维链与数组都在 content 里', () => {
+    test('推理在前、数组在后（同一字段）→ 只取数组', () => {
+        const raw = '用户的卡描述提到了魔法与骑士。首先我要判断题材，然后是身份。\n因此，标签如下：\n["奇幻", "骑士", "魔法"]\n（以上为推理过程，最终标签已给出）';
+        const r = parseStructuredTags(raw);
+        assert.equal(r.ok, true);
+        assert.deepEqual(r.tags, ['奇幻', '骑士', '魔法']);
+    });
+    test('数组在推理中间 → 仍取该数组，不吞前后推理', () => {
+        const raw = '让我想想……\n["奇幻","骑士"]\n上面就是结论，理由如上。';
+        assert.deepEqual(parseStructuredTags(raw).tags, ['奇幻', '骑士']);
+    });
+});
+
+describe('AI-19 思维链污染防线 — 形态⑤：只有推理、没有标签（必须失败）', () => {
+    test('编号式推理 → ok=false（**不得**把推理当标签）', () => {
+        const raw = [
+            '1. 首先看人物设定，这是一个剑与魔法世界里的骑士',
+            '2. 其次看性格，冷静理性重视秩序，属于守序阵营',
+            '3. 因此可以归纳出奇幻、骑士这两个标签'
+        ].join('\n');
+        const r = parseStructuredTags(raw);
+        assert.equal(r.ok, false);
+        assert.deepEqual(r.tags, []);
+        assert.match(r.reason, /思维链/);
+    });
+    test('散文式推理（只有句号）→ ok=false', () => {
+        const raw = '让我一步步分析这张卡片的内容。这段描述提到了魔法学院与骑士团，所以题材属于奇幻，身份属于骑士。因此可以给出奇幻与骑士两个标签。';
+        const r = parseStructuredTags(raw);
+        assert.equal(r.ok, false);
+        assert.deepEqual(r.tags, []);
+    });
+    test('换行列表式推理 → ok=false', () => {
+        const raw = '让我先分析卡片内容\n这段描述提到了魔法学院\n所以题材是奇幻\n身份是骑士';
+        const r = parseStructuredTags(raw);
+        assert.equal(r.ok, false);
+        assert.deepEqual(r.tags, []);
+    });
+    test('纯推理短语（无换行、无编号）→ 不返回推理片段', () => {
+        const r = parseStructuredTags('首先看人物设定，这是一个剑与魔法世界里的骑士');
+        assert.equal(r.ok, false);
+        assert.deepEqual(r.tags, []);
+    });
+    test('英文思维链（step 1 / let me / therefore）→ ok=false', () => {
+        const raw = 'Step 1: read the description.\nLet me check the personality.\nTherefore the tags are fantasy and knight.';
+        const r = parseStructuredTags(raw);
+        assert.equal(r.ok, false);
+        assert.deepEqual(r.tags, []);
+    });
+});
+
+describe('AI-19 思维链污染防线 — 形态⑥：reasoning_content 另有内容时只取 content 的标签', () => {
+    // 打标链路取的是 `extractReplyContent(result)` = content 字段；`reasoning_content` 只进日志（展示用）。
+    // 这里用「同一条回复的两个字段」模拟：content 干净、reasoning 是推理 ⇒ 解析只吃 content。
+    const result = {
+        data: {
+            choices: [{
+                message: {
+                    content: '["奇幻","骑士"]',
+                    reasoning_content: '让我先分析这张卡：首先看描述，这是一个剑与魔法世界；然后看性格，冷静理性。因此标签是奇幻、骑士。'
+                }
+            }]
+        }
+    };
+    const extractReplyContent = (r) => (r.data.choices[0].message.content) || '';
+    test('只解析 content → 标签干净，reasoning_content 不进标签', () => {
+        const r = parseStructuredTags(extractReplyContent(result));
+        assert.deepEqual(r.tags, ['奇幻', '骑士']);
+    });
+    test('若误把 reasoning_content 当回复 → 必须判失败（而不是把它写成标签）', () => {
+        const r = parseStructuredTags(result.data.choices[0].message.reasoning_content);
+        assert.equal(r.ok, false);
+        assert.deepEqual(r.tags, []);
+    });
+});
+
+describe('AI-19 思维链污染防线 — 「宁缺毋滥」不得误杀真标签', () => {
+    test('真中文标签（含单字 / 大类/子类）照常通过层③', () => {
+        const r = parseStructuredTags('奇幻、骑士、魔法');
+        assert.equal(r.ok, true);
+        assert.equal(r.layer, 3);
+        assert.deepEqual(r.tags, ['奇幻', '骑士', '魔法']);
+    });
+    test('带编号的**真列表**照常通过（剥编号不剥内容）', () => {
+        const r = parseStructuredTags('1. 日常\n2. 校园\n3. 恋爱');
+        assert.equal(r.ok, true);
+        assert.deepEqual(r.tags, ['日常', '校园', '恋爱']);
+    });
+    test('换行分隔的真标签照常通过', () => {
+        const r = parseStructuredTags('奇幻\n骑士');
+        assert.equal(r.ok, true);
+        assert.deepEqual(r.tags, ['奇幻', '骑士']);
+    });
+    test('带顿挫式句号的真标签不被误杀（单个 `。`）', () => {
+        assert.deepEqual(sanitizeTagList(['复仇。重生', '奇幻/异世界']), ['复仇。重生', '奇幻/异世界']);
+    });
+    test('词内空格 / 括号的英文标签不被误杀', () => {
+        assert.deepEqual(sanitizeTagList(['Sci-Fi (科幻)', 'Romance (恋爱)']), ['Sci-Fi (科幻)', 'Romance (恋爱)']);
+    });
+    test('以「最后」等词开头的长标签：AI-19 起按推理丢弃（**宁缺毋滥的已知取舍**）', () => {
+        assert.deepEqual(sanitizeTagList(['最后的人类幸存者', '奇幻']), ['奇幻']);
+    });
+    test('顺序词开头的短推理碎片也要丢（`其次看性格` / `然后看设定`）', () => {
+        assert.deepEqual(sanitizeTagList(['其次看性格', '然后看设定', '奇幻']), ['奇幻']);
+    });
+});
+
+describe('sanitizeTagList — 句子 / 推理残留判据（AI-19）', () => {
+    test('整句（含句末标点）→ 丢弃', () => {
+        assert.deepEqual(sanitizeTagList(['这段描述提到了魔法学院。', '奇幻']), ['奇幻']);
+    });
+    test('推理特征开头 → 丢弃', () => {
+        assert.deepEqual(sanitizeTagList(['首先看人物设定', '其次看性格', '因此可以归纳出奇幻', '奇幻']), ['奇幻']);
+    });
+    test('因果句 / 句特征 → 丢弃', () => {
+        assert.deepEqual(sanitizeTagList(['这张卡片描述的是奇幻世界', '因为设定所以标签是奇幻', '奇幻']), ['奇幻']);
+    });
+    test('跨行项 → 丢弃', () => {
+        assert.deepEqual(sanitizeTagList(['奇幻\n骑士', '魔法']), ['魔法']);
+    });
+    test('多分隔标点（分段解释）→ 丢弃', () => {
+        assert.deepEqual(sanitizeTagList(['现代，都市，校园', '奇幻']), ['奇幻']);
+    });
+    test('strict：推理残留占比 ≥30% ⇒ 整批判废（宁缺毋滥）', () => {
+        assert.deepEqual(sanitizeTagList(['这张卡片描述的是奇幻世界', '奇幻', '骑士'], { strict: true }), []);
+    });
+    test('非 strict（结构化区里合法 JSON 成员）→ 只丢该项、保留其余', () => {
+        assert.deepEqual(sanitizeTagList(['这张卡片描述的是奇幻世界', '奇幻', '骑士']), ['奇幻', '骑士']);
+    });
+    test('tagResidueReasons 导出可单测：空 / 干净标签 → 无判据命中', () => {
+        assert.deepEqual(tagResidueReasons(''), []);
+        assert.deepEqual(tagResidueReasons('奇幻/异世界'), []);
+        assert.ok(tagResidueReasons('让我先分析这张卡').includes('推理特征开头'));
     });
 });
 

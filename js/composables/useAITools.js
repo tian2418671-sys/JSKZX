@@ -15,7 +15,7 @@ import { apiCompatKey, decidePrefill, isPrefillRejected, recordCompat, sanitizeC
 import {
     isLlmOnlyPlan, normalizeRolePrompts, buildLlmMessages, willUsePrefill,
     parseStructuredTags, outputFormatRule, TAG_WRAPPER,
-    packedOutputRule, parsePackedTags, sanitizeTagList,
+    packedOutputRule, parsePackedTags,
     composeTagPromptHeadParts, splitTextSegments,
     SEGMENT_DEFAULT_MAX_CHARS, SEGMENT_DEFAULT_CHUNK_CHARS,
     resolveRolePromptsForKind
@@ -24,7 +24,8 @@ import { estimateTokens } from '../utils/tokenEstimate.js'; // 📦 打包短卡
 import { hasAnyTag } from '../utils/tagIncrement.js'; // ⏭️ 增量模式：跳过已打标卡（Q7）
 import { normalizeWbTags } from '../utils/wbGroupsTags.js'; // 🏷️ S3：世界书标签规范化（打标落盘合并用）
 import { buildCustomMessages, customTailPrefill } from '../utils/customPromptSegments.js'; // 🧩 2026-10-03：自定义模式接入打标（段 → 消息组装）
-import { buildWbMaterial, isWbBodyLoaded } from '../utils/wbMaterial.js'; // 🌍 🩹 AI-14：世界书材料构建（纯函数，四处消费点同源）
+import { buildWbMaterial, isWbBodyLoaded, hasEmbeddedBook, isEmbeddedBodyLoaded } from '../utils/wbMaterial.js'; // 🌍 🩹 AI-14：世界书材料构建（纯函数，四处消费点同源）；AI-20：卡内嵌世界书（有/无 + 正文是否载入）
+import { ensureFullBody } from '../utils/cardSlim.js'; // 🪶 AI-20：卡内嵌世界书正文在瘦身库（>3000 张）里是空的 ⇒ 发送前先按需读回
 import { applySegmentVars, splitPartsByVars, buildVarsFromParts, parseSegmentVars } from '../utils/tagPromptVars.js'; // 🔗 批次 C：材料占位符 + 自动附加三档
 
 export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey, apiType, resolveApiModel, extractReplyContent, persistCardUpdate, refreshCardData, nativeAlert, confirmDialog, showToast, llmRolePrompts, tagCustomSegments = ref([]), tagPromptMode = ref('system'), tagMaterialOverrides = ref({}), tagWbSegmentMax = ref(40), tagAutoMaterial = ref('compat'), autoTagRules, tagFunnel, tagPackSize, tagSkipTagged, tagResume, syncConfigToDisk, appMode, wbCtx, useCandidatePool = ref(true), enableAIExtraction = ref(true), aiCandidateTags = ref([]), prefillCompatMode = ref('auto'), prefillCompatTable = ref({}) }) {
@@ -131,16 +132,23 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
     const aiTagLog = ref([]);
     const showAiTagLog = ref(false);
     const AI_TAG_LOG_MAX = 2000; // 超大库防内存膨胀：超出裁掉头部
-    const AI_TAG_LOG_DETAIL_MAX = 100; // 🔍 请求详情条数上限（更早的详情置空，防内存膨胀）
+    const AI_TAG_LOG_DETAIL_MAX = 500; // 🔍 请求详情保留条数（2026-10-04 用户反馈「排查时抓不到上一轮回复」⇒ 由 100 提到 500）
+    const AI_TAG_LOG_DETAIL_BUDGET = 12 * 1024 * 1024; // 🔍 详情总字符预算（防内存膨胀：超出仍按「最旧先丢」裁剪，但不再是只留 100 条）
     const pushTagLog = (text, level = 'info', detail = null) => {
         aiTagLog.value.push({ at: Date.now(), level, text: String(text), detail });
         if (aiTagLog.value.length > AI_TAG_LOG_MAX) aiTagLog.value.splice(0, aiTagLog.value.length - AI_TAG_LOG_MAX);
         if (detail) {
+            // 🔍 2026-10-04：双闸裁剪 —— ① 条数上限 ② 总字符预算（先按条数丢最旧，再按预算继续丢）
             let seen = 0;
+            let bytes = 0;
             for (let i = aiTagLog.value.length - 1; i >= 0; i--) {
-                if (!aiTagLog.value[i].detail) continue;
+                const d = aiTagLog.value[i].detail;
+                if (!d) continue;
                 seen++;
-                if (seen > AI_TAG_LOG_DETAIL_MAX) aiTagLog.value[i].detail = null;
+                const sz = String(d.rawReply || '').length + String(d.reasoning || '').length
+                    + (Array.isArray(d.messages) ? JSON.stringify(d.messages).length : 0) + 200;
+                bytes += sz;
+                if (seen > AI_TAG_LOG_DETAIL_MAX || bytes > AI_TAG_LOG_DETAIL_BUDGET) aiTagLog.value[i].detail = null;
             }
         }
     };
@@ -326,7 +334,8 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
         if (!isCustom || mode !== 'manual') return false;
         const segs = (tagCustomSegments && Array.isArray(tagCustomSegments.value)) ? tagCustomSegments.value : [];
         const used = parseSegmentVars(segs).used;
-        return !(used.includes('material') || used.includes('card') || used.includes('wb'));
+        // 🌍 AI-20：`{{卡内世界书}}` / `{{世界书}}`（卡片视图回退到内嵌书）同样算「引用了材料」
+        return !(used.includes('material') || used.includes('card') || used.includes('wb') || used.includes('embeddedWb'));
     };
 
     /** 📨 2026-10-03 自定义模式「完全透明化」：发送材料「分段构建」——**发送与 UI 预览的唯一拼装实现**
@@ -385,6 +394,42 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
         };
     };
 
+    /** 🌍 卡内嵌世界书材料段（AI-20）—— **可选段**：只有段里引用 `{{世界书}}` / `{{卡内世界书}}` 才会发送
+     *  背景（用户实测 2026-10-04「无法引用世界书的内容，是空的」）：卡内嵌 `character_book` 从未进入任何材料段，
+     *  卡片视图下 `{{世界书}}` 恒为空。此处把**这本书本体**接进来（材料构建与库世界书同源 `buildWbMaterial`）。
+     *  ⚠️ `optional: true` 的理由：真库 93 张可解析卡里 **78 张**带内嵌书（单卡可达 68 万字）——
+     *    若默认自动附加，普通卡打标会被白灌几十万字 token（`splitPartsByVars` 只在被引用时才带上它）。
+     *  @returns {object|null} 卡没有内嵌世界书（无词条）时返回 `null`（不产生空段） */
+    const buildEmbeddedWbMaterialPart = (card) => {
+        if (!hasEmbeddedBook(card)) return null;
+        const scope = cardScopeKey(card);
+        const ov = getMaterialOverride(scope, 'embeddedWb');
+        // ⚠️ 必须用**内嵌口径**的正文判据：`isWbBodyLoaded(card)` 判的是库世界书的 `data`，
+        //    卡对象没有该字段 ⇒ 会恒判「未载入」（真机实测踩到，2026-10-04）
+        const pending = !isEmbeddedBodyLoaded(card) && ov === null;
+        // 书名：`🌍 <卡名> · 内嵌世界书` —— 用户要能看出「取的是哪一本」（卡内嵌书没有自己的文件名）
+        const displayName = `🌍 ${String((card && card.name) || '未知角色')} · 内嵌世界书（character_book）`;
+        return {
+            key: 'embeddedWb', title: '卡内嵌世界书材料', scope, mode: 'override', overridden: ov !== null,
+            optional: true, // 🔒 被占位符引用才发送（见 splitPartsByVars）
+            body: ov !== null ? ov : `\n\n【卡内嵌世界书材料】\n${buildWbMaterial(card, { name: displayName })}`,
+            note: pending
+                ? '⏳ 词条正文尚未载入（预览正在按需读取 / 大库瘦身态；**打标发送前一定会先读回正文**）。本段仅在段里引用 {{世界书}} 或 {{卡内世界书}} 时才发送。'
+                : '来自**本卡内嵌**的世界书（`character_book`）：词条名 / 触发词 / 正文（已禁用的词条跳过）。⚠️ 本段**只在段里引用 {{世界书}} 或 {{卡内世界书}} 时才发送**（默认不发送，避免给不带此需求的卡灌入大段材料）；编辑后按你的文本发送（仅该卡生效）。'
+        };
+    };
+
+    const buildCardPromptParts = (card, llmOnlyFlag, matArg) => {
+        const parts = [
+            ...buildCommonPromptParts('card', llmOnlyFlag),
+            buildCardMaterialPart(card, matArg)
+        ];
+        // 🌍 AI-20：卡里有内嵌世界书 ⇒ 追加「可选」材料段（被 `{{世界书}}` / `{{卡内世界书}}` 引用时才发送）
+        const eb = buildEmbeddedWbMaterialPart(card);
+        if (eb) parts.push(eb);
+        return parts;
+    };
+
     /** 📚 世界书材料段（含用户覆盖 scope='wb:<path|name>'） */
     const buildWbMaterialPart = (wb, materialArg) => {
         const material = (materialArg != null) ? String(materialArg) : buildMaterial(wb);
@@ -402,10 +447,6 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
         };
     };
 
-    const buildCardPromptParts = (card, llmOnlyFlag, matArg) => [
-        ...buildCommonPromptParts('card', llmOnlyFlag),
-        buildCardMaterialPart(card, matArg)
-    ];
     const buildWbPromptParts = (wb, llmOnlyFlag, materialArg) => [
         ...buildCommonPromptParts('wb', llmOnlyFlag),
         buildWbMaterialPart(wb, materialArg)
@@ -567,7 +608,11 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
     /**
      * 🧠 打标回复解析（卡版 / 世界书版共用）——输出格式与 AI-10 根治口径的唯一实现：
      *   · `llmOnly` → `parseStructuredTags`（传**实际预填充**拼回完整结构再解析；三层降级）；
-     *   · 其他组合 → JSON 正则 → 暴力拆分（统一过 `sanitizeTagList`）。
+     *   · 其他组合 → 🧠 AI-19 起**同一出口**（不再另有一套「贪婪 JSON 正则 + 裸 JSON.parse + 暴力拆分」）。
+     *
+     * 🛑 AI-19（2026-10-04）：`parseStructuredTags` 判「疑似思维链」时会返回 `ok:false`
+     *    （而不是把整段推理当标签）——这里如实抛错 + 给出**可操作**提示，让该卡计入「失败」
+     *    而不是把推理物理写进 PNG。
      * @param {boolean} llmOnly 本次是否为「仅 LLM」组合
      * @param {object} result API 返回体（经 extractReplyContent 提取）
      * @param {string} usedPrefill 本次实际使用的预填充文本（requestTaggingShared 返回）
@@ -576,23 +621,18 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
      */
     const parseTagReplyShared = (llmOnly, result, usedPrefill, label) => {
         const text = extractReplyContent(result);
-        if (llmOnly) {
-            const parsed = parseStructuredTags(text, { prefill: usedPrefill });
-            if (!parsed.ok) throw new Error(parsed.reason || '模型未返回有效的标签数组');
-            // 📢 如实记录命中的解析层（第 3 层最脏，值得用户知道）
-            if (parsed.layer === 3) pushTagLog(`⚠️ ${label} → 走第③层兜底拆分（模型未遵守输出格式）`, 'warn');
-            return parsed.tags;
+        const parsed = parseStructuredTags(text, { prefill: llmOnly ? usedPrefill : '' });
+        if (!parsed.ok) {
+            const reason = parsed.reason || '模型未返回有效的标签数组';
+            if (/思维链/.test(reason)) {
+                pushTagLog(`🛑 ${label} → AI 回复里只有推理过程、没有标签数组 ⇒ 已**拒绝写入**（避免思维链进标签）。`
+                    + '可在「提示词」页关掉 🧠 思维链 / 换用非思考型模型 / 明确要求「只输出标签」', 'err');
+            }
+            throw new Error(reason);
         }
-        let rawReply = String(text == null ? '' : text).trim();
-        rawReply = rawReply.replace(/```json/gi, '').replace(/```/g, '').trim();
-        const jsonMatch = rawReply.match(/\[[\s\S]*\]/);
-        if (!jsonMatch) throw new Error(`模型未返回有效的 JSON 数组: ${rawReply}`);
-        try {
-            return JSON.parse(jsonMatch[0]);
-        } catch (err) {
-            // 兜底：按标点符号暴力拆分（🧽 AI-10：统一过 sanitizeTagList）
-            return sanitizeTagList(rawReply.split(/[,，、\n]/));
-        }
+        // 📢 如实记录命中的解析层（第 3 层最脏，值得用户知道）
+        if (parsed.layer === 3) pushTagLog(`⚠️ ${label} → 走第③层兜底拆分（模型未遵守输出格式）`, 'warn');
+        return parsed.tags;
     };
 
     /**
@@ -635,7 +675,12 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
         const r = (tagResume && tagResume.value) || null;
         const hasResume = !!(r && Array.isArray(r.targetIds) && r.targetIds.length > 0
             && r.targetIds.some(id => !(Array.isArray(r.doneIds) && r.doneIds.includes(id))));
-        if (selectedIds.value.length === 0 && !hasResume) return;
+        // 🔧 2026-10-11（#issue-1 修复）：此前静默 return ⇒ 用户点「🤖 AI 打标」毫无反应，易误判「功能坏了」。
+        //    卡片分支缺提示（世界书分支已有类似 nativeAlert），这里补一条，并说明如何继续。
+        if (selectedIds.value.length === 0 && !hasResume) {
+            nativeAlert('请先选择需要打标的卡片。\n（进入「标签 → ☑️ 批量选择模式」勾选卡片，或先打开一张卡后再试）', 'warning');
+            return;
+        }
         aiTagTargetMode.value = 'cards';
         showAITagModal.value = true;
         aiTaggingProgress.value = { current: 0, total: selectedIds.value.length, status: '等待开始...' };
@@ -862,9 +907,19 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
             const dataLayer = card.data?.data || card.data || {};
             if (!Array.isArray(dataLayer.tags)) dataLayer.tags = [];
             let addedAny = false;
+            // 🧩 2026-10-04 用户实测：同一张卡反复打标会**越堆越多**近义标签（实测 22 → 34：
+            //    「都市/现代」和「现代都市」并存）。这里加一层**归一化去重**：去掉分隔符/空白、忽略顺序与大小写后
+            //    相同的标签视为同一个 ⇒ 重复打标不再堆近义标签（原有标签一个不动，只是不再追加重复项）。
+            const normTag = (s) => String(s || '').replace(/[\s/\\·、,，\-_|（）()【】\[\]]+/g, '').split('').sort().join('').toLowerCase();
+            const seenNorm = new Set();
+            for (const t of (Array.isArray(card.customTags) ? card.customTags : [])) seenNorm.add(normTag(t));
+            for (const t of (Array.isArray(dataLayer.tags) ? dataLayer.tags : [])) seenNorm.add(normTag(t));
             for (const tag of tags) {
                 const cleanTag = String(tag).trim();
                 if (!cleanTag) continue;
+                const key = normTag(cleanTag);
+                if (!key || seenNorm.has(key)) continue;   // 近义/同义重复 ⇒ 丢弃，不写卡
+                seenNorm.add(key);
                 if (!aiCandidateTags.value.includes(cleanTag)) poolRefillCandidates.add(cleanTag);
                 if (!card.customTags.includes(cleanTag)) { card.customTags.push(cleanTag); addedAny = true; }
                 if (!dataLayer.tags.includes(cleanTag)) { dataLayer.tags.push(cleanTag); addedAny = true; }
@@ -1094,6 +1149,12 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
         const processOneCard = async (card) => {
             if (tagPauseRequested.value) return; // ⏸ 暂停：跳过尚未开始的卡（包内拆单等快速路径）
             try {
+                // 🪶🌍 AI-20（2026-10-04）：大库（>3000 张）会把**卡内嵌世界书词条正文清空**省内存
+                //    （`js/utils/cardSlim.js`）—— 不先读回，`{{世界书}}`/`{{卡内世界书}}` 拿到的就是空正文
+                //    （PK-31 同类坑：把「瘦身态」当「真的空」）。只在**本来就是瘦身态**时才付读盘成本。
+                if (hasEmbeddedBook(card)) {
+                    try { await ensureFullBody(card, { silent: true }); } catch (e) { /* 读回失败：按内存现状，不阻断打标 */ }
+                }
                 // 2.9 ✂️ 超长卡（> 阈值）：分段处理（第二批 · D9）；普通卡走下方常规路径
                 const mat = buildCardMaterial(card);
                 let fullText = [mat.charDesc, mat.charMes, mat.charPersonality].filter(Boolean).join('\n');
@@ -1982,6 +2043,8 @@ export function useAITools({ selectedIds, library, cardData, apiEndpoint, apiKey
         buildCardPromptParts, buildWbPromptParts,
         // 📨 2026-10-03「全量可编辑 · 全目标展示」：公共段/材料段独立构建（预览区按「公共 + 每目标」分组渲染）
         buildCommonPromptParts, buildCardMaterialPart, buildWbMaterialPart,
+        // 🌍 AI-20：卡内嵌世界书材料段（可选段；预览区据此显示「取的是哪一本」与「未引用 ⇒ 不送」）
+        buildEmbeddedWbMaterialPart,
         // 🔗 批次 C（Q10）：「全手动档 + 无材料占位符」检测（预览区警告 + 打标前二次确认共用同一判据）
         customModeLacksMaterial,
         // ⏸ 打标暂停（2026-09-28）：暂停请求 + 「已暂停」态（UI 与探针共用）

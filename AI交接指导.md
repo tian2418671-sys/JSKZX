@@ -10,7 +10,7 @@
 > | 待做功能与排期 | `docs/规格与计划/计划与记录/后续升级计划.md` |
 > | 文档总地图 | `docs/README.md` |
 >
-> 最后更新：2026-10-03 ｜ 当前版本 **v2.3.9**（✅ 已发布 + OTA）：https://github.com/tian2418671-sys/JSKZX/releases/tag/v2.3.9
+> 最后更新：2026-10-16 ｜ 当前版本 **v2.4.0**（🟡 待发布；上一版 v2.3.9 已发布 + OTA）
 
 ---
 
@@ -23,7 +23,7 @@
 | 仓库 | `https://github.com/tian2418671-sys/JSKZX.git`（远端 `origin`） |
 | 分支 | 本地 `master`（与 origin 同步） |
 | 构建产物 | `sillytavern-card-manager-<版本>.exe`（NSIS 安装版）+ `latest.yml` + `.exe.blockmap` + zip 绿色版 |
-| 测试 | `npm test` = `node --test "test/**/*.test.mjs"` → 当前 **973 用例全绿**（71 个测试文件） |
+| 测试 | `npm test` = `node --test "test/**/*.test.mjs"` → 当前 **1026 用例全绿**（71 个测试文件） |
 | 规模 | `js/components/` 47 个 SFC、`js/composables/` 41 个模块（顶层 24 + `chat/` 引擎 17）、`js/utils/` 解析与索引工具 |
 | 用户习惯 | 说「**一条龙服务**」= 升版本号 → 更新文档三件套 → 打包 → 提交推送 → 发 GitHub Release（含 `latest.yml` 保 OTA） |
 | 典型库 | 日常小库 `E:\AI\酒馆工具\角色卡`（75 张）；压测大库 `I:\03\角色色卡`（11,186 张 / 9.76GB）；2 万卡副本由脚本现造 |
@@ -143,7 +143,7 @@ js/utils/          cardLoader.js（卡解析/规范化）、pngParser.js、searc
 main/              vectorManager.js / vectorWorker.js / memoryStore.js（向量与长期记忆存储层）
 css/               tailwind.css（源）/ style.css（自定义）
 web/               vite build 产物（生产加载，gitignore）
-test/              71 个测试文件 / 973 用例（node:test，`npm test`）
+test/                71 个测试文件 / 1026 用例（node:test，`npm test`）
 scripts/           压测与探针（library-dup-*、capacity-check.ps1、measure-startup.mjs、
                    release-check.mjs、_cdp-*.mjs 等）
 ```
@@ -277,6 +277,12 @@ node --check <file>                            # 语法检查
 4. 动手前 grep 现状；改完过 4.2 的门禁；涉及路径的操作同步迁移派生键。
 5. 若发现新缺陷：**先在 `docs/bugs/` 对应领域加一条**（带编号、版本、现象/根因/修复/验证），再写代码修复 —— 这样才不会重复踩坑。
 6. 若用户说「一条龙」：照 `docs/发布/规范与流程/一条龙-发布流程.md` 走，注意内部/外部文档分工。
+
+7. 🤖 **子智能体纪律（2026-10-04 用户新铁律）**：
+   ① **同时在跑的子智能体最多 2 个** —— 超出的排队，不要一次摊一堆并行；
+   ② **干完立刻关闭**（不再发新活、不留闲置）；有新工作再开新的；关闭用 `interrupt_agent`（工具集没有"删除"，inactive 已不耗资源）；
+   ③ **必须主动查卡死** —— 隔一段时间用 `list_agents` 看状态；发现长时间停在 `running` 而毫无进展 ⇒ **立刻 `interrupt_agent` 并接手**，
+      不许干等、不许当成"还在跑"；接手前先 `git status` + 看相关文件是否半成品（能否 `build`），**别把半成品当结论**。
 
 ---
 

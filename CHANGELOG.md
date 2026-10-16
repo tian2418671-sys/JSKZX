@@ -1,7 +1,203 @@
-# SillyTavern 角色卡管理器 · v1.0 → v2.3.9 更新汇总
+# SillyTavern 角色卡管理器 · v1.0 → v2.4.0 更新汇总
 
-> 更新周期：2026-08-09 ~ 2026-10-03
+> 更新周期：2026-08-09 ~ 2026-10-16
 > 技术栈：Electron + Vue3 + Tailwind + ECharts
+
+---
+
+## 🚀 v2.4.0（一）· 打标链路修复：`{{世界书}}` 取正文、思维链进标签、教程重写（2026-10-16 发布）
+
+> 版本：**v2.4.0**（2026-10-16 发布）；本节汇总 v2.3.9 之后工作树里的全部改动。
+> 用户版（对外）见 [`RELEASE_NOTES.md`](RELEASE_NOTES.md) 的 `v2.4.0` 段 —— **只写用户可感知内容**，本节才是内部细节。
+
+---
+
+### 🔴 修复 1：打标 `{{世界书}}` 占位符取不到正文 —— 卡片视图接上「卡内嵌世界书」（AI-20）
+
+> 用户实测反馈原文：「老大，这个{ {世界书} }还是有 bug，现在无法引用世界书的内容，是空的」
+> ＋「想引用**角色卡里内嵌的世界书**」（卡上带 🌍 徽标那种）。
+
+- 教程（`js/components/CustomModeGuide.vue`）按用户反馈重做：1622 行 / 12 节 → **526 行 / 6 节**（删示例、配方、零基础 9 步、预填充原理、占位符、发送预览、功能边界等章与全部重复表格）；去 AI 味（统一「你」、短句、禁排比加粗）；每节加内联 SVG 图；新增 `{{材料}}` ❌✅ 并排对照（`{{}}材料` / `[材料]` / 全角 `｛材料｝` / 少一层）与「破限填哪个框」窗位图；配色只用被三主题覆盖的家族。含精简配方入口（2 个可直接跑的配方）：第 ① 节速查表下方 `📥 套用到我的段`，仍走 `apply-recipe` → 父组件确认后落盘。
+
+### 现象
+
+在「✨ 自定义模式」的段里写 `{{世界书}}`（或 `{{material}}` / `{{wb}}`），**在角色卡视图**给带内嵌世界书的卡打标时，
+该占位符被替换成**空串**（发送预览与实发都是空）——用户完全引用不到内容。
+
+### 根因（读源码 + 真库取证）
+
+| 层 | 事实 |
+| --- | --- |
+| 变量表 | `buildVarsFromParts`（`js/utils/tagPromptVars.js`）的 `wb` **只认材料段里的 `key === 'wb'`** |
+| 谁产出 `wb` 段 | **只有世界书打标链路**（`buildWbPromptParts`，数据源 = 世界书库 `wbCtx.worldbooks`） |
+| 卡片打标链路 | `buildCardPromptParts` → `buildCardMaterialPart`（只取 `description / first_mes / personality`）⇒ **没有 `wb` 段** |
+| 结论 | **卡内嵌世界书（`character_book`）从未进入任何材料段** ⇒ 卡片视图下 `{{世界书}}` 恒空 |
+
+⇒ 本质是**能力缺口（从未实现）**，不是回归：落地「材料占位符」那批时只做了「世界书库」侧，
+「卡内世界书」被列进了封存件（`docs/规格与计划/AI打标/AI打标-卡片材料字段与占比控制方案-v2.md`）。
+
+📊 **真库体量**（`E:\AI\酒馆工具\角色卡`，只读直读 PNG `chara` 块）：**93 张可解析卡里 78 张有内嵌世界书**
+（4755 条词条 / 798 万字正文）—— 这不是边角场景。
+
+🔬 **修的过程中被真机打回两次**（都是静态看不出来、只有真库/真机会暴露的坑）：
+
+1. **卡的数据层有两层**：渲染层库条目 = `{ id, path, name, data: <PNG 内嵌 JSON> }`，
+   而 PNG 内嵌 JSON = `{ spec, data: { …, character_book } }` ⇒ `character_book` 实际在 **`item.data.data.character_book`**。
+   第一版只探一层，**命中了卡片外层 data**（它也有 `name`/`description`）⇒ 材料产出「书名 + 简介 + **词条数：0**」——
+   **修完仍然是空**。真机取证：`resolveWbEntries(card)` = 0，而同一张卡 `character_book.entries.length` = 35。
+2. **`isWbBodyLoaded()` 判卡会恒判「未载入」**：它是**库世界书口径**（判 `data.entries`），卡上没有这个字段 ⇒
+   材料被替换成 `⚠️ 词条正文未载入` 标注（AI-17 同型的「假空」）。
+
+### 修法
+
+| 文件 | 改动 |
+| --- | --- |
+| `js/utils/wbMaterial.js` | 新增 `resolveWbBook()`（`character_book` 覆盖 **`data.data`（现实形态）→ `data` → 卡根** + V1「book 本身是数组」）/ `resolveWbEntries()` / `hasEmbeddedBook()` / **`isEmbeddedBodyLoaded()`**（内嵌口径的正文判据，与库口径分开）；`buildWbMaterial` 改为经统一取书入口 ⇒ **内嵌书与库世界书同源同一材料实现**（`comment` 优先 / 触发词 / 跳过禁用 / 未载入显式标注全自动继承）；`isWbBodyLoaded` 对卡入参自动转到内嵌口径 |
+| `js/utils/tagPromptVars.js` | 新增逻辑键 **`embeddedWb`**（别名 `卡内世界书` / `内嵌世界书` / `embeddedwb`）；`{{世界书}}` 在卡片视图**回退**到卡内嵌书（`wb = 库世界书 || 卡内嵌书`）；`splitPartsByVars` 新增 **`optional` 段**语义（**只有被占位符点名才发送**，返回 `optionalKeys`） |
+| `js/composables/useAITools.js` | `buildCardPromptParts` 追加 `key:'embeddedWb'`、`optional:true` 的材料段（卡有内嵌书才加；书名 `🌍 <卡名> · 内嵌世界书（character_book）`）；`customModeLacksMaterial()` 把 `embeddedWb` 也算「引用了材料」；发送前 `ensureFullBody(card)`（大库瘦身态先读回正文） |
+| `js/components/App.vue` | 预览 `markStatus` 同步 `optional` 语义（未引用 = `🌍 未引用 · 不发送`，不再误显示 `自动附加`）；卡片组里展示「卡内嵌世界书材料」段（看得见取的是哪一本 + 字数） |
+| `js/components/AITagModal.vue` | 新增 `🌍 未引用 · 不发送` 状态角标 + 图例说明（`{{世界书}}` 在卡片视图 = 卡内嵌书，默认不发送） |
+| `js/components/CustomModeGuide.vue` | 教程三处同步：材料表新增行、变量表改写 `{{世界书}}` 口径、角标表新增行、占位符章新增一节说明 |
+
+### 验证
+
+- **单测**：`test/wbMaterial.test.mjs`（26 用例，本批 **+8**：库书 / 真实双层卡 / 浅层卡 / V1 扁平卡 / 字典形态 /
+  瘦身态显式标注 / 无书不报错 / `isWbBodyLoaded` 双口径一致）、`test/tagPromptVars.test.mjs`（34 用例，本批 **+10**：
+  `{{世界书}}` 回退 / 库书优先 / 世界书视图不回退 / 空串不报错 / `optional` 点名才发送 / 别名解析 / `embeddedWb` 归一）；
+  `npm run check`（guard:batch-read + guard:scope + guard:dedupe + test）**全绿**；`npm run build:web` ✅。
+- **真机只读链路**（真实卡 `E:\AI\酒馆工具\角色卡\珠矶.png`，35 条内嵌词条；**不写标签、不写真卡**）：
+  全链路 `character_book → buildWbMaterial → buildVarsFromParts → applySegmentVars`，`{{世界书}}` 展开 **42367 字**、
+  `used = ['wb']`、`unknown = []`；材料开头：
+
+  ```text
+  【卡内嵌世界书材料】
+  书名：🌍 珠矶 · 内嵌世界书（character_book）
+
+  词条数：11（另有 24 条已禁用，未送）
+
+  【char2:内质模块】
+  触发词：zhuji_char_st
+  ```
+
+- **真机 UI（CDP 9376，生产构建 `app://`）**：真实鼠标点「开启批量多选 → 卡片 → 🤖 AI 打标 → 自定义模式（实验）」，
+  发送预览里出现 **「卡内嵌世界书材料」** 段，角标 `🌍 未引用 · 不发送`、字数 **42367 字**（与纯函数侧一致）。
+  截图：`%TEMP%\jsk-manual-test\42-modal.png`、`43-custom-mode.png`、`45-preview-after.png`、`51-probe.png`。
+- **同批修好的两个 TDZ 崩溃（挡着真机验证，一并上报）**：
+  ① `App.vue` 的 `useConfigPersistence({…})` 误传 `prefillCompatInfo`（由 setup 更下方的 `useAITools` 产出）⇒
+  `Cannot access 'prefillCompatInfo' before initialization`，**整个 setup 抛错**（生产构建实测：启动即连发
+  `[Vue 错误]`、界面拿不到任何绑定）。已删除该入参（它只是展示用 computed，不参与持久化收集）。
+  ② `prefillCompatInfo` / `tagPausing` 两个模板绑定**没进 `ctx`**（AR-13 四步链第 3 步漏项）⇒ 渲染期恒 `undefined`。已补。
+
+📌 上述两处 TDZ 已按铁律 8 登记为 **[AR-55](docs/bugs/BUG-架构与渲染.md)**（属**流程教训**，不是功能改动）：
+脚本按「**缩进 + 名字**」插锚点，会撞上**同名 ref 的另一处调用签名**（此处 ＝ `useConfigPersistence({…})` 的入参列表），
+而 `build:web` / 语法检查 / `guard:scope` **全是绿的**（语法合法 + 标识符"确实定义过"）——**只有真实启动才暴露**。
+
+> ⚠️ **没验到的**（如实记录）：① 未跑**真实 API 打标**验证「AI 真收到了这段材料」（用户额度 + 打标会往真卡写标签 ✗）；
+> ② **超长卡分段链路**（`processSegmentedCard`，卡材料 > 阈值时）里的 `{{世界书}}` 仍会展开成完整内嵌书材料
+> （未随卡材料一起分段）—— 真机这把未覆盖到（该卡 1460 字，未触发分段），留作已知边界；
+> ③ 大库（>3000 张）**瘦身态**下 `ensureFullBody(card)` 的读回路径只做了单测级验证（真实日常库 77 张不触发瘦身）。
+
+> 🔧 **真机测试副作用与复位**：为验证「写了占位符会怎样」，在真机里往用户配置的第 3 段与「附加要求」框打了字 ⇒
+> `app_config.json` 被应用自身防抖写盘刷新（mtime/格式变化，属应用正常运行行为）。
+> 第 3 段已**按原文还原**（`<tags>[\n{{}}`），`customAIPrompt` 保持 `undefined`（未新增字段）；
+> 但**文件格式已由应用重写，无法逐字节还原**（无测试前备份），不做猜测性改写。
+> 真卡库全程**只读**（未写任何卡文件 / 未打任何标签）。
+
+---
+
+### 🔴 修复 2：AI-19 思维链进标签 —— 第③层兜底把「无标记的纯文本推理」当标签
+
+> 用户实测反馈（Cynthia 原文）：「标签提取好像也有点问题，我刚才试验了一下把我一大堆思维链提取出来了」
+
+### 现象 / 根因（实测定位，非推断）
+
+- **现象**：llmOnly 打标把模型的**思维链 / 思考过程**当成标签提取出来 —— 标签里混进一大段推理文字
+  （「让我先分析…」「首先看描述…」「因此可以归纳出…」），日志同时出现 `⚠️ 走第③层兜底拆分`。
+- **根因**：`parseStructuredTags` 的**第③层兜底**（`js/utils/llmPromptRoles.js`）对**任意文本**
+  `split(/[,，、\n]/)` 后只靠 `sanitizeTagList` 的「空 / 纯数字 / > 40 字」过滤 ⇒
+  **没有标记的纯文本推理**（没有 `[` ⇒ 层①/②都够不着）被切成 ≤ 40 字的片段后**全部当标签返回**（`ok=true`、`layer=3`）。
+  探针实测：编号式推理 → **7/7 条全是推理**；散文式推理 → 整段在第一个逗号处被切开、前半段直接成为「标签」。
+  ⚠️ 带 `<thinking>` / ```` ```think ```` 的回复、带 JSON 数组的回复都**不受影响** ⇒
+  **AI-09（贪婪正则）与 AI-10（预填充拼接）都拦不住这一类**，病根是「无标记推理」在解析契约里没有防线。
+- **次生漏点**：非 llmOnly 链路 `parseTagReplyShared` 的 `JSON.parse` 成功分支**完全不过清洗**（嵌套数组带非字符串进标签），
+  其 `\[[\s\S]*\]` 正则仍是**贪婪**的，失败后落回同一份「暴力拆分」。
+
+### 改了什么
+
+| 文件 | 关键改动 |
+| --- | --- |
+| `js/utils/llmPromptRoles.js` | ① `stripThinkingBlocks` 补 ```` ```think/thinking/reasoning ```` 围栏 + `<cot>` / `<思考过程>` 类标记（**保留「剥完失败回退原文」**）；② 第③层改**按行 / 列表项取候选**（整行像推理 ⇒ 整行 1 候选，不被 `，` 切碎；`1.`/`- ` 行首标记先剥；绝不跨行）；③ 新增并导出 `tagResidueReasons()`（换行 / 句末标点 / 单候选 ≥2 分隔标点 / 推理特征开头且剩余 ≥2 字 / 句特征 / 因果句 / 超长）；④ `sanitizeTagList(list, { strict })` 接入该判据，**strict 下残留占比 ≥30% 整批判废**；⑤ 层①②的 JSON 成员也过清洗（嵌套展平）+ **补「裸数组整串」候选（②-c）** —— 收紧正则后「最标准输出」不得掉进层③ |
+| `js/composables/useAITools.js` | `parseTagReplyShared` 的**两条口径收口为一条**（非 llmOnly 也走 `parseStructuredTags`）：删掉贪婪正则与裸 `JSON.parse`；命中「疑似思维链」时**如实抛错 + 输出可操作提示**（关思维链 / 换非思考型模型 / 明确要求只输出标签），该卡计入「失败」而**不是把推理写进 PNG** |
+| `js/utils/aiTagFeedback.js` | `classifyApiError` 增「疑似思维链」归类 ⇒ 失败收尾给出可读结论（而不是原文兜底） |
+
+### 验证
+
+- `test/llmPromptRoles.test.mjs` 新增 **35 条**（`AI-19 思维链污染防线` 26 + `sanitizeTagList — 句子/推理残留判据` 9），
+  覆盖 6 种真实回复形态：① 正常 JSON 数组（含**裸数组整串**与嵌套展平）② 数组前后带大段中文推理 ③ `<thinking>` / ```` ```think ```` 标记
+  ④ 思维链与数组同在 `content` ⑤ **只有推理、没有标签（必须 ok=false 或抛错，不得当标签）** ⑥ `reasoning_content` 另有内容时只取 `content` 的标签；
+  外加 7 条「宁缺毋滥」边界（真中文标签 / 带编号真列表 / 换行标签 / `复仇。重生` / `Sci-Fi (科幻)` / 顺序词长标签的已知取舍 / 顺序词短碎片）；
+- 该文件 **154/154 通过**；`npm run check`（`guard:batch-read` + `guard:scope` + `guard:dedupe` + `npm test`）**1025 用例全绿**（2026-10-10 23:13 实测；同工作树并行开发那条线的用例也在统计内）；`npm run build:web` ✅；
+- 取证探针（一次性，用后即删）`scripts/_probe-aitag-cot.mjs`：修前 ⑤⑥⑦ 三形态全绿（= 推理全进标签），修后**全部 `ok=false` / `tags=[]`**，①②③④⑧⑨ 形态标签保持干净。
+- 真实启动冒烟（`npx electron . --disable-gpu --enable-logging` + 隔离 `--user-data-dir`，跑 `web/` 产物）：
+  **无 `[Vue 错误]`**、`[startup] 蒙版淡出` 正常、主界面渲染完成（`#app` 子树 43.6KB DOM）。
+  📌 过程如实记录：第一次冒烟撞到 `Cannot access 'prefillCompatInfo' before initialization`（App 白屏）——
+  **不是本节改动**（`App.vue` 里同名 ctx 绑定的 TDZ），由**同工作树并行开发的那条线**自行修掉
+  （`App.vue:5486` 起已留注释），重建后冒烟通过（最终日志只有 `[DPI]` 与 `[startup]` 两行 INFO）。
+- ⚠️ **未验到的**：未用真实 API 跑打标（避免消耗用户额度 + 打标会写标签到真库）；未从用户「打标日志 → 🔍 查看」里取真实回复样本（日志在用户 profile 里，本轮未导）；
+  未对**存量已污染卡**做清洗（本轮只堵住「新打标不再产出脏标签」，历史脏标签需用户自行删/用既有清洗入口）。
+
+---
+
+### 📝 修复 3：打标教程重写 —— 零基础照做 + 完整可跑示例 + 对照与排错（2026-10-03）
+
+> 用户诉求：「关于 ai 打标中的教程还是有点笼统了，要把用户当傻子再优化细化一下写几个示例最好了」
+> → 追加拍板：「示例很重要而不是模板，给出模板用户也不明白什么意思、怎么填、填写什么东西」。
+
+### 改了什么（`js/components/CustomModeGuide.vue` 543 → 1241 行）
+
+| 旧 | 新 |
+| --- | --- |
+| 7 节「说明性」讲解（段 / 角色 / 预填充 / 材料 / 三档 / 占位符 / 配方） | **12 节**：① **零基础照做（约 5 分钟）** ② 这是什么 ③ 段=一条消息 ④ 末尾 ASSISTANT=预填充 ⑤ 自动材料在哪儿看 ⑥ **三档怎么选** ⑦ 占位符 ⑧ **完整示例（5 个 · 全是填好的，能直接跑）** ⑨ 配方一键套用 ⑩ 怎么读「📨 程序自动材料（发送预览）」 ⑪ 与其它功能的边界 ⑫ **排错清单（12 条）** |
+| 示例 = 配方模板（占位说明） | **示例 = 填好的实例**：每段完整可整块复制、一字不改即可跑；每个示例固定回答「这段是干什么的 / **你要改哪几个字**（并注明不改也能跑）/ 发出去会看到什么」 |
+| 无因果对照 | **🔬 改一处，结果怎么变（4 组并排对照）**：同一份配置只改一句话（如「中文标签」→「英文标签」、「5~12 个」→「3 个以内」）并排展示两次预期输出差异 |
+| 无最小可用样例 | 增「**零改动最小可跑**」示例（整段可直接粘贴、一个字不改） |
+| 占位符当示例主体 | `{{材料}}` 只在必要位置出现，并注明「会被自动替换成你勾选的那张卡/那本书的正文，**你不用填**」；其余示例用完整写死的文本 |
+
+### 验证
+
+- `npm run build:web` ✅（SFC 合法，runtime-only 构建通过）；
+- 结构审计：12 个正文 section 与左侧目录一一对应（可点达）；模板文本**无裸 `{{ }}` 字面量**（正文示例统一放 JS 数据、经 `{{ s.content }}` 输出，避免被 Vue 二次编译）—— 见文件头注释的既有约束；
+- 真机：`scripts/probes/_probe-custom-guide.mjs`（CDP 真实点按打开教程 + 截图存证）。
+
+> ⚠️ 过程记录：本节内容由子代理完成主体重写后**卡死中断**，由主代理接手核对结构、补本节记录并重跑真机验证。
+
+---
+
+### 🧪 全功能回归（2026-10-11）＋ 热测试（2026-10-16）—— 新抓获并修复 4 处
+
+> 起点：用户要求「从零重新测一遍 —— 从打开软件到导入文件，每个功能、每个窗口内的按钮都要真实点，不是点开就完」。
+> 测试计划与逐项记录见 [`docs/规格与计划/计划与记录/全功能测试矩阵-2026-10-11.md`](docs/规格与计划/计划与记录/全功能测试矩阵-2026-10-11.md)
+> 与 [`测试发现-2026-10-11.md`](docs/规格与计划/计划与记录/测试发现-2026-10-11.md)、[`热测试-2026-10-16.md`](docs/规格与计划/计划与记录/热测试-2026-10-16.md)。
+
+| # | 现象 | 根因 / 修法 | 类型 |
+| --- | --- | --- | --- |
+| bug-1 | 顶部「导入」框拖入文件类型限制丢失（可选中任意文件） | `js/components/App.vue` 把 `importAccept` 从 `js/utils/cardFormats.js`（导出的 `IMPORT_ACCEPT` 常量）误改为 `import cardFormats from '../../main/cardFormats.json'` —— JSON 里**没有** `IMPORT_ACCEPT` 字段 ⇒ `accept` 恒 `undefined`（DF-22 回归）。两处 provide 改回 `importAccept: IMPORT_ACCEPT` | 🐛 功能回归 |
+| bug-3 | AI 打标弹窗「⚡ 预填充 → API 兼容」下拉为空、无提示 | `js/components/AITagModal.vue` 模板里用了 `prefillModes` / `compatInfo` / `compatText` / `compatToneClass`，但**从未 import 与定义**（`PREFILL_MODES` / `describeCompat` 在 `js/utils/prefillCompat.js`）⇒ 渲染期恒 `undefined`。补 import + 4 个 computed | 🐛 功能缺失 |
+| issue-1 | 未选任何卡时点「🤖 AI 打标」**静默无反应** | `js/composables/useAITools.js` 的 `openAITagModal()` 在无选中卡时直接 return，无任何提示 ⇒ 用户以为坏了。改为 `nativeAlert('请先选择需要打标的卡片。\n（进入「标签 → ☑️ 批量选择模式」勾选卡片，或先打开一张卡后再试）', 'warning')` | 🐛 交互缺陷 |
+| hot-1 | 右键菜单打开时按 `Esc` **关不掉**（世界书侧菜单同理） | `js/components/App.vue` 的 `handleExtendedKeys` Esc 分支在菜单打开时仍走原逻辑。改为前置判断：卡片菜单 `contextMenu.value.visible` / 世界书菜单 `wbContextMenu.value.show` 任一打开 ⇒ 关闭对应菜单并 `return`（两个菜单同时打开时一并关闭） | 🐛 交互缺陷 |
+
+**回归覆盖**（真机 CDP + 真实库）：阶段 A~H 全部真实点按 —— 启动/导入 14/14、标签库 7/7、世界书 11/11+8/8、卡片详情、搜索 16/17、AI 打标 27/29、设置与主题 58/58、预设 5/6；
+真实库口径：角色卡 `E:\AI\酒馆工具\角色卡`（78 张可解析 + 2 个非角色卡 JSON 被跳过）、世界书 `H:\01\全局世界书`（应用内 35 本）。
+
+**三关验证**：`npm run guard:scope` → 100 文件 0 未定义；`npm test` → **1026 用例全绿**；`npm run build:web` ✅；
+真实启动冒烟（`npx electron . --disable-gpu --enable-logging`）→ **无 `[Vue 错误]`**；
+修复后复测 **5/5 通过**（导入 accept、API 兼容下拉、未选卡提示、Esc 关右键菜单、世界书增量扫描）。
+
+**同批登记未修（如实记录）**：`js/composables/useChat.js:96` —— 拉取模型列表时 `if (!modelList.includes(apiModel.value)) apiModel.value = modelList[0]`，
+当中转站返回非法模型名（如「当前无可用模型」）时会**静默覆盖用户配置**。建议改为「不静默覆盖 + 过滤非法模型名」，本轮仅记录未改。
+另：AI-19 思维链防线已用**真实 API** 两轮验证（8 条 ≥200 字诱导提示词，探针 `scripts/probes/_probe-cot-8.mjs`，
+样本见 [`docs/技术支持/AI打标/思维链诱导提示词样本.md`](docs/技术支持/AI打标/思维链诱导提示词样本.md)）——
+gemini 轮：6/8 模型真输出推理、**0 条污染进标签**；deepseek 轮：0/8 输出推理、0 污染（防线未被考验）。
 
 ---
 

@@ -24,6 +24,10 @@ export const VAR_DEFS = [
     { key: 'material', label: '目标材料', aliases: ['材料', 'material', '卡片或世界书', '内容'] },
     { key: 'card', label: '卡片材料', aliases: ['卡片', 'card'] },
     { key: 'wb', label: '世界书材料', aliases: ['世界书', 'wb', 'worldbook'] },
+    // 🌍 AI-20（2026-10-04）：**卡内嵌世界书**（`character_book`）—— 卡片视图下 `{{世界书}}` 也回退到它
+    //    （用户原话「想引用角色卡里内嵌的世界书」；卡上带 🌍 徽标那种）。
+    //    ⚠️ 该材料段是 `optional`：**只有被占位符引用才发送**（否则每张带内嵌书的卡都会白灌几十万字）。
+    { key: 'embeddedWb', label: '卡内世界书材料', aliases: ['卡内世界书', '内嵌世界书', 'embeddedwb', 'embeddedworldbook'] },
     { key: 'pool', label: '候选池与规则', aliases: ['候选池', '候选池与规则', 'pool'] },
     { key: 'extra', label: '附加要求', aliases: ['附加要求', '附加', 'extra'] },
     { key: 'task', label: '任务说明', aliases: ['任务说明', '任务', 'task'] },
@@ -111,18 +115,22 @@ export function applySegmentVars(segments, vars) {
 
 /**
  * 把「材料段（parts）」按当前档位分成两份：**已被占位符接管的**与**仍需自动附加的**。
- * @param {Array<{key:string, body:string}>} parts `buildCardPromptParts` / `buildWbPromptParts` 的结果
+ * @param {Array<{key:string, body:string, optional?:boolean}>} parts `buildCardPromptParts` / `buildWbPromptParts` 的结果
  * @param {string[]} usedKeys `applySegmentVars().used`（逻辑键）
  * @param {string} [mode] `'compat'`（默认，全自动）/ `'semi'`（只自动附加材料 + 候选池）/ `'manual'`（全手动）
- * @param {'card'|'wb'} [kind] 目标类型（把 part.key `card`/`wb` 归一到逻辑键 `material`）
+ * @param {'card'|'wb'} [kind] 目标类型（把 part.key `card`/`wb`/`embeddedWb` 归一到逻辑键 `material`）
  * @returns {{ autoParts: Array, takenKeys: string[], droppedKeys: string[] }}
  *   `autoParts` = 仍要尾随的材料段（保持原顺序）；`takenKeys` = 被占位符接管；
  *   `droppedKeys` = 因档位不送（半自动丢 task/output；全手动全丢）
+ *   🌍 AI-20：段带 `optional: true` ⇒ **只有被占位符「点名」引用才发送**（进 `optionalKeys`，既不算 `auto` 也不算 `dropped`）——
+ *   用于「卡内嵌世界书」这类**体积大、默认不该灌**的材料（不给普通打标白烧几十万字 token）。
+ *   ⚠️ `optional` 段**不吃通用别名**（`{{世界书}}` 只走 `wb`，不会顺手把可选段也塞进去）——
+ *   要它在时就显式写 `{{卡内世界书}}`（或 `{{内嵌世界书}}`）。
  */
 export function splitPartsByVars(parts, usedKeys, mode = 'compat', kind = 'card') {
     const list = Array.isArray(parts) ? parts : [];
     const used = Array.isArray(usedKeys) ? usedKeys : [];
-    const logicalOf = (partKey) => ((partKey === 'card' || partKey === 'wb') ? 'material' : partKey);
+    const logicalOf = (partKey) => ((partKey === 'card' || partKey === 'wb' || partKey === 'embeddedWb') ? 'material' : partKey);
     const DROP_SEMI = ['task', 'output'];
     const drop = mode === 'manual'
         ? ['task', 'pool', 'extra', 'output', 'material']
@@ -130,32 +138,45 @@ export function splitPartsByVars(parts, usedKeys, mode = 'compat', kind = 'card'
     const autoParts = [];
     const takenKeys = [];
     const droppedKeys = [];
+    const optionalKeys = [];
     for (const p of list) {
         const lk = logicalOf(p && p.key);
+        // 可选段优先判定：不被点名就**永远不发送**（否则 `{{世界书}}` 会同时把 wb 与 embeddedWb 都发出去）
+        if (p && p.optional === true) {
+            if (used.includes(lk) || used.includes(p.key)) takenKeys.push(p.key);
+            else optionalKeys.push(p.key);
+            continue;
+        }
         if (used.includes(lk)) { takenKeys.push(p.key); continue; }
         if (drop.includes(lk)) { droppedKeys.push(p.key); continue; }
         autoParts.push(p);
     }
-    return { autoParts, takenKeys, droppedKeys };
+    return { autoParts, takenKeys, droppedKeys, optionalKeys };
 }
 
 /**
  * 组装「占位符变量表」（发送与预览共用；`kind` 决定谁是目标材料）。
  * @param {object} p
- * @param {Array<{key:string, body:string}>} p.parts 材料段（含 task / pool / extra / output / card|wb）
+ * @param {Array<{key:string, body:string}>} p.parts 材料段（含 task / pool / extra / output / card|wb|embeddedWb）
  * @param {'card'|'wb'} [p.kind]
  * @param {string} [p.jailbreak] 破限词（`{{破限}}` 用；未启用破限时传空串）
  * @returns {Object<string,string>} 逻辑键 → 文本
+ *   🌍 AI-20：`{{世界书}}` 在**卡片视图**（没有 `wb` 段）时**回退**到卡内嵌世界书（`embeddedWb` 段），
+ *   这样用户按占位符图例写的 `{{世界书}}` 在角色卡上也能取到「卡里嵌的那本书」的正文。
  */
 export function buildVarsFromParts({ parts, kind = 'card', jailbreak = '' } = {}) {
     const list = Array.isArray(parts) ? parts : [];
     const byKey = new Map();
     for (const p of list) if (p && p.key) byKey.set(p.key, String(p.body || ''));
     const material = byKey.get(kind) || '';
+    const wbFromParts = byKey.get('wb') || '';
+    const embeddedWb = byKey.get('embeddedWb') || '';
     return {
         material,
         card: byKey.get('card') || '',
-        wb: byKey.get('wb') || '',
+        // 库世界书优先；卡片视图没有库书时回退到卡内嵌书（AI-20）
+        wb: wbFromParts || embeddedWb,
+        embeddedWb,
         pool: byKey.get('pool') || byKey.get('extra') || '',
         extra: byKey.get('extra') || '',
         task: byKey.get('task') || '',

@@ -35,6 +35,11 @@ export function classifyApiError(msg) {
     if (/未返回有效的\s*json/i.test(raw)) {
         return { code: 'format', label: '模型返回格式异常（未返回有效 JSON 数组）' };
     }
+    // 🧠 AI-19（2026-10-04）：解析侧**主动拒绝**「只有思维链、没有标签」的回复 ——
+    //    这不是网络/密钥问题，归类为格式问题并给出**可操作**结论（否则用户看到「疑似思维链…」原文不知怎么办）
+    if (/疑似思维链/.test(raw)) {
+        return { code: 'format', label: '模型只输出了推理过程、没有标签数组（已拒绝写入）——请到「提示词」页关掉思维链，或换用非思考型模型' };
+    }
     return { code: 'other', label: raw.slice(0, 200) || '未知错误' };
 }
 

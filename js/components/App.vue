@@ -791,10 +791,12 @@ import SnapshotModal from './SnapshotModal.vue'; // 📸 历史快照列表与�
 import PushModal from './PushModal.vue'; // 🚀 推送目标选择与执行对话框
 import { processFile, extractBookEntries, compileAutoTagRules, defaultAutoTagRules, normalizeCardData } from '../utils/cardLoader.js';
 // 📇 DF-22：角色卡**文件格式能力表**（唯一权威定义，`main/cardFormats.json`）
-//    ⚠️ 直接 import **JSON**（不是 `.js`）—— `cardFormats.js` 是 CJS（给 `main.js` 用），
-//    渲染层读 CJS 需要 Vite 转换，读 JSON 则是原生支持 ⇒ 两边共用**同一份数据**且零转换风险。
-import cardFormats from '../../main/cardFormats.json';
-import { isPathSavable, unsavableReason } from '../utils/cardFormats.js'; // 📇 DF-25：渲染层格式表（判「此卡能否写回」）
+//    ⚠️ 渲染层统一从 `../utils/cardFormats.js` 读取（它内部 import 该 JSON 并派生常量）。
+//    🔧 2026-10-11 修复（DF-22 回归）：此前这里 `import cardFormats from '../../main/cardFormats.json'`
+//       导入的是 **JSON 本体**（只有 scannable/savable/image），**没有 `IMPORT_ACCEPT`**（那是 .js 派生量）
+//       ⇒ `cardFormats.IMPORT_ACCEPT === undefined` ⇒ 头部 file input 的 `accept` 属性丢失。
+//       现改为直接导入派生常量 `IMPORT_ACCEPT`。
+import { IMPORT_ACCEPT, isPathSavable, unsavableReason } from '../utils/cardFormats.js'; // 📇 DF-22/DF-25：渲染层格式表（accept + 能否写回）
 import { DEFAULT_TAG_FUNNEL, normalizeTagFunnel, normalizeDisabledRules, resolveFunnelPlan, formatFunnelBadge, isFunnelEmpty } from '../utils/tagFunnel.js'; // 🏷️ P1：打标三层开关默认值/归一化/层决策（纯函数）；P2 起状态短标签也在此派生（供注册表命令的 badge 用）
 import { migrateLegacyPresets, normalizeWbPrompt } from '../utils/llmPromptRoles.js'; // 🧠 第二批改造：旧提示词预设库 → 单套链路；🌍 AI-15：世界书 System 三态
 import { parseSegmentVars, splitPartsByVars } from '../utils/tagPromptVars.js'; // 🔗 批次 C：占位符解析 / 材料段分流（预览与发送同一判据）
@@ -2812,8 +2814,17 @@ export default {
                     return;
                 }
 
-                // Esc 键：关闭图片预览 / 退出多选模式
+                // Esc 键：关闭右键菜单 → 关闭图片预览 → 退出多选模式
                 if (e.key === 'Escape') {
+                    // 🔧 2026-10-16 热测试修复（#hot-1）：此前 Esc **不关卡片/世界书右键菜单**（只处理图片预览与多选），
+                    //    与「Esc 关浮层」的通用预期不符。右键菜单是最表层浮层，故优先关闭并结束本次处理。
+                    const cardMenuOpen = !!(contextMenu.value && contextMenu.value.visible);
+                    const wbMenuOpen = !!(wbContextMenu.value && wbContextMenu.value.show);
+                    if (cardMenuOpen || wbMenuOpen) {
+                        if (cardMenuOpen) closeContextMenu();
+                        if (wbMenuOpen && typeof closeWbContextMenu === 'function') closeWbContextMenu();
+                        return;
+                    }
                     if (showImageModal.value) { showImageModal.value = false; }
                     else if (isMultiSelectMode.value) {
                         isMultiSelectMode.value = false;
@@ -5483,6 +5494,10 @@ export default {
             fullBackupDir, fullBackupKeep,
             startupTasks,
             prefillCompatMode, prefillCompatTable,
+            // ⚠️ `prefillCompatInfo` **不要**放这里：它由 `useAITools`（setup 更下方）产出，
+            //    在此处引用会命中 TDZ（`Cannot access 'prefillCompatInfo' before initialization`）
+            //    —— 整个 setup 抛错 ⇒ App 渲染函数拿不到任何绑定（启动即白屏级崩溃）。
+            //    它只是个展示用 computed，**不需要**持久化收集；模板用它靠 setup 尾部的 return。
             sidebarWidth, viewMode, isCompactMode, sortBy,
             llmRolePrompts, tagCustomSegments, tagPromptMode, tagMaterialOverrides, tagPackSize, tagSkipTagged, tagWbSegmentMax, tagAutoMaterial, tagResume, lastWorldbookDirPath, lastPresetDirPath, wbCategoryMap, wbTagMap,
             // 🏷️ S2（2026-09-25）：候选池三状态（开关 / 自由提取 / 池本体）随 ui 段落盘
@@ -5562,7 +5577,7 @@ export default {
             autoTagRules: compiledAutoTagRules,
             isDragging, dragCounter, importFileInput,
             // 📇 DF-22：导入对话框的 `accept` **由格式表派生**（与磁盘扫描白名单同源，不得手写）
-            importAccept: cardFormats.IMPORT_ACCEPT,
+            importAccept: IMPORT_ACCEPT,
             // 横切服务
             nativeAlert, showToast, appPrompt, safeData,
             // 配置中枢
@@ -6056,6 +6071,8 @@ export default {
             buildCardPromptParts, buildWbPromptParts,
             // 📨 2026-10-03「全量可编辑 · 全目标展示」：公共段/材料段独立构建（预览区按「公共 + 每目标」分组渲染）
             buildCommonPromptParts, buildCardMaterialPart, buildWbMaterialPart,
+            // 🌍 AI-20（2026-10-04）：卡内嵌世界书（`character_book`）材料段 —— 可选段（被 {{世界书}}/{{卡内世界书}} 引用才发送）
+            buildEmbeddedWbMaterialPart,
             // 🔗 批次 C（Q10）：全手动档 + 无材料占位符检测（预览警告用）
             customModeLacksMaterial,
             // 🧠 仅 LLM 层时的分角色链路 + 结构化截取（UI 徽标用）
@@ -6112,7 +6129,10 @@ export default {
                 const segs = Array.isArray(tagCustomSegments.value) ? tagCustomSegments.value : [];
                 const varInfo = isCustom ? parseSegmentVars(segs) : { used: [], unknown: [], perSegment: [] };
                 const sections = [];
-                /** 给一批 parts 打状态标（自定义模式才有意义） */
+                /** 给一批 parts 打状态标（自定义模式才有意义）
+                 *  🌍 AI-20：与 `splitPartsByVars` 同一套语义 —— `optional` 段（卡内嵌世界书）
+                 *  未被占位符引用时 = `optional`（预览显示「未引用 ⇒ 不发送」），
+                 *  否则它会显示成 `auto` 而**实际不发送**（预览骗人，同 AI-16 病灶）。 */
                 const markStatus = (parts) => {
                     if (!isCustom) return parts.map(p => ({ ...p, status: 'auto' }));
                     const split = splitPartsByVars(parts, varInfo.used, mode, kind);
@@ -6120,7 +6140,9 @@ export default {
                     const dropped = new Set(split.droppedKeys);
                     return parts.map(p => ({
                         ...p,
-                        status: taken.has(p.key) ? 'taken' : (dropped.has(p.key) ? 'dropped' : 'auto')
+                        status: taken.has(p.key) ? 'taken'
+                            : (dropped.has(p.key) ? 'dropped'
+                                : ((p.optional === true) ? 'optional' : 'auto'))
                     }));
                 };
                 sections.push({
@@ -6143,7 +6165,13 @@ export default {
                     const cards = library.value.filter((c) => (selectedIds.value || []).includes(c.id));
                     for (const card of cards) {
                         const part = buildCardMaterialPart(card);
-                        sections.push({ id: part.scope, kind: 'target', label: card.name || '未知角色', parts: markStatus([part]) });
+                        const parts = [part];
+                        // 🌍 AI-20：卡里有内嵌世界书（`character_book`）⇒ 把它的材料段一并展示
+                        //    （可选段：段里引用 {{世界书}} / {{卡内世界书}} 时 status='taken' = 真会发送；
+                        //      未引用 = 'optional' = 不发送 —— 用户能一眼看出取的是哪一本、以及送不送）
+                        const eb = (typeof buildEmbeddedWbMaterialPart === 'function') ? buildEmbeddedWbMaterialPart(card) : null;
+                        if (eb) parts.push(eb);
+                        sections.push({ id: part.scope, kind: 'target', label: card.name || '未知角色', parts: markStatus(parts) });
                     }
                 }
                 return {
@@ -6749,7 +6777,7 @@ export default {
             useSillyTavernPushTarget, useCustomPushTarget, setCurrentCustomPushTarget, addCustomPushTarget, renameCurrentCustomPushTarget, removeCurrentCustomPushTarget,
             viewOptions, importFileInput, handleImportFiles, importCards, downloadCardFromUrl, selectAllCards, selectInvertCards, cleanGlobalTagsPrompt, sanitizeImportedTags,
             // 📇 DF-22：导入 accept（供 HeaderBar 的隐藏 file input 绑定）
-            importAccept: cardFormats.IMPORT_ACCEPT,
+            importAccept: IMPORT_ACCEPT,
             openBakFolder, openTrashFolder, openGlobalTrash, openChatTab, openFullBackupModal, showFullBackupModal, fullBackupDir, fullBackupKeep,
             // ⚠️ 冷备弹窗的三个回调也必须在这里（模板 @update:backup-dir / @update:keep / @restored 绑的就是它们）
             onFullBackupDirChange, onFullBackupKeepChange, onFullBackupRestored,
@@ -6807,6 +6835,10 @@ export default {
             tagLangMode, toggleTagLangMode, getPresetTagText, displayTagText,
             togglePresetTag, executeBatchTagSave,
             showAITagModal, aiCandidateTags, aiCustomPrompt, aiTaggingProgress, isAITagging, openAITagModal, startAITagging,
+            // 🩹 2026-10-04（AR-13 四步链第 3 步补漏）：模板用了 `:prefill-compat-info` / `:tag-pausing`
+            //    但这两个绑定没进 ctx ⇒ 渲染期一直是 `undefined`（Vue warn：not defined on instance），
+            //    「预填充兼容信息」与「暂停中」态全程不显示。**新增模板绑定必须同时进 ctx**。
+            prefillCompatInfo, tagPausing,
             // 🏷️ S2/S3（2026-09-25）：打标双模式 / 世界书范围 / 候选池开关可用性（模板与探针经 ctx 直取）
             startWbTagging, handleStartTagging, aiTagTargetMode, wbTagRange, wbTagRangeInfo,
             candidatePoolSwitchable, candidatePoolSwitchReason, useCandidatePool,
@@ -6827,6 +6859,9 @@ export default {
             llmRolePrompts, saveRolePrompts, mapPromptsToSegments, applyGuideRecipe, tagCustomSegments, tagPromptMode, tagMaterialOverrides, materialPreview, setMaterialOverride, clearMaterialOverride, tagPackSize, tagSkipTagged, tagWbSegmentMax, tagAutoMaterial, tagResume, resumeTagging,
             // 🔗 批次 C：自定义模式「全手动档却无材料占位符」的警告（预览区显示；打标前另有二次确认）
             customModeLacksMaterial,
+            // 🌍 AI-20：卡内嵌世界书材料段构建（`materialPreview` 用它渲染「卡内嵌世界书材料」分组；
+            //    ⚠️ 必须**同步进 ctx**——只解构不进 ctx，`typeof !== 'function'` 会让预览静默少一段）
+            buildEmbeddedWbMaterialPart,
             // 🌍 Q8（2026-10-03）：大幅书分段上限的取值范围（模板滑块用）
             WB_SEGMENT_MAX_SEGMENTS_DEFAULT, WB_SEGMENT_MAX_SEGMENTS_MIN, WB_SEGMENT_MAX_SEGMENTS_MAX,
             pauseTagging, tagPausedNow,

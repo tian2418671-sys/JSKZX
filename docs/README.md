@@ -25,15 +25,15 @@
 
 | 文档 | 领域 | 条数 |
 | --- | --- | --- |
-| [bugs/README.md](bugs/README.md) | **总索引** + 历史修复速览 + 来源对照 + 已知非缺陷 | 168 条总表 |
-| [bugs/BUG-架构与渲染.md](bugs/BUG-架构与渲染.md) | 架构 / Electron / Vue 运行时 / 测试调试 | 52 |
-| [bugs/BUG-数据与文件.md](bugs/BUG-数据与文件.md) | 数据 / 文件 / 字段口径 / 扫描与落盘 | 28 |
-| [bugs/BUG-AI打标与标签.md](bugs/BUG-AI打标与标签.md) | AI 打标 / 本地向量 / 标签体系 | 18 |
+| [bugs/README.md](bugs/README.md) | **总索引** + 历史修复速览 + 来源对照 + 已知非缺陷 | 172 条总表 |
+| [bugs/BUG-架构与渲染.md](bugs/BUG-架构与渲染.md) | 架构 / Electron / Vue 运行时 / 测试调试 | 55 |
+| [bugs/BUG-数据与文件.md](bugs/BUG-数据与文件.md) | 数据 / 文件 / 字段口径 / 扫描与落盘 | 29 |
+| [bugs/BUG-AI打标与标签.md](bugs/BUG-AI打标与标签.md) | AI 打标 / 本地向量 / 标签体系 | 20 |
 | [bugs/BUG-性能与大库.md](bugs/BUG-性能与大库.md) | 性能 / 大库 / 内存 / 索引 | 34 |
 | [bugs/BUG-发布更新与打包.md](bugs/BUG-发布更新与打包.md) | 发布 / 打包 / 更新 / OTA | 13 |
 | [bugs/BUG-测卡工作区.md](bugs/BUG-测卡工作区.md) | 测卡工作区（对话测试） | 21 |
 
-> 编号规则 `领域代号-序号`（`AR` / `DF` / `AI` / `PK` / `RL` / `CT`），共 **168 条**（AI=18 / AR=52 / CT=21 / DF=28 / PK=34 / RL=13），每条含现象 / 根因 / 修复 / 验证 / 来源。
+> 编号规则 `领域代号-序号`（`AR` / `DF` / `AI` / `PK` / `RL` / `CT`），共 **172 条**（AI=20 / AR=55 / CT=21 / DF=29 / PK=34 / RL=13），每条含现象 / 根因 / 修复 / 验证 / 来源。
 
 ---
 

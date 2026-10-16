@@ -184,3 +184,106 @@ describe('tagPromptVars — 变量表（buildVarsFromParts）', () => {
         assert.equal(v.jailbreak, '');
     });
 });
+
+// 🌍 AI-20（2026-10-04）：卡内嵌世界书（`character_book`）也能被 {{世界书}} 引用 ——
+//   用户实测「无法引用世界书的内容，是空的」。
+describe('tagPromptVars — 卡内嵌世界书（AI-20）', () => {
+    it('`{{世界书}}` 在没有库世界书段时**回退**到卡内嵌世界书段（卡片视图）', () => {
+        const parts = [
+            { key: 'card', body: 'CARD' },
+            { key: 'embeddedWb', body: 'EMBEDDED', optional: true }
+        ];
+        const v = buildVarsFromParts({ parts, kind: 'card' });
+        assert.equal(v.wb, 'EMBEDDED');            // 修复点：以前恒为 ''
+        assert.equal(v.embeddedWb, 'EMBEDDED');
+        assert.equal(v.material, 'CARD');
+    });
+
+    it('库世界书段存在时**优先**用它（卡片视图下若同时给了 wb 段）', () => {
+        const v = buildVarsFromParts({
+            parts: [{ key: 'wb', body: 'LIB' }, { key: 'embeddedWb', body: 'EMBEDDED' }],
+            kind: 'card'
+        });
+        assert.equal(v.wb, 'LIB');
+        assert.equal(v.embeddedWb, 'EMBEDDED');
+    });
+
+    it('世界书视图：`{{世界书}}` = 当前那本书（不回退、不受 embeddedWb 影响）', () => {
+        const v = buildVarsFromParts({ parts: [{ key: 'wb', body: 'LIB' }], kind: 'wb' });
+        assert.equal(v.material, 'LIB');
+        assert.equal(v.wb, 'LIB');
+    });
+
+    it('内嵌世界书命中：段里写 `{{世界书}}` ⇒ 替换成卡内嵌书材料（非空）', () => {
+        const parts = [{ key: 'card', body: 'CARD' }, { key: 'embeddedWb', body: '\n\n【卡内嵌世界书材料】\n书名：X', optional: true }];
+        const vars = buildVarsFromParts({ parts, kind: 'card' });
+        const r = applySegmentVars([seg('参考世界书：\n{{世界书}}\n再看卡：\n{{卡片}}')], vars);
+        assert.ok(r.segments[0].content.includes('【卡内嵌世界书材料】'));
+        assert.equal(r.used.includes('wb'), true);
+        assert.equal(r.unknown.length, 0);
+    });
+
+    it('`{{卡内世界书}}` 显式别名：解析成 embeddedWb 且能取到值', () => {
+        const r = parseSegmentVars([seg('{{卡内世界书}}')]);
+        assert.deepEqual(r.used, ['embeddedWb']);
+        const vars = buildVarsFromParts({ parts: [{ key: 'embeddedWb', body: 'EMB', optional: true }], kind: 'card' });
+        assert.equal(applySegmentVars([seg('{{卡内世界书}}')], vars).segments[0].content, 'EMB');
+    });
+
+    it('库世界书命中（世界书视图）：`{{世界书}}` 替换成库书材料', () => {
+        const vars = buildVarsFromParts({ parts: [{ key: 'wb', body: 'LIB_BODY' }], kind: 'wb' });
+        assert.equal(applySegmentVars([seg('{{世界书}}')], vars).segments[0].content, 'LIB_BODY');
+    });
+
+    it('两者都没有 ⇒ 空串**且不报错**（占位符被替换成空、不进 unknown）', () => {
+        const vars = buildVarsFromParts({ parts: [{ key: 'card', body: 'CARD' }], kind: 'card' });
+        const r = applySegmentVars([seg('[{{世界书}}]')], vars);
+        assert.equal(r.segments[0].content, '[]');
+        assert.deepEqual(r.unknown, []);
+        assert.deepEqual(r.used, ['wb']);
+    });
+
+    it('splitPartsByVars：`optional` 段**只有被引用才发送**（未引用既不算 auto 也不算 dropped）', () => {
+        const parts = [
+            { key: 'task', body: 'T' },
+            { key: 'card', body: 'C' },
+            { key: 'embeddedWb', body: 'EMB', optional: true }
+        ];
+        // 未引用 ⇒ 不发送（autoParts 里没有它），且不当成"档位不送"
+        const r1 = splitPartsByVars(parts, [], 'compat', 'card');
+        assert.deepEqual(r1.autoParts.map((p) => p.key), ['task', 'card']);
+        assert.deepEqual(r1.takenKeys, []);
+        assert.deepEqual(r1.optionalKeys, ['embeddedWb']);
+        // 引用通用别名 {{世界书}}（逻辑键 material）⇒ 仍是「点名」：可选段随之发送并接管
+        const r2 = splitPartsByVars(parts, ['material'], 'compat', 'card');
+        assert.deepEqual(r2.takenKeys, ['card', 'embeddedWb']);
+        assert.deepEqual(r2.autoParts.map((p) => p.key), ['task']);
+        // 但「没写占位符」时世界书段不被 optional 段顶替：卡片段的 body 仍是卡材料（见 buildVarsFromParts 用例）
+        const r2b = splitPartsByVars(parts, [], 'compat', 'card');
+        assert.deepEqual(r2b.takenKeys, []);
+        // 显式点名 {{卡内世界书}}（逻辑键 embeddedWb）⇒ 只接管可选段；全手动档下其余全丢
+        const r3 = splitPartsByVars(parts, ['embeddedWb'], 'manual', 'card');
+        assert.deepEqual(r3.takenKeys, ['embeddedWb']);
+        assert.deepEqual(r3.droppedKeys, ['task', 'card']); // 只含「非可选」的那两段
+        assert.deepEqual(r3.autoParts, []);
+        // 声明可选但不引用：不因档位（semi/manual）而变成 dropped
+        const r4 = splitPartsByVars(parts, [], 'semi', 'card');
+        assert.deepEqual(r4.droppedKeys, ['task']);
+        assert.deepEqual(r4.optionalKeys, ['embeddedWb']);
+    });
+
+    it('逻辑键归一：embeddedWb 与 card/wb 一样算「目标材料」', () => {
+        const r = splitPartsByVars([{ key: 'embeddedWb', body: 'E', optional: true }], ['material'], 'compat', 'card');
+        assert.deepEqual(r.takenKeys, ['embeddedWb']);
+    });
+
+    it('VAR_DEFS：`卡内世界书` / `内嵌世界书` 是 embeddedWb 的别名（图例可点即插入）', () => {
+        const d = VAR_DEFS.find((x) => x.key === 'embeddedWb');
+        assert.ok(d, '缺 embeddedWb 定义');
+        assert.ok(d.aliases.includes('卡内世界书'));
+        assert.ok(d.aliases.includes('内嵌世界书'));
+        assert.deepEqual(parseSegmentVars([seg('{{内嵌世界书}}')]).used, ['embeddedWb']);
+        // 共用一个别名不冲突：`{{世界书}}` 仍归 wb（世界书视图口径）
+        assert.deepEqual(parseSegmentVars([seg('{{世界书}}')]).used, ['wb']);
+    });
+});

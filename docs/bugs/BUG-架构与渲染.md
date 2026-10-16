@@ -1087,6 +1087,74 @@
 
 ---
 
+### AR-54 ｜ 🔴 一键质检弹窗**关不掉**：setup 返回对象 / `ctx` 漏暴露 `@close` 处理器
+
+- **现象**（2026-10-03，用户实测原话：「打开了关闭不了弹窗这个 bug 怎么没发现」）：
+  「🧪 一键质检」弹窗打开后，点「✕ 关闭」和「知道了」**毫无反应**，只能刷新页面。
+- **根因**：`js/components/App.vue` 的 setup 返回对象 / `ctx` **漏暴露 `closeQualityCheck`**
+  ⇒ 模板 `@close="closeQualityCheck"` 的监听器**实为 `undefined`**（模板读到 `undefined` 不报错）
+  ⇒ 子组件 `$emit('close')` **无人接收**、`show` 永不翻假。属 **AR-13「四步链第 3 步漏项」同型**（定义有了、没进返回 / `ctx`）。
+  取证：`ctx.closeQualityCheck → 不是函数: undefined`，而弹窗按钮本身**命中正常**（`hitSelf: true`）
+  ⇒ 坐实是「事件没人接」，不是「点不到按钮」。
+- **修复**：把 `closeQualityCheck` 补进 setup 返回 / `ctx`；
+  新增**真实鼠标点按**回归探针 `scripts/probes/_probe-modal-close.mjs`（**4/4** 通过）。
+- **验证**：探针 **4/4**；真机点按「知道了」与「✕ 关闭」均能关窗。
+- **同批（同一根因，不另开号）**：同日还漏暴露 4 个挂载回调 —— `onFullBackupDirChange` / `onFullBackupKeepChange` /
+  `onFullBackupRestored` / `qcCurrentIndex`（**后台会话监控**抓到 `Vue warn: Property "…" was accessed during render
+  but is not defined on instance`）⇒ 冷备弹窗改保留份数 / 目录、恢复后刷新、质检「第 n/5 步」全是哑的。已一并补进返回对象。
+- **防再犯**：
+  1. 🔑 **探针报错先做 `elementFromPoint` 命中测试，分清「探针问题 / 应用问题」再下结论**（本条最值钱的教训）——
+     这个 bug 在**更早一轮「真实点按」里已经失败过**（QC 阶段关闭那步 **3/3 ❌**），却被当成「探针坐标问题」放过。
+  2. **任何新挂载的弹窗，必须验「点关闭」**（不能只验「能打开」）。
+  3. **任何新增的 `@事件` / `:prop` 绑定，必须逐个核对它是否在返回对象 / `ctx` 里**
+     （与四步链自查表同一件事：`定义` + `解构` + `ctx 暴露` + `子组件 return 解构`）。
+- **来源**：2026-10-03 用户实测（v2.3.6 五功能实现期）；`CHANGELOG.md` v2.3.6 段「一键质检弹窗关不掉（AR-54，用户实测）」
+
+---
+
+### AR-55 ｜ 🔴 插入锚点「缩进 + 名字」撞错对象 → 名字进了 `useConfigPersistence({…})` 入参，整个 setup 抛 TDZ（启动即白屏，而编译 / 守卫全绿）
+
+- **现象**（2026-10-03，v2.3.6「预填充兼容自动判定」接线期；**由另一条并行开发线的真实启动冒烟撞到**）：
+  生产构建启动后**界面全空**（白屏级崩溃）、控制台 `[Vue 错误]` 连发，原文
+  `Cannot access 'prefillCompatInfo' before initialization` —— **整个 `App.vue` 的 setup 抛错**，
+  渲染函数拿不到任何绑定。
+- **根因**：**插入锚点匹配错对象**。为了让模板能用到 `prefillCompatInfo`（由 `useAITools(...)` 产出），
+  用脚本在 `App.vue` 里按「**缩进 + 名字**」找落点插 `prefillCompatInfo,`，
+  命中的却是 **`useConfigPersistence({ … })` 的入参列表**（`App.vue:5471`）——
+  而这个名字到 setup **更下方**（`:6068`）才由 `useAITools` 解构出来 ⇒ **引用在声明之前求值**（TDZ）。
+  两个「看着都没问题」的假象：① 语法合法（就是一个属性简写）；② 标识符**确实"定义过"**（文件里一搜就有）。
+  同批的**第二个漏点**：`prefillCompatInfo` / `tagPausing` 两个模板绑定**没进 `ctx`**
+  （**AR-13 四步链第 3 步**漏项）⇒ **渲染期恒 `undefined`**（模板读 `undefined` 不报错，静默失效）。
+- **隐蔽性（本条重点）**：下面这些检查**当时全是绿的**，否则不会漏到真机 ——
+  - 语法合法（`node --check` 那一级）；
+  - `npm run build:web` ✅ —— 只验编译，SFC 合法即通过；
+  - `npm run guard:scope` ✅ —— 它判「**有没有这个标识符**」，**不判**「**声明位置是否在引用之前**」；
+  - 单测 ✅ —— 不挂载真实 `App.vue` 的 setup。
+
+  ⇒ **只有真实启动才暴露** —— 正是铁律「改动后必须真实启动冒烟」要拦的那一类。
+- **修复**：① 从 `useConfigPersistence({ … })` 入参里**删除** `prefillCompatInfo`
+  （它只是展示用 computed，不参与持久化收集）—— 已在原位留注释警示「**不要放这里**」（`App.vue:5486` 起）；
+  ② `prefillCompatInfo`（`:6068` 解构）/ `tagPausing`（`:6098` computed）**正确补进 setup 尾部的 `ctx` 返回对象**（`:6830`）；
+  同批另补暴露 4 个挂载回调（与 AR-54 同类根因）。
+- **验证**：真实启动冒烟（`npx electron . --disable-gpu --enable-logging`，跑 `web/` 生产产物）：
+  **无 `[Vue 错误]`**、`[startup] 蒙版淡出` 正常、主界面渲染完成（`#app` 子树 43.6KB DOM）；
+  `build:web` / `guard:scope` 同批保持全绿。
+  ⚠️ 注意：**这几项在修复前也是绿的** —— 它们是**回归护栏**，不是本条的发现手段（发现手段是真实启动）。
+- **防再犯**（**人能照做**的检查项）：
+  1. 往 `ctx` / setup 返回对象 / **任何 composable 的入参列表**里插名字前，
+     先确认该名字的**声明位置在引用之前**。`useConfigPersistence({…})` 这类调用在 setup **前段**，
+     **凡由下方 composable 产出的名字，一律不能进它的入参**。
+  2. 插入后**真实启动一次**，看有没有 `[Vue 错误]` / 白屏 —— `build:web` / 语法检查 / `guard:scope`
+     **都证明不了这件事**（它们本来就全绿）。
+  3. **别用「缩进 + 名字」当唯一锚点**：脚本 / 正则改多调用点的文件时，锚点要带上下文
+     （整行唯一注释 / 相邻字段名 / 行号区间），插完**回读 diff** 确认落在目标调用里。
+  4. **同名 ref 出现在另一处调用签名里 = 高危信号**：入参里已有 `prefillCompatMode` / `prefillCompatTable`
+     这类同族名字时，说明这里正是最容易误撞的位置。
+- **来源**：2026-10-03 v2.3.6「预填充兼容自动判定」接线期；由并行开发线的**真实启动冒烟**抓获；
+  修复过程记在 `CHANGELOG.md` 未发布（工作树）段「同批修好的两个 TDZ 崩溃」
+
+---
+
 ## 四、约定
 
 - 新增渲染层逻辑前，先确认**是否需要版本号/`triggerRef`** 打破 computed 缓存（AR-12、AR-18 是同一类病的两种表现）。

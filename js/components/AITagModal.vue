@@ -358,9 +358,9 @@
                             <div class="px-3 py-2 bg-indigo-50/70 border-b border-indigo-100 flex items-center justify-between gap-2">
                                 <span class="text-xs font-bold text-indigo-800">🧠 System <span class="font-normal text-indigo-400 text-[10px]">角色设定 / 任务规则 / 打标原则</span></span>
                                 <span class="text-[9px] px-1.5 py-0.5 rounded border"
-                                      :class="llmOnlyActive ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-gray-100 text-gray-500 border-gray-200'"
+                                      :class="llmOnlyActive ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-rose-50 text-rose-700 border-rose-300 font-bold'"
                                       :title="llmOnlyActive ? '当前组合 = 只有 LLM 层 → 分角色链路已生效' : '只有 ①规则关 + ②向量关 + ③LLM开 时才生效'">
-                                    {{ llmOnlyActive ? '🟢 分角色链路已生效' : '⚪ 未生效（非「仅 LLM」组合）' }}
+                                    {{ llmOnlyActive ? '🟢 分角色链路已生效' : '🔴 未生效 —— 不是「仅 LLM」组合，你写的段不会被发送（去「⚙️ 执行管线」页只勾 ③ LLM）' }}
                                 </span>
                             </div>
 
@@ -565,6 +565,11 @@
                                 💡 <code>$1</code> 与 <code>&#123;&#123;材料&#125;&#125;</code> 等价（若你的提示词里有正则反向引用 <code>$1</code>，请改用花括号写法）；
                                 <code>&#123;&#123;破限&#125;&#125;</code> 取当前破限词（未启用破限时为空）。共 {{ varLegend.length }} 个占位符可用。
                             </p>
+                            <p class="text-[9px] text-gray-500">
+                                🌍 角色卡视图下，<code>&#123;&#123;世界书&#125;&#125;</code> 取的是<b>这张卡内嵌的世界书</b>
+                                （卡上带 🌍 徽标那种；<code>&#123;&#123;卡内世界书&#125;&#125;</code> 同义）。
+                                该材料<b>默认不发送</b> —— 只有段里引用了它才会随请求发出（预览区能看到取的是哪一本）。
+                            </p>
                             <p v-if="materialPreview.varInfo && materialPreview.varInfo.unknown && materialPreview.varInfo.unknown.length"
                                class="text-[10px] text-amber-600 bg-amber-50 border border-amber-200 rounded px-2 py-1">
                                 ⚠️ 未识别的占位符：{{ unknownVarsText }} —— 会<b>按原文</b>发送
@@ -662,6 +667,8 @@
                                         <!-- 🔗 批次 C：自定义模式下的三类状态（与发送侧同一判据） -->
                                         <span v-if="part.status === 'taken'" class="text-[9px] px-1 py-0.5 rounded bg-gray-200 text-gray-700 border border-gray-300 shrink-0" title="本段已被段内占位符接管 —— 不会再自动附加到 USER 消息">🔗 已由占位符接管</span>
                                         <span v-else-if="part.status === 'dropped'" class="text-[9px] px-1 py-0.5 rounded bg-rose-50 text-rose-700 border border-rose-200 shrink-0" title="当前「程序材料自动附加」档位不送这一段">🚫 当前档不送</span>
+                                        <!-- 🌍 AI-20：可选段（卡内嵌世界书）—— 只有段里引用占位符时才发送 -->
+                                        <span v-else-if="part.status === 'optional'" class="text-[9px] px-1 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200 shrink-0" :title="optionalPartTitle">🌍 未引用 · 不发送</span>
                                         <span v-else-if="part.status === 'auto' && materialPreview.autoMaterialMode" class="text-[9px] text-emerald-700 shrink-0">自动附加</span>
                                         <span class="text-[9px] text-gray-400 shrink-0">{{ partValue(part).length }} 字</span>
                                         <span class="ml-auto flex items-center gap-1 shrink-0">
@@ -804,6 +811,9 @@ import { estimateWbCost, estimateCardCost, stripMaterialPrefix } from '../utils/
 import { insertSegmentAtTop, removeSegmentAt, moveSegment, patchSegment, makeCustomSegment } from '../utils/customPromptSegments.js';
 // 🔗 批次 C：材料占位符（段徽标 / 图例 / 插入按钮与发送侧同一套定义）
 import { VAR_DEFS, parseSegmentVars } from '../utils/tagPromptVars.js';
+// 🧩 2026-10-11 修复（#bug-3）：「API 兼容」三态下拉此前引用未定义的 `prefillModes` / `compatText` /
+//    `compatToneClass` ⇒ 下拉**无选项**（用户无法选择兼容模式）、状态文案不渲染。现复用 prefillCompat 的权威定义。
+import { PREFILL_MODES, describeCompat } from '../utils/prefillCompat.js';
 // 📖 2026-10-03（用户需求）：自定义模式「图文教程」弹窗（内联 SVG 图解 + 可套用配方）
 import CustomModeGuide from './CustomModeGuide.vue';
 
@@ -987,6 +997,31 @@ export default {
             const rp = this.llmRolePrompts || {};
             return String(rp.prefill || '').trim();
         },
+        // 🧩 2026-10-11（#bug-3 修复）：「API 兼容」下拉的三态选项（复用 prefillCompat 权威定义）
+        prefillModes() {
+            return PREFILL_MODES;
+        },
+        // 🧩 2026-10-11（#bug-3 修复）：当前兼容状态的一句话说明 + 语气色（复用 describeCompat 纯函数）
+        compatInfo() {
+            const info = this.prefillCompatInfo || {};
+            return describeCompat({
+                mode: this.prefillCompatMode,
+                key: info.key,
+                table: info.entry ? { [info.key]: info.entry } : {},
+                hasPrefill: !!this.trimmedPrefill
+            });
+        },
+        compatText() {
+            return (this.compatInfo && this.compatInfo.text) || '';
+        },
+        compatToneClass() {
+            const tone = (this.compatInfo && this.compatInfo.tone) || 'unknown';
+            if (tone === 'ok') return 'text-emerald-600';
+            if (tone === 'skip') return 'text-rose-500';
+            if (tone === 'try') return 'text-amber-600';
+            if (tone === 'off') return 'text-gray-400';
+            return 'text-gray-500';
+        },
         // 🔗 批次 C：占位符图例（顺序即展示顺序；`$1` 作为「材料」的别名单独提示文案）
         varLegend() {
             return VAR_DEFS.filter((d) => d.key !== 'jailbreak').map((d) => ({
@@ -999,6 +1034,11 @@ export default {
         unknownVarsText() {
             const unk = (this.materialPreview && this.materialPreview.varInfo && this.materialPreview.varInfo.unknown) || [];
             return unk.map((u) => '{' + '{' + u + '}' + '}').join('、');
+        },
+        // 🌍 AI-20：可选段（卡内嵌世界书）的提示文本 —— 同样在 JS 里拼，避免模板里的裸花括号被 Vue 二次编译
+        optionalPartTitle() {
+            return '本段默认不发送：只有在提示词段里写 ' + this.varText('世界书') + ' 或 ' + this.varText('卡内世界书')
+                + ' 引用它时，才会把这张卡内嵌的世界书材料随请求发出';
         },
         // 🔗 批次 C：当前档位的一句话说明
         autoMaterialModeHint() {            const m = this.tagAutoMaterial || 'compat';
@@ -1102,6 +1142,10 @@ export default {
         varLabelOf(key) {
             const d = VAR_DEFS.find((x) => x.key === key);
             return d ? d.label : key;
+        },
+        /** 🌍 AI-20：把占位符名拼成 `{{名字}}` 文本（在 JS 里拼，模板里不出现裸花括号） */
+        varText(name) {
+            return '{' + '{' + String(name) + '}' + '}';
         },
         insertVar(placeholder) {
             const list = this.tagCustomSegments || [];
