@@ -53,34 +53,35 @@
                                     这个徽章在「⚙️ 执行管线」页。没看到它 <b>不一定</b>是配置错（你可能停在别的子页）；<b>去那页确认一眼</b>：只要 ① 规则、② 向量是关的、③ LLM 是开的，就是绿的。要是它显示未生效，<b>你写的段根本不会被发送</b>。
                                 </p>
                             </div>
-                            <svg viewBox="0 0 700 120" class="w-full h-auto text-gray-500">
-                                <rect x="4" y="20" width="196" height="76" rx="8" fill="currentColor" fill-opacity="0.07" stroke="currentColor" stroke-opacity="0.35" />
-                                <text x="16" y="40" font-size="11" fill="currentColor">① 卡片列表勾选</text>
-                                <text x="16" y="58" font-size="10" fill="currentColor" fill-opacity="0.7">☑️ 批量多选 → 点卡片</text>
-                                <rect x="16" y="70" width="76" height="14" rx="3" fill="currentColor" fill-opacity="0.2" />
-                                <text x="22" y="81" font-size="9" fill="currentColor" fill-opacity="0.8">已勾选 3 张</text>
-                                <path d="M204 58 L244 58" stroke="currentColor" stroke-opacity="0.5" stroke-width="1.5" />
-                                <path d="M238 54 L246 58 L238 62 z" fill="currentColor" fill-opacity="0.6" />
-                                <rect x="248" y="20" width="196" height="76" rx="8" fill="currentColor" fill-opacity="0.07" stroke="currentColor" stroke-opacity="0.35" />
-                                <text x="260" y="40" font-size="11" fill="currentColor">② 打标窗左导航</text>
-                                <rect x="260" y="48" width="172" height="16" rx="3" fill="currentColor" fill-opacity="0.18" />
-                                <text x="266" y="60" font-size="10" fill="currentColor" fill-opacity="0.9">✨ 自定义模式（实验）</text>
-                                <text x="260" y="82" font-size="10" fill="currentColor" fill-opacity="0.7">执行管线：只勾 ③ LLM</text>
-                                <path d="M448 58 L488 58" stroke="currentColor" stroke-opacity="0.5" stroke-width="1.5" />
-                                <path d="M482 54 L490 58 L482 62 z" fill="currentColor" fill-opacity="0.6" />
-                                <rect x="492" y="20" width="200" height="76" rx="8" fill="currentColor" fill-opacity="0.07" stroke="currentColor" stroke-opacity="0.35" />
-                                <text x="504" y="40" font-size="11" fill="currentColor">③ 点开始</text>
-                                <rect x="504" y="48" width="120" height="16" rx="8" fill="currentColor" fill-opacity="0.24" />
-                                <text x="516" y="60" font-size="10" fill="currentColor" fill-opacity="0.95">🚀 开始智能打标</text>
-                                <text x="504" y="82" font-size="10" fill="currentColor" fill-opacity="0.7">卡片上出现标签 = 成功</text>
-                            </svg>
+                            <!-- 示意图（HTML/CSS，替代原 SVG：字号与其他区域一致，窄屏自动堆叠）
+                                 ⚠️ 只用**已被主题覆盖**的类（border-gray-* / bg-gray-*），
+                                    切勿用带透明度的 bg-white/xx、bg-gray-50/xx —— 主题未覆盖这类 → 深色主题下会发亮突兀。 -->
+                            <div class="flex flex-col sm:flex-row items-stretch gap-2">
+                                <div class="flex-1 rounded-lg border border-gray-300 px-3 py-2.5">
+                                    <p class="text-[11px] font-bold text-gray-700">① 卡片列表勾选</p>
+                                    <p class="text-[11px] text-gray-500 mt-1">☑️ 批量多选 → 点卡片</p>
+                                    <span class="inline-block mt-1.5 px-2 py-0.5 rounded bg-gray-100 text-[11px] text-gray-600">已勾选 3 张</span>
+                                </div>
+                                <div class="flex items-center justify-center shrink-0 text-gray-400 text-sm sm:rotate-0 rotate-90">→</div>
+                                <div class="flex-1 rounded-lg border border-gray-300 px-3 py-2.5">
+                                    <p class="text-[11px] font-bold text-gray-700">② 打标窗左导航</p>
+                                    <span class="inline-block mt-1 px-2 py-0.5 rounded bg-gray-100 text-[11px] text-gray-700">✨ 自定义模式（实验）</span>
+                                    <p class="text-[11px] text-gray-500 mt-1.5">执行管线：只勾 ③ LLM</p>
+                                </div>
+                                <div class="flex items-center justify-center shrink-0 text-gray-400 text-sm sm:rotate-0 rotate-90">→</div>
+                                <div class="flex-1 rounded-lg border border-gray-300 px-3 py-2.5">
+                                    <p class="text-[11px] font-bold text-gray-700">③ 点开始</p>
+                                    <span class="inline-block mt-1 px-2 py-0.5 rounded-full bg-indigo-100 text-[11px] text-indigo-700">🚀 开始智能打标</span>
+                                    <p class="text-[11px] text-gray-500 mt-1.5">卡片上出现标签 = 成功</p>
+                                </div>
+                            </div>
                             <p class="text-[12px] text-gray-700 leading-relaxed">
                                 打开打标窗后先看一眼左导航：切到「✨ 自定义模式（实验）」才走这张卡的流程。执行管线只勾 ③ LLM，右边会出现「🟢 分角色链路已生效」。
                             </p>
                             <div class="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2">
                                 <p class="text-[11px] font-bold text-emerald-700 mb-1">照抄这段（一个字都不用改）</p>
-                                <pre class="text-[11px] text-gray-700 bg-white border border-gray-200 rounded p-2 whitespace-pre-wrap">{{ copy.run }}</pre>
-                                <button @click="copy(copy.run, 'run')" class="mt-1.5 text-[10px] px-2 py-1 rounded bg-white border border-gray-300 hover:bg-gray-50">{{ copiedKey === 'run' ? '✅ 已复制' : '📋 复制' }}</button>
+                                <pre class="text-[11px] text-gray-700 bg-white border border-gray-200 rounded p-2 whitespace-pre-wrap">{{ copyTexts.run }}</pre>
+                                <button @click="copy(copyTexts.run, 'run')" class="mt-1.5 text-[10px] px-2 py-1 rounded bg-white border border-gray-300 hover:bg-gray-50">{{ copiedKey === 'run' ? '✅ 已复制' : '📋 复制' }}</button>
                             </div>
                             <p class="text-[11px] text-gray-500">粘到哪：左导航「📝 系统提示词（段编辑器）」→ 点「＋ 在最上方插入」→ 角色选 USER → 粘进去。</p>
 
@@ -99,7 +100,8 @@
                         <!-- ② 只要标签不要废话 -->
                         <section v-if="active === 'clean'" class="space-y-3">
                             <h4 class="text-sm font-bold text-gray-800">② 只要标签，不要它那段废话</h4>
-                            <svg viewBox="0 0 700 116" class="w-full h-auto text-gray-500">
+                            <div class="overflow-x-auto">
+                            <svg viewBox="0 0 700 116" class="w-full h-auto min-w-[520px] text-gray-500">
                                 <rect x="4" y="18" width="300" height="80" rx="8" fill="currentColor" fill-opacity="0.07" stroke="currentColor" stroke-opacity="0.35" />
                                 <text x="16" y="36" font-size="11" fill="currentColor">AI 想说的</text>
                                 <text x="16" y="54" font-size="10" fill="currentColor" fill-opacity="0.75">「好的，我来分析这张卡…」</text>
@@ -113,10 +115,11 @@
                                 <text x="372" y="76" font-size="10" fill="currentColor" fill-opacity="0.7">做法：末尾加一句「只输出 JSON 数组」</text>
                                 <text x="372" y="90" font-size="10" fill="currentColor" fill-opacity="0.7">再加预填充 &lt;tags&gt;[ 锁住开头</text>
                             </svg>
+                            </div>
                             <div class="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2">
                                 <p class="text-[11px] font-bold text-emerald-700 mb-1">照抄这段（User 段）</p>
-                                <pre class="text-[11px] text-gray-700 bg-white border border-gray-200 rounded p-2 whitespace-pre-wrap">{{ copy.clean }}</pre>
-                                <button @click="copy(copy.clean, 'clean')" class="mt-1.5 text-[10px] px-2 py-1 rounded bg-white border border-gray-300 hover:bg-gray-50">{{ copiedKey === 'clean' ? '✅ 已复制' : '📋 复制' }}</button>
+                                <pre class="text-[11px] text-gray-700 bg-white border border-gray-200 rounded p-2 whitespace-pre-wrap">{{ copyTexts.clean }}</pre>
+                                <button @click="copy(copyTexts.clean, 'clean')" class="mt-1.5 text-[10px] px-2 py-1 rounded bg-white border border-gray-300 hover:bg-gray-50">{{ copiedKey === 'clean' ? '✅ 已复制' : '📋 复制' }}</button>
                             </div>
                             <p class="text-[11px] text-gray-600">再补一步最有效：<b>段编辑器末尾加一段，角色选 ASSISTANT，内容写 <code class="text-indigo-600">&lt;tags&gt;[</code></b> —— 等于替 AI 写好了开头，它只能接着往下写。</p>
                             <p class="text-[11px] text-gray-500">错了会怎样：不写「只输出 JSON」，模型先来一句「好的」；偶尔那个「好的」也会变成标签。</p>
@@ -125,30 +128,32 @@
                         <!-- ③ 它拒答 -->
                         <section v-if="active === 'refuse'" class="space-y-3">
                             <h4 class="text-sm font-bold text-gray-800">③ 它老说「对不起，我不能」</h4>
-                            <svg viewBox="0 0 700 124" class="w-full h-auto text-gray-500">
-                                <rect x="4" y="16" width="330" height="92" rx="8" fill="currentColor" fill-opacity="0.07" stroke="currentColor" stroke-opacity="0.35" />
+                            <div class="overflow-x-auto">
+                            <svg viewBox="0 0 700 152" class="w-full h-auto min-w-[520px] text-gray-500">
+                                <rect x="4" y="16" width="330" height="120" rx="8" fill="currentColor" fill-opacity="0.07" stroke="currentColor" stroke-opacity="0.35" />
                                 <text x="16" y="34" font-size="11" fill="currentColor">打标窗 · 左导航「📝 系统提示词」</text>
                                 <rect x="16" y="44" width="306" height="18" rx="3" fill="currentColor" fill-opacity="0.18" />
                                 <text x="24" y="57" font-size="10" fill="currentColor" fill-opacity="0.9">⚠️ 启用强制破限 (Jailbreak)　☑</text>
                                 <rect x="16" y="68" width="306" height="28" rx="3" fill="currentColor" fill-opacity="0.24" stroke="currentColor" stroke-opacity="0.6" />
                                 <text x="24" y="86" font-size="10" fill="currentColor">破限文本框 ← 词粘这里</text>
-                                <text x="16" y="104" font-size="9" fill="currentColor" fill-opacity="0.7">或者点旁边的「📚 预设套用」选一条现成的</text>
-                                <path d="M340 62 L378 62" stroke="currentColor" stroke-opacity="0.5" stroke-width="1.5" />
-                                <path d="M372 58 L380 62 L372 66 z" fill="currentColor" fill-opacity="0.6" />
-                                <rect x="386" y="16" width="306" height="92" rx="8" fill="currentColor" fill-opacity="0.12" stroke="currentColor" stroke-opacity="0.5" />
+                                <text x="16" y="114" font-size="9" fill="currentColor" fill-opacity="0.7">或者点旁边的「📚 预设套用」选一条现成的</text>
+                                <path d="M340 76 L378 76" stroke="currentColor" stroke-opacity="0.5" stroke-width="1.5" />
+                                <path d="M372 72 L380 76 L372 80 z" fill="currentColor" fill-opacity="0.6" />
+                                <rect x="386" y="16" width="306" height="120" rx="8" fill="currentColor" fill-opacity="0.12" stroke="currentColor" stroke-opacity="0.5" />
                                 <text x="398" y="34" font-size="11" fill="currentColor">效果</text>
-                                <text x="398" y="54" font-size="10" fill="currentColor" fill-opacity="0.75">✗ 拒答 → ✅ 正常出标签</text>
-                                <text x="398" y="74" font-size="10" fill="currentColor" fill-opacity="0.7">代价：回答变长、格式容易飘</text>
-                                <text x="398" y="92" font-size="10" fill="currentColor" fill-opacity="0.7">压住它的办法：User 里写死</text>
-                                <text x="398" y="104" font-size="10" fill="currentColor" fill-opacity="0.7">「只输出 JSON 数组」</text>
+                                <text x="398" y="56" font-size="10" fill="currentColor" fill-opacity="0.75">✗ 拒答 → ✅ 正常出标签</text>
+                                <text x="398" y="78" font-size="10" fill="currentColor" fill-opacity="0.7">代价：回答变长、格式容易飘</text>
+                                <text x="398" y="100" font-size="10" fill="currentColor" fill-opacity="0.7">压住它的办法：User 里写死</text>
+                                <text x="398" y="118" font-size="10" fill="currentColor" fill-opacity="0.7">「只输出 JSON 数组」</text>
                             </svg>
+                            </div>
                             <div class="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 space-y-2">
                                 <p class="text-[11px] font-bold text-emerald-700">照抄 · 轻量版（够用，推荐先试这个）</p>
-                                <pre class="text-[11px] text-gray-700 bg-white border border-gray-200 rounded p-2 whitespace-pre-wrap">{{ copy.jbLight }}</pre>
-                                <button @click="copy(copy.jbLight, 'jb1')" class="text-[10px] px-2 py-1 rounded bg-white border border-gray-300 hover:bg-gray-50">{{ copiedKey === 'jb1' ? '✅ 已复制' : '📋 复制' }}</button>
+                                <pre class="text-[11px] text-gray-700 bg-white border border-gray-200 rounded p-2 whitespace-pre-wrap">{{ copyTexts.jbLight }}</pre>
+                                <button @click="copy(copyTexts.jbLight, 'jb1')" class="text-[10px] px-2 py-1 rounded bg-white border border-gray-300 hover:bg-gray-50">{{ copiedKey === 'jb1' ? '✅ 已复制' : '📋 复制' }}</button>
                                 <p class="text-[11px] font-bold text-emerald-700 pt-1">照抄 · 强硬版（开源模型 / 反复拒答时用）</p>
-                                <pre class="text-[11px] text-gray-700 bg-white border border-gray-200 rounded p-2 whitespace-pre-wrap">{{ copy.jbHard }}</pre>
-                                <button @click="copy(copy.jbHard, 'jb2')" class="text-[10px] px-2 py-1 rounded bg-white border border-gray-300 hover:bg-gray-50">{{ copiedKey === 'jb2' ? '✅ 已复制' : '📋 复制' }}</button>
+                                <pre class="text-[11px] text-gray-700 bg-white border border-gray-200 rounded p-2 whitespace-pre-wrap">{{ copyTexts.jbHard }}</pre>
+                                <button @click="copy(copyTexts.jbHard, 'jb2')" class="text-[10px] px-2 py-1 rounded bg-white border border-gray-300 hover:bg-gray-50">{{ copiedKey === 'jb2' ? '✅ 已复制' : '📋 复制' }}</button>
                             </div>
                             <p class="text-[11px] text-gray-500">什么时候别填：模型本来就听话、或者你在做正式内容 —— 破限会让它话变多、偶尔不按格式。</p>
                         </section>
@@ -156,7 +161,8 @@
                         <!-- ④ 按我的命名 -->
                         <section v-if="active === 'style'" class="space-y-3">
                             <h4 class="text-sm font-bold text-gray-800">④ 标签按我的规矩来</h4>
-                            <svg viewBox="0 0 700 118" class="w-full h-auto text-gray-500">
+                            <div class="overflow-x-auto">
+                            <svg viewBox="0 0 700 118" class="w-full h-auto min-w-[520px] text-gray-500">
                                 <rect x="4" y="16" width="212" height="90" rx="8" fill="currentColor" fill-opacity="0.07" stroke="currentColor" stroke-opacity="0.35" />
                                 <text x="16" y="34" font-size="11" fill="currentColor">🏷️ 候选标签池</text>
                                 <text x="16" y="52" font-size="10" fill="currentColor" fill-opacity="0.75">你自己维护的词表</text>
@@ -177,10 +183,11 @@
                                 <text x="536" y="72" font-size="10" fill="currentColor" fill-opacity="0.8"> "关系/青梅"]</text>
                                 <text x="536" y="92" font-size="9" fill="currentColor" fill-opacity="0.6">全库写法一致</text>
                             </svg>
+                            </div>
                             <div class="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2">
                                 <p class="text-[11px] font-bold text-emerald-700 mb-1">照抄这段（System 段）</p>
-                                <pre class="text-[11px] text-gray-700 bg-white border border-gray-200 rounded p-2 whitespace-pre-wrap">{{ copy.style }}</pre>
-                                <button @click="copy(copy.style, 'style')" class="mt-1.5 text-[10px] px-2 py-1 rounded bg-white border border-gray-300 hover:bg-gray-50">{{ copiedKey === 'style' ? '✅ 已复制' : '📋 复制' }}</button>
+                                <pre class="text-[11px] text-gray-700 bg-white border border-gray-200 rounded p-2 whitespace-pre-wrap">{{ copyTexts.style }}</pre>
+                                <button @click="copy(copyTexts.style, 'style')" class="mt-1.5 text-[10px] px-2 py-1 rounded bg-white border border-gray-300 hover:bg-gray-50">{{ copiedKey === 'style' ? '✅ 已复制' : '📋 复制' }}</button>
                             </div>
                             <p class="text-[11px] text-gray-500">把最后那行「标签示例」改成你自己的常用词 —— 这是最省事的一步：模型会照着你给的例子往下造。</p>
                         </section>
@@ -188,7 +195,8 @@
                         <!-- ⑤ 读世界书 + 材料写法 -->
                         <section v-if="active === 'wb'" class="space-y-3">
                             <h4 class="text-sm font-bold text-gray-800">⑤ 让它读卡里的世界书（材料到底怎么写）</h4>
-                            <svg viewBox="0 0 700 132" class="w-full h-auto text-gray-500">
+                            <div class="overflow-x-auto">
+                            <svg viewBox="0 0 700 132" class="w-full h-auto min-w-[520px] text-gray-500">
                                 <rect x="4" y="14" width="196" height="50" rx="8" fill="currentColor" fill-opacity="0.07" stroke="currentColor" stroke-opacity="0.35" />
                                 <text x="16" y="32" font-size="11" fill="currentColor">你勾的卡</text>
                                 <text x="16" y="50" font-size="10" fill="currentColor" fill-opacity="0.75">卡里自带世界书（🌍）</text>
@@ -212,11 +220,12 @@
                                 <rect x="538" y="92" width="154" height="30" rx="6" fill="currentColor" fill-opacity="0.22" stroke="currentColor" stroke-opacity="0.7" />
                                 <text x="548" y="112" font-size="11" font-family="monospace" fill="currentColor">✓ &#123;&#123;材料&#125;&#125;</text>
                             </svg>
+                            </div>
                             <p class="text-[12px] text-gray-700">看图记住一句话：<b>花括号里夹着「材料」两个字</b>。程序就是拿这两个字当暗号去找内容，暗号打错，它就原样发出去（AI 看不到正文）。</p>
                             <div class="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2">
                                 <p class="text-[11px] font-bold text-emerald-700 mb-1">照抄这一整行（整行复制进段正文）</p>
-                                <pre class="text-[11px] text-gray-700 bg-white border border-gray-200 rounded p-2 whitespace-pre-wrap">{{ copy.wb }}</pre>
-                                <button @click="copy(copy.wb, 'wb')" class="mt-1.5 text-[10px] px-2 py-1 rounded bg-white border border-gray-300 hover:bg-gray-50">{{ copiedKey === 'wb' ? '✅ 已复制' : '📋 复制' }}</button>
+                                <pre class="text-[11px] text-gray-700 bg-white border border-gray-200 rounded p-2 whitespace-pre-wrap">{{ copyTexts.wb }}</pre>
+                                <button @click="copy(copyTexts.wb, 'wb')" class="mt-1.5 text-[10px] px-2 py-1 rounded bg-white border border-gray-300 hover:bg-gray-50">{{ copiedKey === 'wb' ? '✅ 已复制' : '📋 复制' }}</button>
                             </div>
                             <p class="text-[11px] text-gray-600">只想用卡、不要世界书？把上面那行删掉即可（不写暗号，程序就不塞）。反过来「⚪ 全手动」档又不写暗号 ⇒ AI 收不到任何正文。</p>
                         </section>
@@ -224,7 +233,8 @@
                         <!-- ⑥ 出错 -->
                         <section v-if="active === 'fix'" class="space-y-3">
                             <h4 class="text-sm font-bold text-gray-800">⑥ 出问题看这里</h4>
-                            <svg viewBox="0 0 700 96" class="w-full h-auto text-gray-500">
+                            <div class="overflow-x-auto">
+                            <svg viewBox="0 0 700 96" class="w-full h-auto min-w-[520px] text-gray-500">
                                 <rect x="4" y="14" width="220" height="68" rx="8" fill="currentColor" fill-opacity="0.07" stroke="currentColor" stroke-opacity="0.35" />
                                 <text x="16" y="34" font-size="11" fill="currentColor">打标日志窗口</text>
                                 <text x="16" y="54" font-size="10" fill="currentColor" fill-opacity="0.75">每行点「🔍 查看」</text>
@@ -241,6 +251,7 @@
                                 <text x="548" y="34" font-size="11" fill="currentColor">对照右下表</text>
                                 <text x="548" y="54" font-size="10" fill="currentColor" fill-opacity="0.75">症状 → 怎么办</text>
                             </svg>
+                            </div>
                             <div class="border border-gray-200 rounded-lg overflow-hidden">
                                 <div v-for="(f, i) in fixes" :key="i" class="flex gap-2 px-3 py-2 text-[11px]" :class="i % 2 ? 'bg-gray-50' : 'bg-white'">
                                     <span class="w-56 shrink-0 text-gray-700">{{ f.sick }}</span>
@@ -269,6 +280,8 @@ const CARDS = [
 ];
 
 // 可复制文本（一律放数据里，模板只负责插值 ⇒ 不会踩裸花括号的坑）
+// ⚠️ AR-56：本对象在 data() 里的键名必须叫 copyTexts —— 曾用 `copy`，与 methods.copy 同名，
+//    Vue 中 methods 覆盖 data ⇒ 模板 `{{ copy.wb }}` 拿到函数对象 ⇒ 全部复制框渲染为空（不报错）。
 const COPY = {
     run: '请为下面这张卡生成 5~12 个便于检索的中文标签。\n只依据材料里真实出现的内容，不要脑补。\n只输出 JSON 数组，不要任何解释。\n\n【本次要打标的卡】\n{{材料}}',
     clean: '请为下面这张卡生成 5~12 个便于检索的中文标签。\n覆盖：身份、关系、世界观、情绪基调、剧情要素。\n不要输出分析过程，不要道歉，不要 markdown 围栏。\n只输出 JSON 数组。\n\n【本次要打标的卡】\n{{材料}}',
@@ -320,7 +333,7 @@ export default {
         return {
             active: 'run',
             cards: CARDS,
-            copy: COPY,
+            copyTexts: COPY,
             recipes: RECIPES,
             fixes: FIXES,
             copiedKey: ''
