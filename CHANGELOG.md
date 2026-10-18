@@ -1,7 +1,72 @@
-# SillyTavern 角色卡管理器 · v1.0 → v2.4.1 更新汇总
+# SillyTavern 角色卡管理器 · v1.0 → v2.4.2 更新汇总
 
-> 更新周期：2026-08-09 ~ 2026-10-16
+> 更新周期：2026-08-09 ~ 2026-10-18
 > 技术栈：Electron + Vue3 + Tailwind + ECharts
+
+---
+
+## 🚀 v2.4.2 · 独立前端角色卡（新功能）+ 卡内面板渲染家族去根（CT-22~26）（2026-10-18）
+
+> 本轮来源：用户先要求「显示展示和方便管理的独立前端角色卡」，热测试抓修 6 轮 UI/行为缺陷，
+> 随后实测报「角色卡渲染不到位」，明确纠正「跟重型卡无关」；最后要求「对同类的 bug 进行去根修复」+
+> 「对重卡入口改名成独立的网页前端卡」+「加上文字描述当前只支持 html 链接形式的卡」。
+
+### ✨ 新增：独立前端角色卡（展示型第三方 SPA 承载）
+
+- `main/heavyCards/manager.js`：`WebContentsView` 宿主管理器（打开/关闭/销毁/缩放/离线/标题回传）。
+- `main/heavyCards/backup.js`：一卡一存档的原子快照备份引擎（世代轮换 / 保留策略 / 启动清理 / tar 导入导出）。
+- `js/composables/useHeavyCards.js`：清单管理、按页标题自动命名、矩形上报、闲置回收、定时备份。
+- `js/components/HeavyCardWorkspace.vue`：右侧工作区（两行折叠工具栏 / 沉浸式全屏 / 窗口化 / 隐藏工具栏 / 备份面板）。
+- 主进程新增 `heavycard:*` IPC 一组 + `heavycard-local://` 协议（本地目录模式）。
+
+### 🔴 CT-22 · 面板被切成三段、满屏裸露 JS
+
+- **根因**：`BARE_FENCE_RE` / `HTML_FENCE_RE` 用 `/```([\s\S]*?)```/`，**任意位置**的三个反引号都算闭合围栏。
+  面板内部嵌着卡作者 MVU 脚本，正则字面量 `.replace(/^```(?:markdown|md|text)?\s*/i,'')` 本身带三个反引号
+  ⇒ 43,667 字符的面板在 16,910 处被误判闭合，切成「HTML 16,906 + 碎片 43 + 裸源码 26,712」。
+- **修复**：闭合围栏必须**独占一行**（`^[ \t]*```[ \t]*$`，`m` 标志）。实测 3 段 → 1 段完整面板。
+
+### 🔴 CT-23 · 面板渲染成空白白框
+
+- **根因**：面板 `setup()` 顶部调 `getChatMessages(getCurrentMessageId())[0]?.message`，桥接**没有该 API**
+  ⇒ `ReferenceError` → Vue 挂不上（`#app` 只剩 `<!---->`）→ 60px 白框。
+- **修复**：补 `getChatMessages / setChatMessages / formatAsDisplayedMessage` + `messageText` 透传。
+
+### 🔴 CT-24 · 面板正文显示成 `\s*([\s\S]*?)\s*`
+
+- **根因**：面板拿 `getChatMessages()[0].message` 找 `【说明】…【结束】`，而 `[界面]开局设置` 这条正则
+  **正是把那段标记替换成面板自己** ⇒ 喂显示文本时标记早没了。
+- **修复**：消息新增 `rawSwipes`（未经显示层正则的原始正文），`requestReply` 返回 `{out, raw}`，
+  发送/再生成/重新生成/续写四处同步。对齐酒馆 `getChatMessages().message` 语义。
+
+### 🟡 CT-25 · `###` / `**粗体**` 原样露出
+
+- `formatAsDisplayedMessage` 直接返回字符串，面板却当 HTML 插值。补最小 Markdown 子集。
+
+### 🔴 CT-26 · 同族去根（核心）
+
+- **判据**：CT-22~25 修完，但修法仍是「某张卡崩了 → 补那个 API」，属于治标。
+- **真库扫描**（`E:\AI\酒馆工具\角色卡`，53 PNG / 46 可解析）得出面板实际调用的 20 个 API，及
+  `Mvu.events.VARIABLE_UPDATE_ENDED` / `tavern_events.*` / `SillyTavern.getCurrentChatId()` /
+  `waitGlobalInitialized('Mvu')` 等**属性访问即崩**的全局对象。
+- **修复**：新建 `js/composables/chat/useChatSandbox.js` 一处收口 —— 20 个 API 全实现 + 常见面兜底 +
+  事件总线真实现 + 「只在确实缺失时定义」的万能函数兜底。**刻意不用 window Proxy**（会污染 Vue/React 特性探测）。
+  宏表走引擎同一份 `fullMacros`、世界书走 `chatWbList`，面板内外一致。
+- **验证**：`test/chatSandbox.test.mjs` 9 例（核心是 `OBSERVED_APIS` 断言表，漏一个就红）；
+  真库实机抽验 6 张有大型面板的卡，`#app` **1006 / 6628 / 6906** 字符全部正常渲染、零控制台错误。
+- **踩坑**：把 API 写进模板字符串时，注释里的反引号会直接闭合模板 → `Unexpected string`。模板内禁用裸反引号。
+
+### 📝 入口更名与能力边界说明
+
+- 用户可见文案「重型卡」→「独立前端角色卡」（侧栏、工作区、默认卡名、日志、系统对话框标题）；
+  内部标识 `heavycards` / `HeavyCard*` / `heavycard:*` 保持不变，避免破坏配置与存档路径。
+- 新增能力边界说明（4 处）：**仅支持 HTML 网页链接；exe / apk 暂不支持**。
+- 实机验证：面板头显示新名，页面扫描确认无可见「重型卡」字样。
+
+### ✅ 验证
+
+- `npm test` **1143 pass / 0 fail**；`guard:scope` 0 未定义；`build:web` ✅；真实启动无 `[Vue 错误]`。
+- `node scripts/release-check.mjs` → `✅ 无阻塞项`。
 
 ---
 

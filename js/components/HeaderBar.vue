@@ -367,7 +367,7 @@
 </template>
 
 <script>
-import { inject, computed, ref, watch } from 'vue';
+import { inject, computed, ref, watch, onUnmounted } from 'vue';
 import CommandMenuItem from './CommandMenuItem.vue'; // 🎛️ P2：单命令按钮（菜单项 / 工具栏两种形态）
 
 export default {
@@ -391,6 +391,39 @@ export default {
         const menuOpen = ref('');                       // '' = 全部关闭；否则为菜单 key
         const setMenu = (key) => { menuOpen.value = key; };
         const closeMenus = () => { menuOpen.value = ''; };
+
+        // ================= D1 补充：菜单下拉也必须让重型卡视图隐藏 =================
+        // 背景（用户实测截图反馈）：顶部菜单展开后会**被 WebContentsView 盖住** ——
+        //   WebContentsView 位于 OS 合成层，CSS z-index 对它完全无效。
+        //   HeavyCardWorkspace 的 anyModalOpen 扫描的是 appCtx 上的布尔弹窗状态，
+        //   而菜单开合状态在本组件内部的 `menuOpen`（不在 ctx 上），扫描不到 ⇒ 漏裁决。
+        //   这里把菜单状态上报到 ctx，让重型卡视图在菜单展开期间隐藏。
+        watch(menuOpen, (v) => {
+            try {
+                const flag = ctx.headerMenuOpen;
+                if (flag && typeof flag === 'object' && 'value' in flag) flag.value = !!v;
+            } catch (e) { /* 忽略 */ }
+        });
+
+        // 兜底：菜单开着时，点击页面任意处也要关闭。
+        //   `@mouseleave` 只覆盖「鼠标移出」这一条路径 —— 点菜单项弹窗、点空白、
+        //   甚至切窗口后鼠标直接落在外侧，都不会触发 mouseleave，菜单会一直挂着，
+        //   重型卡视图也随之一直隐藏（用户会以为「卡白屏了」）。
+        const onDocPointerDown = (e) => {
+            if (!menuOpen.value) return;
+            try {
+                const el = e && e.target;
+                if (el && el.closest && el.closest('header')) return;   // 点界头内部交给原有逻辑
+                closeMenus();
+            } catch (err) { /* 忽略 */ }
+        };
+        if (typeof document !== 'undefined') {
+            document.addEventListener('pointerdown', onDocPointerDown, true);
+        }
+        onUnmounted(() => {
+            try { document.removeEventListener('pointerdown', onDocPointerDown, true); } catch (e) { /* 忽略 */ }
+        });
+
         // `when` 求值上下文（v1 只支持单值比较：`appMode == 'xxx'`）
         const whenContext = computed(() => ({ appMode: ctx.appMode.value }));
         /** 按菜单取命令（已按 section 分组 → 模板在 section 变化处渲染分隔线） */
@@ -410,7 +443,8 @@ export default {
          *  🆕 AR-34：执行后一并关闭菜单 —— 设置菜单里的命令是手写按钮，不走 CommandMenuItem 的 @executed，
          *  所以这里是它们唯一的公共入口，一行即可覆盖全部手写入口（工具栏按钮调用它是空操作，无影响）。 */
         const runCommand = (id) => { registry.execute(id); closeMenus(); };
-        // 🎯 智能查重目标标签（“角色卡 / 世界书 / 预设”）：同样改由 ctx 提供（注册表命令标题用）
+
+        // 🎯 智能查重目标标签（"角色卡 / 世界书 / 预设"）：同样改由 ctx 提供（注册表命令标题用）
         const dedupeTargetLabel = ctx.dedupeTargetLabel;
 
         // 🔧 字号滑块性能修复：滑块绑定本地草稿值（拖动只更新旁边数字，零全局副作用），

@@ -1235,6 +1235,54 @@
 
 ---
 
+### AR-58 ｜ 🔴 `settings: { ...card.settings }` 只拷第一层 → 嵌套 Proxy 仍过不了 structured clone（点卡无反应、徽标永远 error）
+
+- **现象**（2026-10-18，重型卡自动热测抓获）：从侧栏点「云端人生」**没有任何反应** ——
+  徽标停在「加载失败」，视图不出现；后续 `setZoom` / `clearCache` / `reload` 全部报 `view 不存在`。
+  而直接调 `window.electronAPI.heavyCard.open(card, rect)` **却成功**。
+- **根因**：`openHeavyCard` 构造 IPC 载荷用的是一层浅拷贝：
+
+  ```js
+  { ...toPlainCard(card), settings: { ...card.settings } }
+  ```
+
+  `card` 是 Vue `reactive` 对象 ⇒ `card.settings.autoBackup` **仍是 reactive Proxy**。
+  浅拷贝只把 `settings` 换成普通对象，下一层 `autoBackup` 依旧带 Proxy ⇒ 主进程
+  structured clone 抛 `An object could not be cloned.` ⇒ `open` 异常 ⇒
+  `openHeavyCard` 走 `catch` 分支 `return false`（**异常被吞成 false，不写日志**）。
+  这是 **AR-01 的变体**：AR-01 是「直接传 Proxy」，本条是「以为做了拷贝就安全，其实只拷了一层」。
+- **为何早期冒烟没抓到**：早期验证是**直接调 IPC**（自带 plain 字面量），
+  没走 `ctx.openHeavyCard` 这条真实路径。
+- **修复**：新增导出纯函数 `toPlainSettings(s)`（`js/composables/useHeavyCards.js`），
+  逐字段显式深转（含 `autoBackup` 子对象与 `offlineWhitelist` 数组），
+  并在 `openHeavyCard` / `setHeavyCardOffline` 统一改用。
+- **验证**：
+  - 新增 `test/heavyCardPlain.test.mjs`（8 例）：用**真实 `reactive()`** 复现
+    「浅拷贝后 `structuredClone` 抛错」，再断言 `toPlainSettings` 结果可 clone；
+  - 自动热测阶段 2：状态 `error` → **`ready`**，target 数 `2 → 3`（视图真实创建）；
+  - 全量单测 **1079 / 1079** 绿。
+- **防再犯**：跨 IPC 的对象必须**逐层显式构造**；`{ ...obj }` 之后要确认嵌套层是否已是 plain，
+  并给 `toPlainXxx()` 配一条 `structuredClone` 断言单测。
+- **来源**：2026-10-18 重型卡自动热测。
+
+### AR-59 ｜ 🟠 布局上报拿 **0×0** 覆盖有效 rect → 视图被永久压扁
+
+- **现象**（2026-10-18，同批热测）：点击卡片瞬间 `activeHeavyCard` 已赋值，
+  但工作区模板尚未渲染完，`watch(activeHeavyCard)` + `nextTick` 量到的 rect **全为 0**；
+  这个 0 被上报给主进程 `setBounds` ⇒ `applyLayout` 判定 `isEmptyRect` ⇒ `setVisible(false)`。
+  后续正确的 rect 又因去重缓存（`lastRectKey` 已记成 `0,0,0,0`）不再重发，视图**永久不可见**。
+- **根因**：`reportRect` 只判断「元素存在」，没有判断「尺寸有效」。
+- **修复**：两道闸门 ——
+  1. `useHeavyCards.reportRect`：`if (!(r.width > 0) || !(r.height > 0)) return;`
+  2. `HeavyCardWorkspace.pushRect`：同样先判尺寸再上报（双保险）。
+  宁可等下一帧（`ResizeObserver` 一定会再触发），也不能拿 0 尺寸覆盖有效 rect。
+- **验证**：修复后热测 rect 稳定为 `{x:346,y:178,w:920,h:557}`，无抖动。
+- **防再犯**：**把 DOM 尺寸上报给原生层之前，一律先判 `> 0`** ——
+  「元素存在」≠「布局完成」，中间至少隔一帧。
+- **来源**：2026-10-18 重型卡自动热测。
+
+---
+
 ## 四、约定
 
 - 新增渲染层逻辑前，先确认**是否需要版本号/`triggerRef`** 打破 computed 缓存（AR-12、AR-18 是同一类病的两种表现）。

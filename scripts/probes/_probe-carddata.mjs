@@ -1,0 +1,21 @@
+const BASE = 'http://127.0.0.1:9380';
+const list = await (await fetch(`${BASE}/json/list`)).json();
+const main = list.find((t) => t.type === 'page');
+const ws = new WebSocket(main.webSocketDebuggerUrl);
+let id = 0; const P = new Map();
+const send = (m, p) => new Promise((r, j) => { const i = ++id; P.set(i, { r, j }); ws.send(JSON.stringify({ id: i, method: m, params: p || {} })); });
+ws.onmessage = (e) => { const m = JSON.parse(e.data); if (m.id && P.has(m.id)) { const p = P.get(m.id); P.delete(m.id); m.error ? p.j(new Error(JSON.stringify(m.error))) : p.r(m.result); } };
+await new Promise((r) => { ws.onopen = r; });
+await send('Runtime.enable');
+const ev = async (x) => {
+    const r = await send('Runtime.evaluate', { expression: x, awaitPromise: true, returnByValue: true });
+    if (r.exceptionDetails) return { __err: r.exceptionDetails.text };
+    return r.result.value;
+};
+const C = `(()=>{const v=document.querySelector('#app').__vue_app__;return v._container._vnode.component.provides.appCtx})()`;
+console.log('cardData 类型:', await ev(`Object.prototype.toString.call((${C}).cardData.value)`));
+console.log('cardData 键:', await ev(`JSON.stringify(Object.keys((${C}).cardData.value||{}).slice(0,20))`));
+console.log('是否数组:', await ev(`Array.isArray((${C}).cardData.value)`));
+console.log('字符数:', await ev(`JSON.stringify((${C}).cardData.value||{}).length`));
+console.log('内部样本:', await ev(`(()=>{const d=(${C}).cardData.value;const k=Object.keys(d||{});return k.length?JSON.stringify({key:k[0],type:typeof d[k[0]],keys:Object.keys(d[k[0]]||{}).slice(0,15)}):'empty'})()`));
+ws.close(); process.exit(0);

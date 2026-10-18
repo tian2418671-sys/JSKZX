@@ -21,6 +21,20 @@ const { createMemoryStore } = require('./main/memoryStore.js'); // 🧠 长期�
 //    都从它派生，根除「同一件事三处各写一份」导致的口径漂移。
 const { isScannable, isSavable, isImageExt, IMPORT_ACCEPT, SCANNABLE_EXTS } = require('./main/cardFormats.js');
 
+// 🎬 重型卡（独立前端角色卡）：WebContentsView 宿主管理器
+//    规格见 docs/规格与计划/功能规格/独立前端角色卡-承载方案-v3.md
+//    ⚠️ 渲染层无创建能力（不开 webviewTag）；view 只能由主进程创建
+const {
+  createHeavyViewManager,
+  partitionOf,
+  partitionDirOf,
+  isHeavyPartition,
+  normalizeRect,
+  PARTITION_PREFIX
+} = require('./main/heavyCards/manager.js');
+// 💾 重型卡存档备份引擎（原子快照 / 世代轮换恢复 / 保留策略 / 启动清理）
+const { createHeavyCardBackupService } = require('./main/heavyCards/backup.js');
+
 // 📸 换卡图：非 PNG 新图转 PNG（可选依赖；未安装/加载失败时 PNG→PNG 换图仍可用）
 let sharp = null;
 try { sharp = require('sharp'); } catch (e) { sharp = null; }
@@ -803,8 +817,16 @@ protocol.registerSchemesAsPrivileged([
   {
     scheme: 'local-file',
     privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true, stream: true }
+  },
+  {
+    // 🎬 重型卡·本地目录模式：每卡一个 host，根目录由 heavyCardLocalRoots 限定
+    scheme: 'heavycard-local',
+    privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true, stream: true }
   }
 ]);
+
+/** 🎬 本地目录模式：cardId -> 本地根目录（进程内登记，重启后由卡清单重建） */
+const heavyCardLocalRoots = new Map();
 
 // 🧩 插件「效果」页预览内存存储：渲染进程生成完整预览 HTML（含内联宿主桩脚本），
 // 通过 IPC 存入主进程内存，再由 app:// 协议独立 URL 提供给 iframe 加载。
@@ -928,6 +950,61 @@ function registerAppProtocol() {
     }
     return net.fetch(pathToFileURL(filePath).toString());
   });
+
+  // 🎬 重型卡·本地目录模式（P2-3）：heavycard-local://<cardId>/<相对路径>
+  //    ⚠️ 安全约束（三条，改动前先读）：
+  //      ① 只服务已登记在 `heavyCardLocalRoots` 里的卡；
+  //      ② 解析后的路径必须仍在根目录内（防 `..` 穿越）；
+  //      ③ 只读文件，不支持写。
+  protocol.handle('heavycard-local', (request) => {
+    try {
+      const url = new URL(request.url);
+      const cardId = url.hostname || '';
+      const rootDir = heavyCardLocalRoots.get(cardId);
+      if (!rootDir) return new Response('Not Found', { status: 404 });
+
+      let rel = decodeURIComponent(url.pathname || '/');
+      if (rel === '/' || rel === '') rel = '/index.html';
+      const resolved = path.normalize(path.join(rootDir, rel));
+      const rootPrefix = path.resolve(rootDir) + path.sep;
+      if (resolved !== path.resolve(rootDir) && !resolved.startsWith(rootPrefix)) {
+        return new Response('Forbidden', { status: 403 });
+      }
+      const content = fs.readFileSync(resolved);
+      const ext = path.extname(resolved).toLowerCase();
+      const mime = {
+        '.html': 'text/html; charset=utf-8',
+        '.js': 'text/javascript; charset=utf-8',
+        '.mjs': 'text/javascript; charset=utf-8',
+        '.css': 'text/css; charset=utf-8',
+        '.json': 'application/json; charset=utf-8',
+        '.png': 'image/png',
+        '.jpg': 'image/jpeg',
+        '.jpeg': 'image/jpeg',
+        '.gif': 'image/gif',
+        '.webp': 'image/webp',
+        '.svg': 'image/svg+xml',
+        '.woff': 'font/woff',
+        '.woff2': 'font/woff2',
+        '.ttf': 'font/ttf',
+        '.otf': 'font/otf',
+        '.mp3': 'audio/mpeg',
+        '.ogg': 'audio/ogg',
+        '.wav': 'audio/wav',
+        '.mp4': 'video/mp4',
+        '.webm': 'video/webm'
+      }[ext] || 'application/octet-stream';
+      return new Response(content, {
+        headers: {
+          'content-type': mime,
+          // 本地包可能引用同目录下的其它文件，放开 CORS 让模块脚本可加载
+          'access-control-allow-origin': '*'
+        }
+      });
+    } catch (e) {
+      return new Response('Not Found', { status: 404 });
+    }
+  });
 }
 
 function createWindow() {
@@ -1018,6 +1095,9 @@ function createWindow() {
 
   return win;
 }
+
+// 🎬 重型卡：主窗口引用（WebContentsView 必须挂到它上面；createWindow 返回值在此承接）
+let mainWindow = null;
 
 // ================= [ 底层极速扫描引擎：并发递归遍历盘符/文件夹 (V2) ] =================
 // ⚠️ 扩展超级黑名单：跳过各种含有海量无用 PNG 的软件缓存、游戏资源和系统目录
@@ -1511,7 +1591,79 @@ app.whenReady().then(() => {
     });
   }
 
-  createWindow();
+  mainWindow = createWindow();
+
+  // =========================================================
+  // 🪟 窗口控制（窗口化 / 全屏 / 最小化 / 关闭）
+  //   背景：项目用 `autoHideMenuBar` + 自绘界头，未使用系统标题栏按钮，
+  //   渲染层此前**没有任何窗口控制能力**（preload 里零入口）。
+  //   ⚠️ 只操作主窗口本身，不接受渲染层传入的任意窗口 id（防越权）。
+  //   ⚠️ 全屏用 `setFullScreen`（真·全屏，隐藏任务栏），
+  //      与"最大化"语义区分开 —— 用户明确要求「窗口化按钮可调整大小」。
+  // =========================================================
+  const withMainWindow = (fn) => {
+    try {
+      if (!mainWindow || mainWindow.isDestroyed()) return { success: false, error: '窗口不存在' };
+      return fn(mainWindow);
+    } catch (e) {
+      return { success: false, error: e.message };
+    }
+  };
+
+  /** 查询窗口状态（供渲染层同步按钮图标） */
+  ipcMain.handle('window:getState', () => withMainWindow((win) => ({
+    success: true,
+    maximized: win.isMaximized(),
+    fullScreen: win.isFullScreen(),
+    minimized: win.isMinimized(),
+    focused: win.isFocused()
+  })));
+
+  ipcMain.handle('window:minimize', () => withMainWindow((win) => {
+    win.minimize();
+    return { success: true };
+  }));
+
+  /** 窗口化 ⇄ 最大化（保留原尺寸，可调整大小） */
+  ipcMain.handle('window:toggleMaximize', () => withMainWindow((win) => {
+    if (win.isFullScreen()) win.setFullScreen(false);
+    if (win.isMaximized()) win.unmaximize();
+    else win.maximize();
+    return { success: true, maximized: win.isMaximized() };
+  }));
+
+  /** 全屏 ⇄ 退出全屏 */
+  ipcMain.handle('window:toggleFullScreen', () => withMainWindow((win) => {
+    const next = !win.isFullScreen();
+    win.setFullScreen(next);
+    return { success: true, fullScreen: next };
+  }));
+
+  /** 恢复为"普通窗口化"（既非全屏也非最大化），供菜单一键还原 */
+  ipcMain.handle('window:restore', () => withMainWindow((win) => {
+    if (win.isFullScreen()) win.setFullScreen(false);
+    if (win.isMaximized()) win.unmaximize();
+    return { success: true, maximized: false, fullScreen: false };
+  }));
+
+  ipcMain.handle('window:close', () => withMainWindow((win) => {
+    win.close();
+    return { success: true };
+  }));
+
+  withMainWindow((win) => {
+    const pushState = () => {
+      if (!mainWindow || mainWindow.isDestroyed()) return;
+      let payload = { maximized: false, fullScreen: false };
+      try {
+        payload = { maximized: win.isMaximized(), fullScreen: win.isFullScreen() };
+      } catch (e) { /* 忽略 */ }
+      try { win.webContents.send('window:state-changed', payload); } catch (e) { /* 忽略 */ }
+    };
+    for (const ev of ['maximize', 'unmaximize', 'enter-full-screen', 'leave-full-screen', 'restore']) {
+      win.on(ev, pushState);
+    }
+  });
 
   // IPC：打开文件夹弹窗并扫描
   ipcMain.handle('dialog:openFolder', async () => {
@@ -4923,8 +5075,464 @@ app.whenReady().then(() => {
 
   // macOS：点击 Dock 图标且无窗口时重新创建窗口
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    if (BrowserWindow.getAllWindows().length === 0) mainWindow = createWindow();
   });
+
+  // =========================================================
+  // 🎬 重型卡（独立前端角色卡）· IPC
+  // =========================================================
+  //  设计约束（v3 §4.2 / §4.3 / §6.3）：
+  //   D1. WebContentsView 在 OS 合成层，CSS z-index 无效 → 弹窗打开时必须隐藏
+  //   D2. 恢复存档时禁止提前 session.fromPartition（由 backup 模块保证）
+  //   D3. rect 与 setBounds 同为 DIP，绝不乘 devicePixelRatio
+  const heavyView = createHeavyViewManager({
+    win: mainWindow,
+    userDataPath: app.getPath('userData'),
+    emit: (channel, payload) => {
+      try {
+        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, payload);
+      } catch (e) { /* 忽略 */ }
+    }
+  });
+
+  // 💾 备份引擎（规格 §六）
+  //    ⚠️ 与 view 管理器分开：备份/恢复是纯文件操作，即使卡没打开也能备份。
+  const heavyBackup = createHeavyCardBackupService({
+    userDataPath: app.getPath('userData'),
+    appVersion: app.getVersion(),
+    electronVersion: process.versions.electron || ''
+  });
+
+  // 启动期清理：残留 .part + 超龄世代（保留 gN 与 gN-1）
+  //    ⚠️ 必须在任何 WebContentsView 挂载前执行
+  //    ⚠️ 直接读 app_config.json 的 ui.heavyCards（不依赖渲染层是否已启动）
+  try {
+    let cards = [];
+    try {
+      if (fs.existsSync(APP_CONFIG_PATH)) {
+        const cfg = JSON.parse(fs.readFileSync(APP_CONFIG_PATH, 'utf-8'));
+        cards = (cfg && cfg.ui && Array.isArray(cfg.ui.heavyCards)) ? cfg.ui.heavyCards : [];
+      }
+    } catch (e) { cards = []; }
+    const cleaned = heavyBackup.cleanupOnStartup(cards);
+    if (cleaned.removedParts.length || cleaned.removedGens.length) {
+      console.log(`[heavycard] 启动清理：.part ${cleaned.removedParts.length} 个，旧世代 ${cleaned.removedGens.length} 个`);
+    }
+  } catch (e) {
+    console.warn('[heavycard] 启动清理失败（不影响启动）：', e.message);
+  }
+
+  ipcMain.handle('heavycard:open', async (event, payload) => {
+    try {
+      const card = payload && payload.card;
+      if (!card || !card.id || !card.url) return { success: false, error: '卡信息不完整' };
+      return heavyView.open(card, payload.rect);
+    } catch (e) {
+      return { success: false, error: e.message };
+    }
+  });
+
+  ipcMain.handle('heavycard:close', async (event, payload) => {
+    try {
+      const id = payload && payload.id;
+      return { success: id ? heavyView.destroy(id) : heavyView.destroyActive() };
+    } catch (e) {
+      return { success: false, error: e.message };
+    }
+  });
+
+  ipcMain.handle('heavycard:setBounds', async (event, payload) => {
+    try {
+      const id = payload && payload.id;
+      // inset：让视图避开界面上方的 DOM 浮层（如「显示工具栏」恢复按钮）。
+      // ⚠️ WebContentsView 是**原生图层**，DOM 里的按钮再高 z-index 也会被它盖住、
+      //    点击事件也进不来（用户实测：隐藏工具栏后恢复按钮点不到）。唯一可靠办法是给视图让出区域。
+      return heavyView.setBounds(id, payload && payload.rect, payload && payload.inset);
+    } catch (e) {
+      return { success: false, error: e.message };
+    }
+  });
+
+  // D1：弹窗打开 / 离开模式 → 隐藏；关闭后恢复
+  ipcMain.handle('heavycard:setVisible', async (event, payload) => {
+    try {
+      return heavyView.setGlobalVisible(!!(payload && payload.visible));
+    } catch (e) {
+      return { success: false, error: e.message };
+    }
+  });
+
+  ipcMain.handle('heavycard:reload', async (event, payload) => {
+    try {
+      return heavyView.reload(payload && payload.id, !!(payload && payload.ignoreCache));
+    } catch (e) {
+      return { success: false, error: e.message };
+    }
+  });
+
+  ipcMain.handle('heavycard:setZoom', async (event, payload) => {
+    try {
+      return heavyView.setZoom(payload && payload.id, payload && payload.factor);
+    } catch (e) {
+      return { success: false, error: e.message };
+    }
+  });
+
+  ipcMain.handle('heavycard:capture', async (event, payload) => {
+    try {
+      return await heavyView.capture(payload && payload.id);
+    } catch (e) {
+      return { success: false, error: e.message };
+    }
+  });
+
+  ipcMain.handle('heavycard:clearCache', async (event, payload) => {
+    try {
+      return await heavyView.clearCache(payload && payload.id);
+    } catch (e) {
+      return { success: false, error: e.message };
+    }
+  });
+
+  // 磁盘占用 / 目录信息（供面板展示与备份模块使用）
+  ipcMain.handle('heavycard:storageInfo', async (event, payload) => {
+    try {
+      const card = payload && payload.card;
+      if (!card || !card.id) return { success: false, error: '参数不完整' };
+      const dir = partitionDirOf(app.getPath('userData'), card.id, card.gen || 1);
+      let bytes = 0;
+      let exists = false;
+      try {
+        exists = fs.existsSync(dir);
+        if (exists) {
+          const stack = [dir];
+          while (stack.length) {
+            const cur = stack.pop();
+            let entries = [];
+            try { entries = fs.readdirSync(cur, { withFileTypes: true }); } catch (e) { continue; }
+            for (const ent of entries) {
+              const full = path.join(cur, ent.name);
+              if (ent.isDirectory()) stack.push(full);
+              else {
+                try { bytes += fs.statSync(full).size; } catch (e) { /* 忽略 */ }
+              }
+            }
+          }
+        }
+      } catch (e) { /* 统计失败不影响主流程 */ }
+      return { success: true, dir, exists, bytes };
+    } catch (e) {
+      return { success: false, error: e.message };
+    }
+  });
+
+  // 打开该卡的数据目录（走既有 system:openPath 的白名单会拦，这里单独放行 Partitions 内路径）
+  ipcMain.handle('heavycard:openDataDir', async (event, payload) => {
+    try {
+      const card = payload && payload.card;
+      if (!card || !card.id) return { success: false, error: '参数不完整' };
+      const dir = partitionDirOf(app.getPath('userData'), card.id, card.gen || 1);
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      const err = await shell.openPath(dir);
+      return err ? { success: false, error: err } : { success: true, dir };
+    } catch (e) {
+      return { success: false, error: e.message };
+    }
+  });
+
+  // =========================================================
+  // 💾 备份 / 恢复 IPC（规格 §六）
+  // =========================================================
+
+  /** 列出某卡的全部备份（按时间旧→新） */
+  ipcMain.handle('heavycard:listBackups', async (event, payload) => {
+    try {
+      const card = payload && payload.card;
+      if (!card || !card.id) return { success: false, error: '参数不完整' };
+      const list = heavyBackup.listBackups(card.id);
+      return { success: true, list };
+    } catch (e) {
+      return { success: false, error: e.message };
+    }
+  });
+
+  /**
+   * 创建备份
+   * 流程（§6.2）：隐藏视图 → 刷盘 → 逐文件快照 → manifest 最后写 → rename → 保留策略
+   */
+  ipcMain.handle('heavycard:backup', async (event, payload) => {
+    try {
+      const card = payload && payload.card;
+      if (!card || !card.id) return { success: false, error: '参数不完整' };
+      const kind = payload.kind || 'manual';
+      const keep = payload.keep || 5;
+
+      // ① 备份期间隐藏视图，减少写入抖动（不销毁 —— 销毁会丢页面状态）
+      const resume = heavyView.suspendForBackup(card.id);
+      try {
+        const res = await heavyBackup.createBackup({
+          cardId: card.id,
+          name: card.name,
+          url: card.url,
+          gen: card.gen || 1,
+          partition: card.partition,
+          kind,
+          keep,
+          // ② 刷盘（R2）：只对已打开的卡有效，未打开时内部自动跳过
+          flush: async () => { await heavyView.flushStorage(card.id); }
+        });
+        return res;
+      } finally {
+        resume();
+      }
+    } catch (e) {
+      return { success: false, error: e.message };
+    }
+  });
+
+  /**
+   * 恢复备份（世代轮换，免重启）
+   * ⚠️ D2：先把文件全部写好，再切换 partition 重建视图。
+   */
+  ipcMain.handle('heavycard:restore', async (event, payload) => {
+    try {
+      const card = payload && payload.card;
+      const backupName = payload && payload.backupName;
+      if (!card || !card.id || !backupName) return { success: false, error: '参数不完整' };
+
+      // ① 恢复前先给当前状态做一份兜底快照（失败不阻断恢复，只记警告）
+      let preSnapshot = null;
+      try {
+        const resume = heavyView.suspendForBackup(card.id);
+        try {
+          const r = await heavyBackup.createBackup({
+            cardId: card.id,
+            name: card.name,
+            url: card.url,
+            gen: card.gen || 1,
+            partition: card.partition,
+            kind: 'pre-restore',
+            keep: payload.keep || 5,
+            flush: async () => { await heavyView.flushStorage(card.id); }
+          });
+          preSnapshot = r && r.success ? r.name : null;
+        } finally { resume(); }
+      } catch (e) { /* 兜底快照失败不阻断 */ }
+
+      // ② 销毁当前视图（释放 Chromium 对旧目录的句柄）
+      heavyView.destroy(card.id);
+
+      // ③ 纯文件操作恢复到新世代（内部绝不调 session.fromPartition）
+      const res = heavyBackup.restoreGeneration({
+        cardId: card.id,
+        currentGen: card.gen || 1,
+        backupName
+      });
+      if (!res.success) return { ...res, preSnapshot };
+
+      return { ...res, preSnapshot };
+    } catch (e) {
+      return { success: false, error: e.message };
+    }
+  });
+
+  /** 删除一份备份 */
+  ipcMain.handle('heavycard:deleteBackup', async (event, payload) => {
+    try {
+      const card = payload && payload.card;
+      const backupName = payload && payload.backupName;
+      if (!card || !card.id || !backupName) return { success: false, error: '参数不完整' };
+      return heavyBackup.deleteBackup(card.id, backupName);
+    } catch (e) {
+      return { success: false, error: e.message };
+    }
+  });
+
+  /** 打开该卡的备份目录 */
+  ipcMain.handle('heavycard:openBackupDir', async (event, payload) => {
+    try {
+      const card = payload && payload.card;
+      if (!card || !card.id) return { success: false, error: '参数不完整' };
+      const dir = heavyBackup.backupRootOf(card.id);
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      const err = await shell.openPath(dir);
+      return err ? { success: false, error: err } : { success: true, dir };
+    } catch (e) {
+      return { success: false, error: e.message };
+    }
+  });
+
+  // =========================================================
+  // 📴 离线模式（P2-1）
+  // =========================================================
+  ipcMain.handle('heavycard:setOffline', async (event, payload) => {
+    try {
+      const card = payload && payload.card;
+      if (!card || !card.id) return { success: false, error: '参数不完整' };
+      const offline = !!(payload && payload.offline);
+      const whitelist = (payload && payload.whitelist) || [];
+      // 卡未打开时只记录期望值（下次 open 时生效），不报错
+      if (!heavyView.has(card.id)) return { success: true, pending: true, offline };
+      return heavyView.applyOfflinePolicy(card.id, offline, card.url, whitelist);
+    } catch (e) {
+      return { success: false, error: e.message };
+    }
+  });
+
+  ipcMain.handle('heavycard:blockedLog', async () => {
+    try {
+      return { success: true, list: heavyView.getBlockedLog() };
+    } catch (e) {
+      return { success: false, error: e.message, list: [] };
+    }
+  });
+
+  // =========================================================
+  // 📦 跨机迁移（P2-2）：导出 / 导入单文件 tar
+  // =========================================================
+  ipcMain.handle('heavycard:exportBundle', async (event, payload) => {
+    try {
+      const card = payload && payload.card;
+      if (!card || !card.id) return { success: false, error: '参数不完整' };
+      const safeName = String(card.name || card.id).replace(/[\\/:*?"<>|]/g, '_');
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+      const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
+        title: '导出独立前端角色卡存档（可搬到另一台机器）',
+        defaultPath: `${safeName}-${stamp}.tar`,
+        filters: [{ name: '独立前端角色卡存档包', extensions: ['tar'] }]
+      });
+      if (canceled || !filePath) return { success: false, error: '用户取消' };
+      return heavyBackup.exportBundle({
+        cardId: card.id,
+        backupName: payload.backupName || null,
+        outFile: filePath
+      });
+    } catch (e) {
+      return { success: false, error: e.message };
+    }
+  });
+
+  ipcMain.handle('heavycard:importBundle', async (event, payload) => {
+    try {
+      const card = payload && payload.card;
+      if (!card || !card.id) return { success: false, error: '参数不完整' };
+      const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
+        title: '导入独立前端角色卡存档包',
+        properties: ['openFile'],
+        filters: [{ name: '独立前端角色卡存档包', extensions: ['tar'] }]
+      });
+      if (canceled || !filePaths || !filePaths.length) return { success: false, error: '用户取消' };
+      return heavyBackup.importBundle({ cardId: card.id, inFile: filePaths[0] });
+    } catch (e) {
+      return { success: false, error: e.message };
+    }
+  });
+
+  // =========================================================
+  // 📂 本地目录模式（P2-3）
+  // =========================================================
+  ipcMain.handle('heavycard:pickLocalDir', async () => {
+    try {
+      const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
+        title: '选择独立前端角色卡的本地文件夹（需含 index.html）',
+        properties: ['openDirectory']
+      });
+      if (canceled || !filePaths || !filePaths.length) return { success: false, error: '用户取消' };
+      const dir = filePaths[0];
+      if (!fs.existsSync(path.join(dir, 'index.html'))) {
+        return { success: false, error: '该文件夹里没有 index.html' };
+      }
+      return { success: true, dir };
+    } catch (e) {
+      return { success: false, error: e.message };
+    }
+  });
+
+  /** 登记/解除某卡的本地根目录（重启后由渲染层按卡清单重新登记） */
+  ipcMain.handle('heavycard:setLocalRoot', async (event, payload) => {
+    try {
+      const card = payload && payload.card;
+      if (!card || !card.id) return { success: false, error: '参数不完整' };
+      const dir = payload && payload.dir;
+      if (!dir) {
+        heavyCardLocalRoots.delete(card.id);
+        return { success: true, cleared: true };
+      }
+      if (!fs.existsSync(dir)) return { success: false, error: '目录不存在' };
+      heavyCardLocalRoots.set(card.id, path.resolve(dir));
+      return { success: true, dir: path.resolve(dir), url: `heavycard-local://${card.id}/index.html` };
+    } catch (e) {
+      return { success: false, error: e.message };
+    }
+  });
+
+  // =========================================================
+  // 😴 闲置自动隐藏（P2-4）
+  // =========================================================
+  ipcMain.handle('heavycard:setIdle', async (event, payload) => {
+    try {
+      const id = payload && payload.id;
+      if (!id) return { success: false, error: '参数不完整' };
+      const idle = !!(payload && payload.idle);
+      if (!heavyView.has(id)) return { success: true, skipped: true };
+      return heavyView.setCardVisible(id, !idle);
+    } catch (e) {
+      return { success: false, error: e.message };
+    }
+  });
+
+  // =========================================================
+  // 🚪 退出前自动备份（§6.4）
+  //    ⚠️ `Promise.race` 不会取消任务 —— 安全性靠 backup.js 的原子性保证：
+  //       超时后退出最多留下 `.part`（下次启动清理），绝不会产生半截"可用"备份。
+  // =========================================================
+  let quittingAfterHeavyBackup = false;
+  app.on('before-quit', (event) => {
+    if (quittingAfterHeavyBackup) return;
+    let pending = [];
+    try {
+      if (fs.existsSync(APP_CONFIG_PATH)) {
+        const cfg = JSON.parse(fs.readFileSync(APP_CONFIG_PATH, 'utf-8'));
+        const cards = (cfg && cfg.ui && Array.isArray(cfg.ui.heavyCards)) ? cfg.ui.heavyCards : [];
+        pending = cards.filter((c) => {
+          const s = c && c.settings && c.settings.autoBackup;
+          return c && c.id && s && s.enabled !== false && s.onExit !== false;
+        });
+      }
+    } catch (e) { pending = []; }
+    if (!pending.length) return;
+
+    event.preventDefault();
+    const runOne = async (card) => {
+      try {
+        const resume = heavyView.suspendForBackup(card.id);
+        try {
+          await heavyBackup.createBackup({
+            cardId: card.id,
+            name: card.name,
+            url: card.url,
+            gen: card.gen || 1,
+            partition: card.partition,
+            kind: 'auto',
+            keep: (card.settings && card.settings.autoBackup && card.settings.autoBackup.keep) || 5,
+            flush: async () => { await heavyView.flushStorage(card.id); }
+          });
+        } finally { resume(); }
+      } catch (e) {
+        console.warn(`[heavycard] 退出备份失败 ${card.id}:`, e.message);
+      }
+    };
+    Promise.race([
+      Promise.all(pending.map(runOne)),
+      new Promise((resolve) => setTimeout(resolve, 15000))   // 15 秒上限（§13）
+    ]).finally(() => {
+      quittingAfterHeavyBackup = true;
+      app.quit();
+    });
+  });
+
+  // 窗口关闭时销毁所有 view（避免残留渲染进程）
+  app.on('window-all-closed', () => { try { heavyView.destroyAll(); } catch (e) { /* 忽略 */ } });
 });
 
 app.on('window-all-closed', () => {

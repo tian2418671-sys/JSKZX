@@ -48,6 +48,14 @@
                 <span class="text-[14px] leading-none">🧩</span>
                 <span class="text-[8px] font-mono leading-none opacity-80">{{ modeCountText(plugins.length) }}</span>
             </button>
+            <!-- 🎬 独立前端角色卡（重型卡）：只做展示与收藏管理，不解析卡内数据 -->
+            <button @click="appMode = 'heavycards'"
+                    :title="`独立前端角色卡（${heavyCards.length} 个）`"
+                    :class="appMode === 'heavycards' ? 'bg-rose-600 text-white shadow-md shadow-rose-900/40' : 'text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800'"
+                    class="w-8 h-8 rounded-lg transition flex flex-col items-center justify-center gap-0.5">
+                <span class="text-[14px] leading-none">🎬</span>
+                <span class="text-[8px] font-mono leading-none opacity-80">{{ modeCountText(heavyCards.length) }}</span>
+            </button>
         </div>
 
         <!-- ══ 面板列：原来的全部内容（搜索 / 筛选 / 列表 / 分页）都在这列里，逐一未改 ══ -->
@@ -765,6 +773,70 @@
             </div>
         </template>
 
+        <!-- ============ 🎬 独立前端角色卡（重型卡）模式 ============
+             设计：只做「展示 + 收藏管理」——不解析卡内数据、不编辑剧情变量。
+                  单击选卡 → 右侧工作区由主进程 WebContentsView 承载。 -->
+        <template v-if="appMode === 'heavycards'">
+            <div class="px-3 pt-2.5 pb-2 border-b border-zinc-800 bg-zinc-900 flex flex-col gap-2 shrink-0 z-10">
+                <div class="relative">
+                    <span class="absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-500 text-xs">🔍</span>
+                    <input v-model="heavyCardSearchQuery" type="text" placeholder="搜索名称/备注/地址..."
+                           class="w-full h-8 bg-zinc-800/80 border border-zinc-700/60 rounded-lg pl-8 pr-2 text-xs text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-rose-500/80 transition">
+                </div>
+                <!-- 📌 能力边界说明：避免用户拿 exe / apk 去试，白折腾一场 -->
+                <p class="text-[10px] leading-relaxed text-zinc-500 rounded-md px-2 py-1.5 bg-amber-500/5 border border-amber-500/20">
+                    当前仅支持 <span class="text-amber-400 font-bold">HTML 网页链接</span> 形式的卡；<br>
+                    <span class="text-zinc-400">exe、apk 等本地程序暂不支持。</span>
+                </p>
+                <div class="flex items-center gap-1.5">
+                    <button @click="addHeavyCardByUrl" class="flex-1 h-7 flex items-center justify-center gap-1 px-2.5 bg-zinc-800 hover:bg-rose-600 text-zinc-200 text-[11px] rounded-lg border border-zinc-700/60 transition"
+                            title="添加一张新的独立前端角色卡（仅支持 HTML 网页链接；exe / apk 暂不支持）">➕ 添加</button>
+                    <button @click="refreshHeavyCardStorage" class="h-7 px-2 flex items-center justify-center bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-[11px] rounded-lg border border-zinc-700/60 transition"
+                            title="重新统计各卡存档占用">🔄</button>
+                </div>
+            </div>
+
+            <div class="flex-1 overflow-y-auto custom-scrollbar p-2 space-y-1.5">
+                <div v-for="card in heavyCardPageSlice" :key="card.id"
+                     @click="selectHeavyCard(card)"
+                     class="rounded-lg border transition cursor-pointer px-2.5 py-2 flex flex-col gap-1"
+                     :class="activeHeavyCard && activeHeavyCard.id === card.id ? 'border-rose-500/60 bg-rose-600/10' : 'border-zinc-700/50 bg-zinc-800/50 hover:bg-zinc-800'">
+                    <div class="flex items-center gap-1.5 min-w-0">
+                        <span class="shrink-0 text-sm">{{ card.icon || '🎬' }}</span>
+                        <span class="flex-1 text-xs font-bold text-zinc-200 truncate">{{ card.name }}</span>
+                        <span class="shrink-0 px-1 py-0.5 text-[9px] font-mono rounded bg-zinc-700/60 text-zinc-400">g{{ card.gen }}</span>
+                        <button @click.stop="removeHeavyCardById(card)" title="删除该卡（存档目录保留，可手动清理）"
+                                class="shrink-0 px-1 py-0.5 text-[10px] bg-zinc-700/50 hover:bg-rose-600 text-zinc-300 hover:text-white rounded">🗑️</button>
+                    </div>
+                    <div class="text-[10px] text-zinc-500 truncate" :title="card.url">{{ heavyCardHost(card.url) }}</div>
+                    <div class="flex items-center gap-2 text-[9px] text-zinc-600">
+                        <span>{{ card.lastOpenedAt ? ('上次 ' + formatShortTime(card.lastOpenedAt)) : '未打开' }}</span>
+                        <span v-if="heavyStorageMap[card.id]" class="font-mono">{{ formatByteSize(heavyStorageMap[card.id]) }}</span>
+                    </div>
+                </div>
+
+                <div v-if="heavyCards.length === 0" class="flex flex-col items-center justify-center h-full text-zinc-500 text-xs text-center p-4 gap-3">
+                    <span>还没有独立前端角色卡。</span>
+                    <button @click="addHeavyCardByUrl" class="h-7 px-3 bg-rose-600 hover:bg-rose-500 text-white text-[11px] rounded-lg shadow transition">➕ 添加一张</button>
+                </div>
+                <div v-else-if="filteredHeavyCards.length === 0" class="text-center py-8 text-zinc-500 text-xs">🔍 没有匹配的独立前端角色卡</div>
+            </div>
+
+            <!-- 📄 分页控制条 -->
+            <div v-if="filteredHeavyCards.length > 0" class="flex items-center gap-1.5 px-2 py-1.5 border-t border-zinc-800 bg-zinc-900 shrink-0 text-[10px]">
+                <button @click="changeHeavyCardPage(heavyCardPage - 1)" :disabled="heavyCardPage === 1" class="shrink-0 w-6 h-6 flex items-center justify-center bg-zinc-800 hover:bg-zinc-700 rounded transition disabled:opacity-40 disabled:cursor-not-allowed" title="上一页">◀</button>
+                <span class="text-zinc-400 font-mono font-bold shrink-0">{{ heavyCardPage }} / {{ heavyCardTotalPages }}</span>
+                <span class="text-zinc-600 shrink-0">({{ filteredHeavyCards.length }})</span>
+                <span class="flex-1"></span>
+                <select :value="itemsPerPage" @change="setItemsPerPage($event.target.value)"
+                        class="h-6 shrink-0 bg-zinc-800 border border-zinc-700/60 rounded px-1 text-[10px] text-zinc-300 focus:outline-none focus:border-rose-500/80"
+                        title="每页显示数量（角色卡 / 世界书 / 预设 / 插件 / 独立前端角色卡 全库共享）">
+                    <option v-for="n in pageSizeOptions" :key="n" :value="n">{{ n }}/页</option>
+                </select>
+                <button @click="changeHeavyCardPage(heavyCardPage + 1)" :disabled="heavyCardPage === heavyCardTotalPages" class="shrink-0 w-6 h-6 flex items-center justify-center bg-zinc-800 hover:bg-zinc-700 rounded transition disabled:opacity-40 disabled:cursor-not-allowed" title="下一页">▶</button>
+            </div>
+        </template>
+
         </div><!-- /面板列（Dock 右侧那一列） -->
     </aside>
 
@@ -837,6 +909,81 @@ export default {
         const [wbTotalPages, wbPageSlice, changeWbPage] = makePager(ctx.filteredWorldbooks, wbPage);
         const [presetTotalPages, presetPageSlice, changePresetPage] = makePager(ctx.filteredPresets, presetPage);
         const [pluginTotalPages, pluginPageSlice, changePluginPage] = makePager(ctx.filteredPlugins, pluginPage);
+
+        // 🎬 重型卡（独立前端角色卡）：分页 + 存档占用统计
+        const heavyCardPage = ref(1);
+        const [heavyCardTotalPages, heavyCardPageSlice, changeHeavyCardPage] = makePager(ctx.filteredHeavyCards, heavyCardPage);
+        watch(() => ctx.heavyCardSearchQuery?.value, () => { heavyCardPage.value = 1; });
+        /** 各卡存档占用（id → 字节数）；点 🔄 或首次进入时统计 */
+        const heavyStorageMap = ref({});
+        const refreshHeavyCardStorage = async () => {
+            const list = ctx.heavyCards?.value || [];
+            const out = {};
+            for (const c of list) {
+                try {
+                    const info = await ctx.getHeavyCardStorageInfo(c);
+                    if (info && info.success) out[c.id] = info.bytes;
+                } catch (e) { /* 单卡失败不影响其他 */ }
+            }
+            heavyStorageMap.value = out;
+        };
+        const heavyCardHost = (url) => {
+            try { return new URL(url).host; } catch (e) { return url || ''; }
+        };
+        const formatShortTime = (ts) => {
+            const d = new Date(Number(ts) || 0);
+            if (!d.getTime()) return '';
+            const p = (n) => String(n).padStart(2, '0');
+            return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+        };
+        const formatByteSize = (n) => {
+            const b = Number(n) || 0;
+            if (b < 1024) return b + 'B';
+            if (b < 1024 * 1024) return (b / 1024).toFixed(0) + 'KB';
+            if (b < 1024 * 1024 * 1024) return (b / 1024 / 1024).toFixed(1) + 'MB';
+            return (b / 1024 / 1024 / 1024).toFixed(2) + 'GB';
+        };
+
+        /** 单击选卡：打开（或切换到）该重型卡 */
+        const selectHeavyCard = async (card) => {
+            if (!card) return;
+            if (ctx.activeHeavyCard?.value && ctx.activeHeavyCard.value.id === card.id) return;
+            // ⚠️ 不要在这里取 `#heavycard-host-box`：此刻工作区还没渲染（activeHeavyCard 尚未赋值）。
+            //    传 null 打开后，由 HeavyCardWorkspace 的 watch(activeHeavyCard) 在 nextTick 里上报 rect。
+            const ok = await ctx.openHeavyCard(card, null);
+            if (ok) {
+                // 打开后刷新占用（首次打开会生成存储）
+                setTimeout(() => { refreshHeavyCardStorage(); }, 1500);
+            }
+        };
+
+        /** 添加卡：弹出输入框填 URL */
+        const addHeavyCardByUrl = async () => {
+            const url = await ctx.appPrompt(
+                '请输入独立前端角色卡的入口网址（http/https）\n\n⚠️ 当前仅支持 HTML 网页链接形式的卡，exe / apk 等本地程序暂不支持。',
+                'https://'
+            );
+            if (!url || !/^https?:\/\//i.test(String(url).trim())) return;
+            const card = ctx.addHeavyCard({ url: String(url).trim() });
+            if (card) {
+                await selectHeavyCard(card);
+            }
+        };
+
+        /** 删除卡（二次确认；存档目录不自动删，避免误删几十小时进度） */
+        const removeHeavyCardById = async (card) => {
+            const ok = await ctx.confirmDialog(
+                '删除独立前端角色卡条目？',
+                `将从列表中移除「${card.name}」。\n\n⚠️ 磁盘上的存档目录不会被自动删除，如需彻底清理请手动删除数据目录。`
+            );
+            if (!ok) return;
+            await ctx.removeHeavyCard(card.id);
+        };
+
+        // 首次进入重型卡模式时统计一次占用
+        watch(() => ctx.appMode?.value, (mode) => {
+            if (mode === 'heavycards') refreshHeavyCardStorage();
+        });
         // 搜索 / 筛选变化 → 对应库回第一页
         watch(() => ctx.wbSearchQuery?.value, () => { wbPage.value = 1; });
         watch(() => ctx.wbFilterType?.value, () => { wbPage.value = 1; });
@@ -893,6 +1040,7 @@ export default {
                 case 'presets': return { icon: '⚙️', label: '预设', count: len(ctx.presets), unit: ' 份' };
                 case 'worldbooks': return { icon: '🌍', label: '世界书库', count: len(ctx.worldbooks), unit: ' 本' };
                 case 'plugins': return { icon: '🧩', label: '插件', count: len(ctx.plugins), unit: ' 个' };
+                case 'heavycards': return { icon: '🎬', label: '独立前端角色卡', count: len(ctx.heavyCards), unit: ' 个' };
                 default: return { icon: '🎎', label: '角色卡库', count: len(ctx.library), unit: ' 张' };
             }
         });
@@ -1201,6 +1349,15 @@ export default {
             wbPage, wbTotalPages, wbPageSlice, changeWbPage,
             presetPage, presetTotalPages, presetPageSlice, changePresetPage,
             pluginPage, pluginTotalPages, pluginPageSlice, changePluginPage,
+            // 🎬 重型卡（独立前端角色卡）
+            heavyCards: ctx.heavyCards,
+            activeHeavyCard: ctx.activeHeavyCard,
+            filteredHeavyCards: ctx.filteredHeavyCards,
+            heavyCardSearchQuery: ctx.heavyCardSearchQuery,
+            heavyCardPage, heavyCardTotalPages, heavyCardPageSlice, changeHeavyCardPage,
+            heavyStorageMap, refreshHeavyCardStorage,
+            heavyCardHost, formatShortTime, formatByteSize,
+            selectHeavyCard, addHeavyCardByUrl, removeHeavyCardById,
             wbFilterType: ctx.wbFilterType,
             filteredWorldbooks: ctx.filteredWorldbooks,
             // ⛔ 已移除 wbScanProgress / isWbScanning / wbScanPercent 绑定：

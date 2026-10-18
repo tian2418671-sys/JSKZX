@@ -41,6 +41,8 @@ export function useConfigPersistence({
     startupTasks,
     // 🧩 2026-10-03：预填充兼容（模式 + 按 API 的记忆表）
     prefillCompatMode, prefillCompatTable,
+    // 🎬 重型卡（独立前端角色卡）：卡清单收集 / 恢复（含预置「云端人生」）
+    collectHeavyCardsForConfig, loadHeavyCardsFromConfig,
     sidebarWidth, viewMode, isCompactMode, sortBy,
     llmRolePrompts, tagCustomSegments, tagPromptMode, tagMaterialOverrides, tagPackSize, tagSkipTagged, tagResume, lastWorldbookDirPath, lastPresetDirPath, wbCategoryMap, wbTagMap,
     // 🏷️ S2（2026-09-25）：候选池开关 / 自由提取 / 候选池本体（随 ui 段落盘；恢复在 App.vue loadAppConfig）
@@ -112,6 +114,11 @@ export function useConfigPersistence({
                     mode: String((prefillCompatMode && prefillCompatMode.value) || 'auto'),
                     table: JSON.parse(JSON.stringify((prefillCompatTable && prefillCompatTable.value) || {}))
                 },
+                // 🎬 重型卡清单：**只存元数据**（id/名称/URL/世代号/设置），
+                //    存档本体在各自的 partition 目录里，绝不进配置文件。
+                heavyCards: (typeof collectHeavyCardsForConfig === 'function')
+                    ? JSON.parse(JSON.stringify(collectHeavyCardsForConfig() || []))
+                    : [],
                 localCategoryMap: JSON.parse(JSON.stringify(localCategoryMap.value || {})),
                 sidebarWidth: Number(sidebarWidth.value) || 0,
                 viewMode: viewMode.value,

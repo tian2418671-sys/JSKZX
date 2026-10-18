@@ -98,6 +98,23 @@ contextBridge.exposeInMainWorld('electronAPI', {
     exportBatchPackage: (filePaths) => ipcRenderer.invoke('file:exportBatchPackage', filePaths),
     // 磁盘扫描：获取所有存在的盘符
     getWindowsDrives: () => ipcRenderer.invoke('get-windows-drives'),
+    // =========================================================
+    // 🪟 窗口控制（窗口化 / 最大化 / 全屏 / 最小化 / 关闭）
+    //    背景：界面用自绘界头 + `autoHideMenuBar`，系统标题栏按钮不可见，
+    //    渲染层必须能自己控制窗口，否则用户无法还原/调整窗口大小。
+    // =========================================================
+    windowGetState: () => ipcRenderer.invoke('window:getState'),
+    windowMinimize: () => ipcRenderer.invoke('window:minimize'),
+    windowToggleMaximize: () => ipcRenderer.invoke('window:toggleMaximize'),
+    windowToggleFullScreen: () => ipcRenderer.invoke('window:toggleFullScreen'),
+    windowRestore: () => ipcRenderer.invoke('window:restore'),
+    windowClose: () => ipcRenderer.invoke('window:close'),
+    /** 订阅窗口最大化/全屏状态变化（主进程推送，返回取消订阅函数） */
+    onWindowStateChanged: (callback) => {
+        const handler = (event, data) => callback(data);
+        ipcRenderer.on('window:state-changed', handler);
+        return () => ipcRenderer.removeListener('window:state-changed', handler);
+    },
     // 磁盘扫描：扫描指定盘符/文件夹（无参时主进程弹出原生目录选择器；useFilter 控制体积过滤；excludeFolder 排除当前库）
     scanTargetFolder: (targetPath, useFilter, excludeFolder) => ipcRenderer.invoke('scan-target-folder', targetPath, useFilter, excludeFolder),
     // 磁盘扫描：接收主进程扫描进度心跳
@@ -202,11 +219,59 @@ contextBridge.exposeInMainWorld('electronAPI', {
     setPluginPreview: (html) => ipcRenderer.invoke('plugin:setPreview', html),
     // 🧩 聊天界面段（状态栏界面）：生成 HTML → 主进程 app:// 独立路由 → 内联脚本可执行
     setChatHtmlSegment: (html) => ipcRenderer.invoke('chat:setHtmlSegment', html),
+    // 🎬 重型卡（独立前端角色卡）：WebContentsView 只能由主进程创建，此处仅转发生命周期与布局
+    heavyCard: {
+        open: (card, rect) => ipcRenderer.invoke('heavycard:open', { card, rect }),
+        close: (id) => ipcRenderer.invoke('heavycard:close', { id }),
+        // ⚠️ rect 必须是 DIP（直接来自 getBoundingClientRect），绝不乘 devicePixelRatio
+        // inset：让原生视图避开 DOM 浮层（如「显示工具栏」恢复按钮）—— DOM 的 z-index 管不到原生层
+        setBounds: (id, rect, inset) => ipcRenderer.invoke('heavycard:setBounds', { id, rect, inset }),
+        // D1：任何主界面弹窗/菜单打开，或离开 heavycards 模式时传 false
+        setVisible: (visible) => ipcRenderer.invoke('heavycard:setVisible', { visible }),
+        reload: (id, ignoreCache) => ipcRenderer.invoke('heavycard:reload', { id, ignoreCache }),
+        setZoom: (id, factor) => ipcRenderer.invoke('heavycard:setZoom', { id, factor }),
+        capture: (id) => ipcRenderer.invoke('heavycard:capture', { id }),
+        clearCache: (id) => ipcRenderer.invoke('heavycard:clearCache', { id }),
+        storageInfo: (card) => ipcRenderer.invoke('heavycard:storageInfo', { card }),
+        openDataDir: (card) => ipcRenderer.invoke('heavycard:openDataDir', { card }),
+        // 💾 存档备份（一卡一备份：原子快照 + 世代轮换恢复）
+        listBackups: (card) => ipcRenderer.invoke('heavycard:listBackups', { card }),
+        backup: (card, kind, keep) => ipcRenderer.invoke('heavycard:backup', { card, kind, keep }),
+        restore: (card, backupName, keep) => ipcRenderer.invoke('heavycard:restore', { card, backupName, keep }),
+        deleteBackup: (card, backupName) => ipcRenderer.invoke('heavycard:deleteBackup', { card, backupName }),
+        openBackupDir: (card) => ipcRenderer.invoke('heavycard:openBackupDir', { card }),
+        // 📦 跨机迁移
+        exportBundle: (card, backupName) => ipcRenderer.invoke('heavycard:exportBundle', { card, backupName }),
+        importBundle: (card) => ipcRenderer.invoke('heavycard:importBundle', { card }),
+        // 📴 离线模式
+        setOffline: (card, offline, whitelist) => ipcRenderer.invoke('heavycard:setOffline', { card, offline, whitelist }),
+        blockedLog: () => ipcRenderer.invoke('heavycard:blockedLog'),
+        // 📂 本地目录模式
+        pickLocalDir: () => ipcRenderer.invoke('heavycard:pickLocalDir'),
+        setLocalRoot: (card, dir) => ipcRenderer.invoke('heavycard:setLocalRoot', { card, dir }),
+        // 😴 闲置隐藏
+        setIdle: (id, idle) => ipcRenderer.invoke('heavycard:setIdle', { id, idle }),
+        // 被拦截请求实时通知
+        onBlocked: (cb) => {
+            ipcRenderer.removeAllListeners('heavycard:blocked');
+            ipcRenderer.on('heavycard:blocked', (event, p) => cb(p));
+        },
+        // 加载状态（loading / ready / error / crashed），用 removeAllListeners 防重复绑定
+        onStatus: (cb) => {
+            ipcRenderer.removeAllListeners('heavycard:status');
+            ipcRenderer.on('heavycard:status', (event, p) => cb(p));
+        },
+        // 🏷️ 页面真实标题（页面加载完成后回传，用于把 URL 猜的路径名换成可读名字）
+        onTitle: (cb) => {
+            ipcRenderer.removeAllListeners('heavycard:title');
+            ipcRenderer.on('heavycard:title', (event, p) => cb(p));
+        }
+    },
     // 🗑️ 智能查重清洗：将冗余文件移动到 userData 下的全局回收站（绝不物理删除）
     trashFiles: (paths) => ipcRenderer.invoke('sys:trashFiles', paths),
-    // 🗑️ 打开全局回收站（世界书删除/查重清洗的 userData/jsTavern_Trash）
+    // �️ 打开全局回收站（世界书删除/查重清洗的 userData/jsTavern_Trash）
     openGlobalTrash: () => ipcRenderer.invoke('sys:openGlobalTrash'),
-    // 🕒 智能查重：批量获取文件物理状态（修改时间/创建时间/大小）
+    // �🕒 智能查重：批量获取文件物理状态（修改时间/创建时间/大小）
     getFileStats: (paths) => ipcRenderer.invoke('sys:getFileStats', paths),
     // 🖱️ 右键菜单：在系统资源管理器中打开并定位文件
     showItemInFolder: (filePath) => ipcRenderer.invoke('sys:showItemInFolder', filePath),

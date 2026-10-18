@@ -329,14 +329,16 @@ export function useChatEngine(deps = {}) {
         const key = ((apiKey && apiKey.value) || '').trim();
         const res = await api.sendChatMessage(ep, payload, key, type);
         const reply = replyToSwipe(res, type);
-        if (!reply || reply.startsWith('⚠')) return reply; // 错误占位不进变量层
-        let out = reply;
+        if (!reply || reply.startsWith('⚠')) return { out: reply, raw: reply }; // 错误占位不进变量层
+        let rawOut = reply;
         if (mvuEnabled() && varEngine.value) {
-            out = applyVars ? varEngine.value.onAiMessage(reply) : extractMvu(reply).display;
+            rawOut = applyVars ? varEngine.value.onAiMessage(reply) : extractMvu(reply).display;
         }
+        // 🧩 CT-24：`raw` = 未经**显示层正则**处理的正文（含 MVU 变量指令已剥），供沙箱面板原样读取
+        const raw = rawOut;
         // AI 方向正则统一后处理（发送/再生成/重新生成/续写同一管线）
-        out = applyRegexScripts(out, mergedRegex.value, 'AI', fullMacros.value);
-        return out;
+        const out = applyRegexScripts(rawOut, mergedRegex.value, 'AI', fullMacros.value);
+        return { out, raw };
     }
 
     async function sendChat(paramOverrides = {}) {
@@ -350,7 +352,7 @@ export function useChatEngine(deps = {}) {
         // 对用户输入应用宏 + USER 方向正则（结果即显示文本，payload 复用不再二次应用）
         let processedText = applyMacros(text, fullMacros.value);
         processedText = applyRegexScripts(processedText, mergedRegex.value, 'USER', fullMacros.value);
-        chatMessages.value.push({ role: 'user', content: processedText });
+        chatMessages.value.push({ role: 'user', content: processedText, raw: applyMacros(text, fullMacros.value) });
         lastUserActivity.value = Date.now();
         chatDraft.value = '';
         chatSending.value = true;
@@ -359,11 +361,14 @@ export function useChatEngine(deps = {}) {
         try {
             const payload = await buildPayload(type, paramOverrides);
             const swipes = [];
+            const rawSwipes = [];
             for (let n = 0; n < count; n++) {
                 // MVU 只对首条候选应用（防 add 双重计数）
-                swipes.push(await requestReply(payload, type, n === 0, paramOverrides));
+                const r = await requestReply(payload, type, n === 0, paramOverrides);
+                swipes.push(r && r.out != null ? r.out : String(r || ''));
+                rawSwipes.push(r && r.raw != null ? r.raw : (r && r.out != null ? r.out : String(r || '')));
             }
-            chatMessages.value.push({ role: 'assistant', swipes, index: 0 });
+            chatMessages.value.push({ role: 'assistant', swipes, index: 0, rawSwipes });
             // 🧠 v4.1 长期记忆（不阻塞；错误占位由 recordMessage 过滤）：
             // · R1：记「原始输入」而非 processedText —— 宏/正则改写后的文本不是用户说的话；
             // · R2：记「实际选中候选」的返回 id 存 lastAssistantMemId，翻页时 update 回写；
@@ -428,8 +433,10 @@ export function useChatEngine(deps = {}) {
         try {
             const payload = await buildPayload(type, paramOverrides);
             msg.swipes = Array.isArray(msg.swipes) ? msg.swipes.slice() : [messageText(msg)];
-            const reply = await requestReply(payload, type, false, paramOverrides);
-            msg.swipes.push(reply);
+            msg.rawSwipes = Array.isArray(msg.rawSwipes) ? msg.rawSwipes.slice() : msg.swipes.slice();
+            const r = await requestReply(payload, type, false, paramOverrides);
+            msg.swipes.push(r && r.out != null ? r.out : String(r || ''));
+            msg.rawSwipes.push(r && r.raw != null ? r.raw : (r && r.out != null ? r.out : String(r || '')));
             msg.index = msg.swipes.length - 1;
             chatMessages.value[i] = Object.assign({}, msg);
         } catch (e) {
@@ -449,8 +456,14 @@ export function useChatEngine(deps = {}) {
         try {
             const payload = await buildPayload(type, paramOverrides);
             const swipes = [];
-            for (let n = 0; n < count; n++) swipes.push(await requestReply(payload, type, false, paramOverrides));
+            const rawSwipes = [];
+            for (let n = 0; n < count; n++) {
+                const r = await requestReply(payload, type, false, paramOverrides);
+                swipes.push(r && r.out != null ? r.out : String(r || ''));
+                rawSwipes.push(r && r.raw != null ? r.raw : (r && r.out != null ? r.out : String(r || '')));
+            }
             msg.swipes = swipes;
+            msg.rawSwipes = rawSwipes;
             msg.index = 0;
             chatMessages.value[i] = Object.assign({}, msg);
         } catch (e) {
@@ -487,8 +500,10 @@ export function useChatEngine(deps = {}) {
             const payload = type === 'anthropic'
                 ? { model: resolveApiModel ? resolveApiModel() : 'claude-3-haiku-20240307', max_tokens: 2048, system: systemText, messages: prior }
                 : { model: resolveApiModel ? resolveApiModel() : 'local-model', messages: [{ role: 'system', content: systemText }].concat(prior), stream: false, temperature: 0.7 };
-            const reply = await requestReply(payload, type, true, paramOverrides);
-            chatMessages.value.push({ role: 'assistant', swipes: [reply], index: 0 });
+            const r = await requestReply(payload, type, true, paramOverrides);
+            const outText = r && r.out != null ? r.out : String(r || '');
+            const rawText = r && r.raw != null ? r.raw : outText;
+            chatMessages.value.push({ role: 'assistant', swipes: [outText], rawSwipes: [rawText], index: 0 });
         } catch (e) {
             showToast && showToast('续写失败: ' + (e && e.message ? e.message : e));
         } finally {
@@ -578,7 +593,14 @@ export function useChatEngine(deps = {}) {
         if (!raws.length) return;
         // 首个候选走完整管线（含 MVU 初始化）；附加问候语仅做展示（剥掉变量指令块，不重复初始化）
         const swipes = raws.map((raw, n) => renderGreeting(raw, n === 0));
-        chatMessages.value = [{ role: 'assistant', swipes, index: 0 }];
+        // 🧩 CT-24：`rawSwipes` = 未经显示层正则处理的原始正文。
+        //   沙箱面板的 `getChatMessages()[0].message` 必须拿到它（酒馆同义），
+        //   否则面板去正文里找 `【说明】…【结束】` 会扑空（那段正被 [界面]开局设置 整段替换成面板本身）。
+        const rawSwipes = raws.map((raw) => {
+            let t = renderTpl(raw, '开场白');
+            return applyMacros(t, fullMacros.value);
+        });
+        chatMessages.value = [{ role: 'assistant', swipes, index: 0, rawSwipes }];
     }
 
     /**

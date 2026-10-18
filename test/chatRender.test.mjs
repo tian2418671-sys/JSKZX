@@ -109,6 +109,44 @@ test('裸 ``` 围栏里是普通代码 → 保持文本（不误判成面板）'
     assert.ok(segs[0].content.includes('const a = 1;'));
 });
 
+test('CT-22：面板内部含 ``` 正则字面量时不得提前闭合（揽仙录事故）', () => {
+    // 真实现场：角色卡 MVU 脚本里有一条正则 `.replace(/^```(?:markdown|md|text)?\s*/i,'')`
+    // —— 三个反引号**不在行首/行尾**，绝不能被当成闭合围栏，
+    // 否则一个 43k 的面板会被切成「HTML + 碎片 + 裸 JS 源码」，后两段以纯文本渲染 → 满屏代码。
+    const inner = [
+        '<body>',
+        '<div id="app"></div>',
+        '<script type="module">',
+        "const a=(t).replace(/^```(?:markdown|md|text)?\\s*/i,'').replace(/\\s*```$/i,'').trim();",
+        'if(!a)throw new Error("no body");',
+        '</script>',
+        '<style>.a{color:red}</style>',
+        '</body>'
+    ].join('\n');
+    const raw = '```\n' + inner + '\n```';
+    const segs = segmentMessage(raw);
+    assert.equal(segs.length, 1, '必须只产生 1 段（整块面板）');
+    assert.equal(segs[0].type, 'html', '整块应是 html 段而非文本');
+    assert.ok(segs[0].content.includes("replace(/^```(?:markdown|md|text)?"), '面板内容应完整保留正则源码');
+    assert.ok(segs[0].content.includes('no body'), '闭合点之后的正文不得被挤出面板');
+});
+
+test('CT-22：```html 围栏同样只认独占一行的闭合围栏', () => {
+    const inner = '<div id="app"></div>\n<script>const r=/```html/;</script>';
+    const segs = segmentMessage('```html\n' + inner + '\n```\n\n后记文字');
+    assert.equal(segs.length, 2, '面板 + 后记 = 2 段');
+    assert.equal(segs[0].type, 'html');
+    assert.equal(segs[1].type, 'text');
+    assert.ok(segs[1].content.includes('后记文字'));
+});
+
+test('CT-22：嵌入行内的 ``` 不会被当作围栏开启', () => {
+    // 只有行首 ``` 才是围栏；句中出现的反引号纯属正文
+    const segs = segmentMessage('这段说明里提到 ``` 三个反引号，但不是围栏。');
+    assert.equal(segs.length, 1);
+    assert.equal(segs[0].type, 'text');
+});
+
 test('htmlNeedsIframe 判据（决定要不要走沙箱 iframe）', () => {
     assert.equal(htmlNeedsIframe('<div>x</div><script></script>'), true);
     assert.equal(htmlNeedsIframe('<head><meta charset="utf-8"></head><body></body>'), true);
@@ -144,13 +182,31 @@ test('buildHtmlSrcdoc：注入 JSR 侧桥接 API 与沙箱兜底', () => {
     for (const api of ['getVariables', 'getMessageVar', 'getCurrentMessageId', 'updateVariablesWith', 'replaceVariables', 'errorCatched']) {
         assert.ok(doc.includes(api), `缺桥接 API: ${api}`);
     }
-    assert.ok(doc.includes('return 7;'), 'getCurrentMessageId 应返回注入的消息序号');
+    // CT-26：消息序号改为常量注入（__jskMsgId），不再拼成 `return 7;`
+    assert.ok(doc.includes('__jskMsgId=7'), 'getCurrentMessageId 应返回注入的消息序号');
     assert.ok(doc.includes('localStorage'), '应带 localStorage 内存兜底（沙箱下原生会抛 SecurityError）');
 });
 
 test('buildHtmlSrcdoc：变量 JSON 里的 </script 不会破出桥接脚本', () => {
     const doc = buildHtmlSrcdoc('<body>x</body>', '{"stat_data":{"t":"</script><img src=x>"}}', 'seg3_0');
     assert.ok(!doc.includes('</script><img'), '变量内容须转义');
+});
+
+test('buildHtmlSrcdoc：必须注入 getChatMessages / setChatMessages（CT-23 回归锁）', () => {
+    // CT-23：揽仙录的开局设置面板在 setup() 顶部就调
+    //   `const n = getChatMessages(getCurrentMessageId())[0]?.message ?? ''`
+    // 沙箱缺这个 API → ReferenceError → setup 抛错 → Vue 挂不上 → 用户看到**空白白框**。
+    const doc = buildHtmlSrcdoc('<body>x</body>', '{}', 'seg_0', '', { messageId: 7, messageText: '楼层正文' });
+    assert.ok(doc.includes('getChatMessages'), '缺 getChatMessages');
+    assert.ok(doc.includes('setChatMessages'), '缺 setChatMessages（模板保存时会调）');
+    assert.ok(doc.includes('formatAsDisplayedMessage'), '缺 formatAsDisplayedMessage');
+    assert.ok(doc.includes('楼层正文'), 'getChatMessages 必须带上当前楼层正文');
+});
+
+test('buildHtmlSrcdoc：getChatMessages 的正文含 </script 也不得破出', () => {
+    const doc = buildHtmlSrcdoc('<body>x</body>', '{}', 'seg_0', '', { messageId: 1, messageText: '/a</script><b>' });
+    assert.ok(!doc.includes('</script><b>'), '楼层正文须转义');
+    assert.ok(doc.includes('getChatMessages'));
 });
 
 test('buildHtmlSrcdoc：4 种文档形状都必须带上 vendor（CT-19 回归锁）', () => {

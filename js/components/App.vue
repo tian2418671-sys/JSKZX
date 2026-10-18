@@ -29,6 +29,10 @@
 
             <!-- 【右侧】插件工作区（子组件 PluginWorkspace，appMode === 'plugins' 时显示）；ref 供 Ctrl+S 快捷键路由保存调用 -->
             <plugin-workspace ref="pluginWorkspaceRef" />
+
+            <!-- 【右侧】重型卡工作区（子组件 HeavyCardWorkspace，appMode === 'heavycards' 时显示）
+                 ⚠️ 容器由主进程 WebContentsView 创建，本组件只提供位置与尺寸 -->
+            <heavy-card-workspace />
         </div>
 
         <!-- ================= [ 批量操作悬浮控制台（可拖动：按住标题栏拖动，双击标题栏复位底部居中） ] =================
@@ -787,6 +791,7 @@ import HeaderBar from './HeaderBar.vue'; // 顶部菜单栏 + 紧凑工具栏
 import SidebarPanel from './SidebarPanel.vue'; // 左侧资源管理器（角色卡/世界书库）+ 拖拽把手
 import EditorPanel from './EditorPanel.vue'; // 右侧编辑器面板（角色卡编辑 + 世界书 IDE + 日志控制台）
 import PluginWorkspace from './PluginWorkspace.vue'; // 🧩 插件工作区（代码/效果双卡 + 沙箱效果预览）
+import HeavyCardWorkspace from './HeavyCardWorkspace.vue'; // 🎬 重型卡工作区（主进程 WebContentsView 宿主）
 import SnapshotModal from './SnapshotModal.vue'; // 📸 历史快照列表与一键恢复弹窗
 import PushModal from './PushModal.vue'; // 🚀 推送目标选择与执行对话框
 import { processFile, extractBookEntries, compileAutoTagRules, defaultAutoTagRules, normalizeCardData } from '../utils/cardLoader.js';
@@ -833,6 +838,7 @@ import { useWorldbooks } from '../composables/useWorldbooks.js'; // 🌍 世界�
 import { usePresets } from '../composables/usePresets.js'; // ⚙️ 酒馆预设管理功能
 import { usePresetStitch } from '../composables/usePresetStitch.js'; // 🧵 预设缝合中心（条目跨预设搬运 + 自定义条目 + order 重建）
 import { usePlugins } from '../composables/usePlugins.js'; // 🧩 酒馆插件管理功能
+import { useHeavyCards } from '../composables/useHeavyCards.js'; // 🎬 重型卡（独立前端角色卡）：展示 + 存档管理
 import { useCardPlugins } from '../composables/useCardPlugins.js'; // 🧩 卡内插件页签（本卡自带的酒馆助手脚本/变量）
 import { useWorldbookEntries } from '../composables/useWorldbookEntries.js'; // 📚 世界书词条深度编辑（Entry IDE）组合式函数
 import { useGlobalEntrySearch } from '../composables/useGlobalEntrySearch.js'; // 🔎 全库词条搜索与反向引用组合式函数
@@ -876,7 +882,7 @@ document.addEventListener('dragover', (e) => e.preventDefault());
 document.addEventListener('drop', (e) => e.preventDefault());
 
 export default {
-    components: { Section, DragOverlay, AppLoadingOverlay, ToastContainer, BatchTagModal, PromptModal, OptionSelectModal, SingleTagModal, DiskScanModal, UpdateModal, TextModal, ImageModal, ApiSettingsModal, /* ⛔ GlobalAssetModal 已下线（2026-09-20） */ CommandPaletteModal, GraphModal, WbGraphModal, DedupeModal, WbDedupeModal, PresetDedupeModal, PresetStitchModal, ContentDedupeModal, DiffModal, WbMergeModal, WbMergePreviewModal, WbImportModal, GlobalEntrySearchModal, WbSnapshotModal, ContextMenu, WbContextMenu, AiTagModal, FullBackupModal, QualityCheckModal, StartupTasksModal, AiTagLogModal, AutoTagRulesModal, AutoGroupModal, WbAutoGroupModal, WbTagEditModal, HeaderBar, SidebarPanel, EditorPanel, PluginWorkspace, CardPluginModal, SnapshotModal, PushModal },
+    components: { Section, DragOverlay, AppLoadingOverlay, ToastContainer, BatchTagModal, PromptModal, OptionSelectModal, SingleTagModal, DiskScanModal, UpdateModal, TextModal, ImageModal, ApiSettingsModal, /* ⛔ GlobalAssetModal 已下线（2026-09-20） */ CommandPaletteModal, GraphModal, WbGraphModal, DedupeModal, WbDedupeModal, PresetDedupeModal, PresetStitchModal, ContentDedupeModal, DiffModal, WbMergeModal, WbMergePreviewModal, WbImportModal, GlobalEntrySearchModal, WbSnapshotModal, ContextMenu, WbContextMenu, AiTagModal, FullBackupModal, QualityCheckModal, StartupTasksModal, AiTagLogModal, AutoTagRulesModal, AutoGroupModal, WbAutoGroupModal, WbTagEditModal, HeaderBar, SidebarPanel, EditorPanel, PluginWorkspace, HeavyCardWorkspace, CardPluginModal, SnapshotModal, PushModal },
     setup() {
         // 主题状态（localStorage 在自定义协议下可能不可用，做防御性读取；默认暗夜极客）
         let savedTheme = 'dark';
@@ -885,6 +891,10 @@ export default {
 
         const isAppLoading = ref(true); // 应用首屏加载状态（数据就绪后淡出）
 
+        // 🎬 重型卡清单：`loadAppConfig` 在 onMounted 内执行，而 `useHeavyCards` 在 setup 更下方声明。
+        //    为避开 TDZ（`Cannot access 'loadHeavyCardsFromConfig' before initialization`），
+        //    恢复时只暂存原始清单，setup 尾部再真正装载。
+        let pendingHeavyCardsConfig = null;
         // ================= [ 全局 Toast 消息通知系统 ] =================
         const toasts = ref([]);
         let toastIdCounter = 0;
@@ -2601,6 +2611,9 @@ export default {
                                     prefillCompatMode.value = normalizePrefillMode(cfg.ui.prefillCompat.mode);
                                     prefillCompatTable.value = sanitizeCompatTable(cfg.ui.prefillCompat.table);
                                 }
+                                // 🎬 重型卡清单（老配置无该键 ⇒ 自动补预置「云端人生」，保证开箱即用）
+                                //    ⚠️ 此处已在 onMounted 内（setup 早执行完），可以安全直接调用。
+                                loadHeavyCardsFromConfig(Array.isArray(cfg.ui.heavyCards) ? cfg.ui.heavyCards : []);
                                 if (cfg.ui.localCategoryMap && typeof cfg.ui.localCategoryMap === 'object') {
                                     localCategoryMap.value = { ...localCategoryMap.value, ...cfg.ui.localCategoryMap };
                                 }
@@ -3407,6 +3420,11 @@ export default {
         const commandRegistry = createCommandRegistry();
         // 🆕 P2：命令面板（Ctrl+Shift+P）—— 命令列表来自注册表，按 `when` 过滤后传入
         const showCommandPalette = ref(false);
+        // 🪟 顶部菜单开合状态（由 HeaderBar 上报）
+        //    ⚠️ 必须放在 ctx 上：重型卡 WebContentsView 位于 OS 合成层，CSS z-index 无效，
+        //       菜单展开时必须让视图隐藏，否则菜单被盖住（用户实测截图反馈）。
+        //       HeaderBar 内部的 `menuOpen` 不在 ctx 上 ⇒ 工作区的弹窗扫描扫不到。
+        const headerMenuOpen = ref(false);
         const openCommandPalette = () => { showCommandPalette.value = true; };
         const paletteCommands = computed(() =>
             commandRegistry.list().filter(c => evaluateWhen(c.when, { appMode: appMode.value }))
@@ -3920,7 +3938,7 @@ export default {
         // 🌍 世界书管理器状态与逻辑（独立于角色卡库，主视图双引擎模式）
         // =========================================================
 
-        // 视图切换模式：'characters' (角色卡) | 'worldbooks' (世界书) | 'presets' (预设) | 'plugins' (插件)
+        // 视图切换模式：'characters' (角色卡) | 'worldbooks' (世界书) | 'presets' (预设) | 'plugins' (插件) | 'heavycards' (重型卡)
         const appMode = ref('characters');
 
         // ================= [ 📦 v2.3.6 整库冷备（一键全量快照） ] =================
@@ -5494,6 +5512,10 @@ export default {
             fullBackupDir, fullBackupKeep,
             startupTasks,
             prefillCompatMode, prefillCompatTable,
+            // 🎬 重型卡清单：直接传 ref 与函数（**不引用 useHeavyCards 的返回值**，避开 TDZ）
+            collectHeavyCardsForConfig: () => {
+                try { return heavyCards.value.map((c) => ({ ...c })); } catch (e) { return []; }
+            },
             // ⚠️ `prefillCompatInfo` **不要**放这里：它由 `useAITools`（setup 更下方）产出，
             //    在此处引用会命中 TDZ（`Cannot access 'prefillCompatInfo' before initialization`）
             //    —— 整个 setup 抛错 ⇒ App 渲染函数拿不到任何绑定（启动即白屏级崩溃）。
@@ -6035,6 +6057,34 @@ export default {
             nativeAlert, confirmDialog, addLog, appPrompt,
             contextMenu, closeContextMenu, appMode
         });
+
+        // 🎬 重型卡（独立前端角色卡）：展示与游玩 + 一卡一存档的备份管理
+        //    容器由主进程 WebContentsView 创建（见 main/heavyCards/manager.js），渲染层无创建能力。
+        //    规格：docs/规格与计划/功能规格/独立前端角色卡-承载方案-v3.md
+        const {
+            heavyCards, activeHeavyCard, heavyCardSearchQuery, filteredHeavyCards,
+            heavyCardStatus, heavyCardZoom, heavyCardFrameUrl, heavyCardMounted,
+            loadFromConfig: loadHeavyCardsFromConfig, collectForConfig: collectHeavyCardsForConfig,
+            // 🏷️ 页面标题自动命名（订阅主进程回传的 <title>）
+            subscribePageTitle: subscribeHeavyCardPageTitle, applyPageTitle: applyHeavyCardPageTitle,
+            addHeavyCard, updateHeavyCard, removeHeavyCard,
+            openHeavyCard, closeHeavyCard,
+            reportRect: reportHeavyCardRect, syncViewVisibility: syncHeavyViewVisibility,
+            reloadHeavyCard, changeZoom: changeHeavyCardZoom,
+            openHeavyCardDataDir, clearHeavyCardCache, getStorageInfo: getHeavyCardStorageInfo,
+            heavyCardBackups, heavyCardBackupBusy,
+            refreshBackups: refreshHeavyCardBackups,
+            backupHeavyCard, restoreHeavyCard,
+            deleteHeavyCardBackup, openHeavyCardBackupDir,
+            startAutoBackupTimer: startHeavyCardAutoBackup,
+            stopAutoBackupTimer: stopHeavyCardAutoBackup,
+            applyAutoBackupSettings: applyHeavyCardAutoBackupSettings,
+            exportHeavyCardBundle, importHeavyCardBundle,
+            setHeavyCardOffline, refreshBlockedLog, heavyCardBlockedLog,
+            setHeavyCardLocalDir, clearHeavyCardLocalDir,
+            heavyCardIdle, setHeavyCardIdleHidden, startHeavyCardIdleWatch, stopHeavyCardIdleWatch,
+            markHeavyCardActivity
+        } = useHeavyCards({ appMode, syncConfigToDiskDebounced, addLog, showToast });
 
         // 🧩 卡内插件页签：展示「当前打开这张卡」自带的酒馆助手脚本 / 变量 / 第三方写卡扩展
         //    ⚠️ 与上面的插件工作区（磁盘插件工程）是两回事：这里的数据跟着卡片文件走
@@ -6854,6 +6904,10 @@ export default {
             initVectorEngine, deleteVectorCache,
             toasts, showToast, notifySortDataStatus,
             nativeAlert, confirmDialog,
+            // ⌨️ 文本输入弹窗（SidebarPanel 的「添加重型卡 URL」「新建分组」等用到）
+            // ⚠️ AR-13：子组件按名解构 ctx，漏暴露 = 运行时报 `x is not a function`
+            //    （2026-10-18 实测：点「🎬 独立前端角色卡 → ➕」直接抛 `ctx.appPrompt is not a function`）
+            appPrompt,
             // 🤖 AI 分类弹窗复用：模型解析 + 响应文本提取
             resolveApiModel, extractReplyContent,
             llmRolePrompts, saveRolePrompts, mapPromptsToSegments, applyGuideRecipe, tagCustomSegments, tagPromptMode, tagMaterialOverrides, materialPreview, setMaterialOverride, clearMaterialOverride, tagPackSize, tagSkipTagged, tagWbSegmentMax, tagAutoMaterial, tagResume, resumeTagging,
@@ -6998,6 +7052,31 @@ export default {
             openPluginContextMenu, openPluginInFolder, readPluginSource,
             pluginTab, pluginSelectedFile, pluginSelectedSource, pluginDirty,
             savingPlugin, savePluginSource, rescanPluginDir,
+            // 🎬 重型卡（独立前端角色卡）：展示 + 一卡一存档管理
+            //    ⚠️ 渲染层不持有任何 WebContentsView 句柄，只能通过与主进程的 IPC 交互
+            // 🪟 顶部菜单开合（D1 补充：菜单展开时视图必须隐藏）
+            headerMenuOpen,
+            // 🏷️ 页面标题自动命名（订阅主进程回传的 <title>）
+            subscribeHeavyCardPageTitle,
+            heavyCards, activeHeavyCard, heavyCardSearchQuery, filteredHeavyCards,
+            heavyCardStatus, heavyCardZoom, heavyCardFrameUrl, heavyCardMounted,
+            addHeavyCard, updateHeavyCard, removeHeavyCard,
+            openHeavyCard, closeHeavyCard,
+            reportHeavyCardRect, syncHeavyViewVisibility,
+            reloadHeavyCard, changeHeavyCardZoom,
+            openHeavyCardDataDir, clearHeavyCardCache, getHeavyCardStorageInfo,
+            // 💾 备份 / 恢复（一卡一备份）
+            heavyCardBackups, heavyCardBackupBusy,
+            refreshHeavyCardBackups, backupHeavyCard, restoreHeavyCard,
+            deleteHeavyCardBackup, openHeavyCardBackupDir,
+            // ⏱️ 定时自动备份
+            startHeavyCardAutoBackup, stopHeavyCardAutoBackup, applyHeavyCardAutoBackupSettings,
+            // 📦 跨机迁移 / 📴 离线 / 📂 本地目录 / 😴 闲置
+            exportHeavyCardBundle, importHeavyCardBundle,
+            setHeavyCardOffline, refreshBlockedLog, heavyCardBlockedLog,
+            setHeavyCardLocalDir, clearHeavyCardLocalDir,
+            heavyCardIdle, setHeavyCardIdleHidden, startHeavyCardIdleWatch, stopHeavyCardIdleWatch,
+            markHeavyCardActivity,
             // 🌍 世界书网址导入与重命名
             importUrl, isImportingWb, importWorldbookFromUrl, renameWorldbook,
             // 🌐 2026-10-03：URL 导入三合一（文件菜单命令按 appMode 分发时用）
@@ -7147,7 +7226,16 @@ export default {
         //     插一行代码或一句注释都会让该自动检查失配（改为报「结构已变化」），防线静默宕机。
         //     “ctx 就绪之后才能做的事”统一写到 `provide` **之后**（同一同步流程内，无时序差异）。
 
-        // 🆕 P2：注册内置命令 —— 必须在 ctx 就绪**之后**（命令执行体全部取自 ctx）
+        // 🎬 重型卡：装载配置清单（含老配置无该键时自动补预置「云端人生」）
+        //    ⚠️ setup 尾部早于 onMounted 执行：此时若配置还没读回来，先装预置卡保证列表非空；
+        //       配置恢复时会整体覆盖（loadHeavyCardsFromConfig 幂等），不会重复追加。
+        try {
+            loadHeavyCardsFromConfig(pendingHeavyCardsConfig !== null ? pendingHeavyCardsConfig : []);
+        } catch (e) {
+            console.warn('[重型卡] 清单装载失败：', e && e.message);
+        }
+        pendingHeavyCardsConfig = null;
+        // �🆕 P2：注册内置命令 —— 必须在 ctx 就绪**之后**（命令执行体全部取自 ctx）
         registerAppCommands(commandRegistry, ctx);
         const _cmdProblems = commandRegistry.getProblems();
         if (_cmdProblems.length) {

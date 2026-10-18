@@ -321,6 +321,73 @@
 
 ---
 
+## 三、CT-22~26 ｜ 卡内面板渲染家族（同一根因的五次暴露）
+
+> 这五条**不是五个独立 bug**，是「沙箱运行时与酒馆语义不符」这一根因的五次暴露。
+> 单独看每条都像小修补，合起来才看得清根子在哪。
+
+### CT-22 ｜ 🔴 面板被切成三段、满屏裸露 JavaScript
+- **现象**：用户截图 —— 聊天气泡里出现 `(?:markdown|md|text)?\s/i,'').replace(/\s`。
+- **根因**：`BARE_FENCE_RE` / `HTML_FENCE_RE` 用 `/```([\s\S]*?)```/`，**任意位置**的三个反引号都算闭合围栏。
+  而面板内部嵌着卡作者 MVU 脚本，其中一条正则字面量 `.replace(/^```(?:markdown|md|text)?\s*/i,'')`
+  **本身带三个反引号** ⇒ 43,667 字符的面板在 16,910 处被误判闭合，切成
+  「HTML 16,906 + 碎片 43 + 裸源码 26,712」，后两段走 Markdown 纯文本渲染。
+- **修复**：闭合围栏必须**独占一行**（`^[ \t]*```[ \t]*$`，`m` 标志）。
+  嵌在正则字面量/字符串中间的 ``` 前后是非空白字符 ⇒ 不再误判。实测 3 段 → 1 段完整面板。
+- **纪律**：**围栏语法靠「行首行尾」定位，不能只认字符序列**。
+
+### CT-23 ｜ 🔴 面板渲染成空白白框
+- **根因**：面板 `setup()` 顶部就调 `getChatMessages(getCurrentMessageId())[0]?.message`，
+  而桥接只注入了 `getVariables / getMessageVar / updateVariablesWith`，**没有 `getChatMessages`**
+  ⇒ `ReferenceError` → setup 抛错 → Vue 挂不上（`#app` 只剩 `<!---->`）→ 60px 白框。
+- **修复**：补 `getChatMessages / setChatMessages / formatAsDisplayedMessage`，
+  `buildHtmlSrcdoc` 新增 `messageText`，`ChatPanelSeg` 新增同名 prop 并纳入 srcdoc 缓存键。
+
+### CT-24 ｜ 🔴 面板正文显示成 `\s*([\s\S]*?)\s*` 原始正则片段
+- **根因**：面板靠 `getChatMessages()[0].message` 去正文里找 `【说明】…【结束】`，
+  而卡里 `[界面]开局设置` 这条正则干的**正是把那段标记整段替换成面板自己**
+  ⇒ 喂「处理后文本」时标记早没了，`match()[1]` 为 undefined，`?? ''` 后把正则源当正文插值。
+- **修复**：消息改存 **`rawSwipes`**（未经显示层正则的原始候选正文），`messageTextOf()` 优先取它 ——
+  对齐酒馆 `getChatMessages().message` 语义（取**原始 message 字段**，不是显示文本）。
+  `requestReply` 改返回 `{out, raw}`，发送/再生成/重新生成/续写四处同步。
+- **纪律**：**「显示文本」与「原始消息」是两样东西**，凡是对外提供「消息」的 API 都要问一句要哪一个。
+
+### CT-25 ｜ 🟡 `###` / `**粗体**` 原样露出
+- **根因**：`formatAsDisplayedMessage` 直接 `return String(m)`，而面板把它当 HTML 插值用。
+- **修复**：补最小 Markdown 子集（标题/粗体/斜体/行内代码/无序列表/段落），先转义再套标签。
+
+### CT-26 ｜ 🔴 同族去根：API 覆盖度「一次性收口」
+- **判据**：CT-22~25 已修完，但**修法本身仍是治标** —— 每次都是「某张卡崩了 → 补那个 API」。
+  只要还有没被用到的 API，下一张卡就会以完全相同的方式崩成白框。
+- **取证（真库扫描，`E:\AI\酒馆工具\角色卡` 53 PNG / 46 可解析）**：
+  面板实际调用 → `getCurrentMessageId`(7 张) / `getVariables`(4) / `updateVariablesWith`(4) /
+  `triggerSlash`(3) / `getChatMessages`(3) / `eventOn`(2) / `getWorldbook`(2) / `getLastMessageId`(2) /
+  `getAllVariables` / `setChatMessage` / `setChatMessages` / `formatAsDisplayedMessage` / `generate` /
+  `getWorldbookNames` / `replaceWorldbook` / `generateRaw` / `substitudeMacros` / `createWorldbook` /
+  `getLorebookEntries` / `setLorebookEntries`。
+  **且面板还依赖 `Mvu.events.VARIABLE_UPDATE_ENDED`、`tavern_events.*`、`SillyTavern.getCurrentChatId()`、
+  `waitGlobalInitialized('Mvu')`** —— 这些不是函数，是**全局对象/事件总线**，缺了是属性访问崩。
+- **修复**：新建 `js/composables/chat/useChatSandbox.js`，一处收口全部：
+  1. 真库扫描出的 20 个 API 全部实现；
+  2. 常见面（事件/世界书/预设/音频/斜杠命令…）给安全兜底；
+  3. 事件总线在沙箱内**真实现**（面板靠它在变量更新后重绘）；
+  4. `tavern_events` / `Mvu.events` / `SillyTavern` / `toastr` 齐备；
+  5. 最后一层「**只在确实缺失时**定义」的万能函数兜底。
+- **刻意不做**：**不用 window Proxy 全局代理**。会污染 Vue/React 的特性探测
+  （`in` 运算、`Symbol.iterator` 检测全部失真），副作用远大于收益。
+- **数据接线**：宏表走引擎同一份 `fullMacros`（保证面板里替换值与正文一致），
+  世界书走 `chatWbList`（与测卡侧栏同源），均由 `EditorPanel` 传入。
+- **验证**：
+  - `test/chatSandbox.test.mjs` **9 例**，其中核心一条是**断言表**：
+    `OBSERVED_APIS` 里漏实现一个就红 —— 这是防复发的关键（不靠人工记忆）；
+  - 真库实机：12 张有大型面板的卡抽验 6 张，
+    `#app` 内容 **1006 / 6628 / 6906** 字符全部正常渲染、**零控制台错误**；
+  - `npm test` **1143 pass / 0 fail**；`guard:scope` 0 未定义；`build:web` ✅；真实启动无 `[Vue 错误]`。
+- **踩过的坑（值得记住）**：把 API 写进**模板字符串**时，注释里的反引号（`` `'x' in window` ``）
+  会直接闭合模板 → `Unexpected string`。模板字符串内**禁用裸反引号**，注释里也别写。
+
+---
+
 ## 四、本领域改动前的自检清单
 1. 侧栏模板里访问任何**可能为 undefined 的列表/对象** → 必须走 `arr()` / `objKeys()` 兜底（[CT-01]）。
 2. 读 **localStorage / IPC 存储**的 `computed` → 必须有响应式依赖（`void xxxVersion.value`），否则永久缓存（[CT-02]）。
@@ -328,6 +395,13 @@
 4. 新增任何「按卡片 path 派生」的键 → 必须在移动/重命名路径上迁移（[CT-10]）。
 5. 引擎改动后跑：`npm test` + `scripts/tools/chat-sidebar-test.mjs`（生产 `app://`）+ `scripts/tools/chat-engine-test.mjs`（dev + 调试句柄）。
 6. 端到端测试**驱动真实 UI**，不要自己 import 引擎模块（[CT-03]）。
+7. 改动沙箱桥接（`useChatSandbox.js`）后，**必须**跑 `node --test test/chatSandbox.test.mjs` ——
+   里面有一张 `OBSERVED_APIS` 断言表，漏实现一个 API 就红。新增卡内 API 支持时，
+   **先把它加进 `OBSERVED_APIS`**（真库扫描脚本 `scripts/probes/_scan-tavern-api.mjs` 可复现口径）。
+8. 页面「白框 / 空块」优先怀疑 **sandbox 里抛了 ReferenceError**：连 CDP 到 iframe target，
+   看 `Runtime.consoleAPICalled` 的 error，而不是盯着外层 Vue 找。
+9. 面板拿到的「消息」要分清 **原始正文 vs 显示文本**：对外提供消息的 API 一律用 `rawSwipes`（[CT-24]）。
+10. 往模板字符串里写 JS 时**禁止出现裸反引号**（连注释里也不行），否则模板提前闭合（[CT-26]）。
 7. 改动**卡内 HTML 面板（状态栏/界面型段）**或 `buildHtmlSrcdoc` → 对照 [CT-13]：
    ① 文档必须走 `app://` 内存路由（不然生产 CSP 会拦内联脚本）；
    ② 模板依赖的全局（`Vue`/`z`/`_`/`$`）由 `web/vendor/chat-host.js` 提供，新增依赖改 `js/chatHost/iframeGlobals.js`；

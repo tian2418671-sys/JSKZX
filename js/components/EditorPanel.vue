@@ -4,7 +4,8 @@
       ref="chatContainer" 由本组件自持（滚动到底部用），不再写回父级
 -->
 <template>
-    <main v-show="appMode !== 'plugins'" class="flex-1 flex flex-col bg-zinc-950 overflow-hidden relative">
+    <!-- ⚠️ 重型卡（heavycards）也由独立工作区承载，必须一并排除，否则两块会同时显示抢宽度 -->
+    <main v-show="appMode !== 'plugins' && appMode !== 'heavycards'" class="flex-1 flex flex-col bg-zinc-950 overflow-hidden relative">
 
         <!-- 🎴 引擎 A：角色卡编辑工作区 -->
         <div v-show="appMode === 'characters'" class="flex-1 flex flex-col overflow-hidden min-h-0">
@@ -783,6 +784,10 @@
                                             :segments="segmentsOfMsg(msg)"
                                             :vars-json="chatVarsJsonSafe"
                                             :message-id="idx"
+                                            :message-text="messageTextOf(msg)"
+                                            :last-message-id="chatMessages.length - 1"
+                                            :macros="chatMacrosForPanel"
+                                            :worldbooks="chatWorldbooksForPanel"
                                             :render-text="renderChatHtml"
                                         />
                                     </div>
@@ -1866,9 +1871,53 @@ export default {
             if (typeof fn === 'function') return fn(msg);
             return [{ type: 'text', content: chatMessageText(msg) }];
         };
+        /** 消息 → 当前显示文本（沙箱 getChatMessages()[0].message 的取值来源，CT-23） */
+        const messageTextOf = (msg) => {
+            // 🚨 CT-24（2026-10-05）：必须给**原始正文**，不能给正则处理后的显示文本。
+            //   酒馆的 `getChatMessages(id)[0].message` 取的就是原始 message 字段；
+            //   而卡里的界面面板正是靠它去正文里找 `【说明】…【结束】` 之类的标记 ——
+            //   而 `[界面]开局设置` 这条正则干的正是**把那段标记整段替换成面板本身**。
+            //   若喂处理后的文本 → 标记早没了 → 面板正则匹配失败 → 把 `\s*([\s\S]*?)\s*` 原样显示出来。
+            if (!msg) return '';
+            const idx = Math.max(0, Math.min(Number(msg.index) || 0, (msg.swipes || []).length - 1));
+            // 优先用未经显示层正则处理的原始候选正文
+            if (Array.isArray(msg.rawSwipes) && msg.rawSwipes.length) return msg.rawSwipes[idx] || '';
+            if (Array.isArray(msg.swipes) && msg.swipes.length) return msg.swipes[idx] || '';
+            return msg.content || '';
+        };
         const chatVarsJsonSafe = computed(() => {
             const v = ctx.chatVarsJson && ctx.chatVarsJson.value;
             return typeof v === 'string' && v ? v : '{"stat_data":{}}';
+        });
+        /**
+         * 沙箱面板的宏字典（`substitudeMacros` 用）。
+         * 用**引擎同一份** fullMacros，保证面板里替换出的值与正文里的一致；
+         * Vue Proxy 必须先转普通对象，否则结构化克隆会失败（AR-58 同族坑）。
+         */
+        const chatMacrosForPanel = computed(() => {
+            const m = ctx.chatFullMacros && ctx.chatFullMacros.value;
+            if (!m || typeof m !== 'object') return {};
+            try { return JSON.parse(JSON.stringify(m)); } catch (e) { return {}; }
+        });
+        /**
+         * 沙箱面板的世界书快照（`getWorldbook` / `getLorebookEntries` 用）。
+         * 测卡侧栏看到的条目就是引擎实际注入的那批，两边同源。
+         */
+        const chatWorldbooksForPanel = computed(() => {
+            const list = chatWbList.value || [];
+            return [{
+                name: (chatCardName && chatCardName.value) || 'character_book',
+                entries: list.map((e) => ({
+                    uid: e._raw && e._raw.uid !== undefined ? e._raw.uid : e.key,
+                    comment: e.comment,
+                    content: (e._raw && (e._raw.content || e._raw.text)) || '',
+                    keys: e.keys || [],
+                    enabled: e.enabled !== false,
+                    constant: !!e.constant,
+                    position: e.position,
+                    insertion_order: e.insertion_order
+                }))
+            }];
         });
 
         // ================= [ ⚙ 测卡工作区侧边栏 ] =================
@@ -2079,13 +2128,14 @@ export default {
         return {
             // ⚙ 测卡消息区（新编排引擎）
             chatMessages, chatDraft, chatSending, cardName,
-            segmentsOfMsg, renderChatHtml, chatVarsJsonSafe, chatContainer,
+            segmentsOfMsg, renderChatHtml, chatVarsJsonSafe, chatContainer, messageTextOf,
             onChatSend, onChatMoreSwipe, onChatRegenerate, onChatContinue,
             onChatClear, onChatPrevSwipe, onChatNextSwipe, onChatDeleteMessage,
             scrollChatToBottom, chatSegEnabled, toggleChatSeg,
             // ⚙ 测卡工作区侧边栏（7 分区）
             sidebarVisible, sidebarWidth, chatStorageReady,
             chatCardPath, chatCardName, chatPresetOptions, chatRegexList, chatWbList,
+            chatMacrosForPanel, chatWorldbooksForPanel, messageTextOf,
             chatVarsTree, chatVarsLog, chatVarsStats, chatSessions, chatActiveSessionId,
             sidebarParamOverrides,
             onSidebarToggleRegex, onSidebarToggleWb, onSidebarSetWbPosition, onSidebarSetWbOrder,

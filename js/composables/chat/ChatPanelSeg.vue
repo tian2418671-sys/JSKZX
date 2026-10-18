@@ -53,6 +53,14 @@ export default {
         varsJson: { type: String, default: '' },
         // goCurrentMessageId() 返回值（状态栏靠它分辨自己属于哪一层消息）
         messageId: { type: Number, default: 0 },
+        // 当前楼层正文（沙箱 getChatMessages(id)[0].message 的取值来源，CT-23）
+        messageText: { type: String, default: '' },
+        // 最后一条消息 id（沙箱 getLastMessageId()，面板靠它判断「我是不是最后一层」）
+        lastMessageId: { type: Number, default: 0 },
+        // 宏字典（沙箱 substitudeMacros；形如 {'{{user}}': '玩家'}）
+        macros: { type: Object, default: () => ({}) },
+        // 世界书快照（沙箱 getWorldbook/getLorebookEntries；形如 [{name, entries}]）
+        worldbooks: { type: Array, default: () => [] },
         // 文本段渲染函数由宿主注入（复用 CardDetailView.renderChatHtml，避免双份实现）
         renderText: { type: Function, required: true }
     },
@@ -66,13 +74,24 @@ export default {
         const srcdocCache = new Map();
         let lastVarsJson = '';
 
+        /** 沙箱运行时上下文（消息 / 宏 / 世界书），srcdoc 与 app:// 两条路共用 */
+        function panelCtx() {
+            return {
+                messageId: props.messageId,
+                messageText: props.messageText,
+                lastMessageId: props.lastMessageId || props.messageId,
+                macros: props.macros || {},
+                worldbooks: props.worldbooks || []
+            };
+        }
+
         function srcdocOf(seg, si) {
             const varsKey = String(props.varsJson || '');
             if (varsKey !== lastVarsJson) { srcdocCache.clear(); lastVarsJson = varsKey; }
-            const key = varsKey + '\u0000' + si + '\u0000' + seg.content;
+            const key = varsKey + '\u0000' + si + '\u0000' + (props.messageText || '') + '\u0000' + seg.content;
             const hit = srcdocCache.get(key);
             if (hit !== undefined) return hit;
-            const doc = buildHtmlSrcdoc(seg.content, props.varsJson, uid + '_' + si, '', { messageId: props.messageId });
+            const doc = buildHtmlSrcdoc(seg.content, props.varsJson, uid + '_' + si, '', panelCtx());
             if (srcdocCache.size > 60) {
                 const first = srcdocCache.keys().next().value;
                 srcdocCache.delete(first);
@@ -104,7 +123,7 @@ export default {
                 const seg = segs[si];
                 if (!seg || seg.type === 'text') continue;
                 // 与 srcdoc 用同一生成器：变量桥 / 高度上报桥（panelId 配对）保持一致
-                const doc = buildHtmlSrcdoc(seg.content, props.varsJson, uid + '_' + si, vendor, { messageId: props.messageId });
+                const doc = buildHtmlSrcdoc(seg.content, props.varsJson, uid + '_' + si, vendor, panelCtx());
                 try {
                     const res = await window.electronAPI.setChatHtmlSegment(doc);
                     if (my !== regSeq) return;              // 期间段结构又变了 → 丢弃本次结果
@@ -114,7 +133,7 @@ export default {
         }
 
         // 段结构变化（会话切换/重新生成）→ 已量高度作废，等 iframe 重新上报
-        watch(() => props.segments.map((s) => s.type + ':' + (s.content || '').length).join(','), () => {
+        watch(() => props.segments.map((s) => s.type + ':' + (s.content || '').length).join(',') + '|' + (props.messageText || '').length, () => {
             for (const k of Object.keys(panelHeights)) delete panelHeights[k];
             for (const k of Object.keys(segUrls)) delete segUrls[k];
             registerSegments();

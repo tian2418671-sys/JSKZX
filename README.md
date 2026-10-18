@@ -9,11 +9,11 @@
 
 **🖥️ 推荐 · 安装版**（双击安装，自动生成桌面/开始菜单快捷方式，免管理员权限，支持 OTA 自动更新）：
 
-[⬇️ 下载安装包 `sillytavern-card-manager-2.4.1.exe`](https://github.com/tian2418671-sys/JSKZX/releases/latest)
+[⬇️ 下载安装包 `sillytavern-card-manager-2.4.2.exe`](https://github.com/tian2418671-sys/JSKZX/releases/latest)
 
 **📦 绿色免安装版**（解压即用，无需安装）：
 
-[⬇️ 下载绿色版 `sillytavern-card-manager-2.4.1.zip`](https://github.com/tian2418671-sys/JSKZX/releases/latest)
+[⬇️ 下载绿色版 `sillytavern-card-manager-2.4.2.zip`](https://github.com/tian2418671-sys/JSKZX/releases/latest)
 
 > 💡 两个版本功能完全相同，任选其一即可。支持 Windows 10/11（64 位）。
 > 安装版内置 OTA 自动更新（检测 → 下载 → 静默安装 → 自动重启）；绿色版需手动下载新版覆盖。
@@ -104,6 +104,7 @@
 
 ### 📌 近期版本要点（v2.2.x）
 
+- **v2.4.2** —— 新增「🎬 独立前端角色卡」：把自带网页界面的卡直接装进软件里展示与游玩，支持一键备份/定时自动备份、存档打包带走、全屏与窗口化、离线模式、本地文件夹；另修复卡内界面被误判成文字、显示成空白框、排版标记原样露出等问题。
 - **v2.4.1** —— 修复打标教程里「照抄这一整行」内容框**空白**（点复制也是空）的问题；现在 6 处复制框全部正常显示与复制。
 - **v2.4.0** —— 主要修「打标」这条线 + 教程重写：①**`{{世界书}}` 在卡片视图能取到「这张卡自带的世界书」**（以前只有世界书库那边的书能引用，卡片自带设定读不到，占位符换出来是空的）；②**打标不再把 AI 的「思考过程」当标签写进卡**（这类内容会被判为失败并给出可操作提示）；③**右键菜单支持 `Esc` 关闭**；④顶部导入框恢复只认角色卡格式；⑤AI 打标窗口「API 兼容」下拉修复；⑥未选卡点「AI 打标」会弹提示指路；⑦「自定义模式」教程从头重写（零基础照做 + 填好的示例 + 改一处看结果的对照 + 排错清单）。
 - **v2.3.9** —— 五个新功能：📦 整库冷备（一键全量快照 + 轮转 + 恢复）、🔀 世界书查重组一键合并（执行前预览 + 键冲突提示）、
@@ -205,7 +206,7 @@ npm run build
 产物输出到 `dist/`：
 
 - `dist/win-unpacked/` —— 免安装绿色版（可压缩为 zip 分发）
-- `dist/sillytavern-card-manager-2.4.1.exe` —— NSIS 安装包
+- `dist/sillytavern-card-manager-2.4.2.exe` —— NSIS 安装包
 - `dist/latest.yml` —— **OTA 更新必需**（与 exe 一起上传 GitHub Release）
 
 ---

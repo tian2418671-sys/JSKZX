@@ -19,11 +19,27 @@
  *    两边口径不一致。现对齐：分类器口径与 `useStatusbarPreview` 保持一致（宽松匹配）。
  */
 
+import { buildSandboxApiScript } from './useChatSandbox.js';
+
+/**
+ * 🔧 CT-22（2026-10-05）：闭合围栏必须**独占一行**，不能只认任意位置的 ```。
+ *
+ * 事故：揽仙录的 ```html 面板内部嵌着角色卡 MVU 脚本源码，其中有一条正则字面量
+ *   `.replace(/^```(?:markdown|md|text)?\s*\/i,'').replace(/\s*```$/i,'')`
+ * —— 里面就带 ``` 三个反引号。旧正则 `/```html[\s\S]*?```/` 把**脚本里的反引号**当成
+ * 闭合围栏，于是一个 43,667 字符的面板被切成 3 段：16,906 的 HTML + 43 的碎片 +
+ * 26,712 的裸 JS 源码，其中后两段当纯文本渲染 → 用户看到满屏 JavaScript。
+ *
+ * 正确判定：``` 只有在**行首（允许前导空白）且行尾（允许尾随空白）**时才算围栏。
+ * 嵌在正则字面量/字符串中间的 ``` 前后是非空白字符，因此不会被误判。
+ */
+/** 闭合围栏：行首可选空白 + ``` + 行尾可选空白（不吞换行，保留内容原貌） */
+const CLOSE_FENCE = '(?:^[ \\t]*```[ \\t]*$)';
 /** ```html 围栏（语言标记可省略；大小写不敏感） */
-const HTML_FENCE_RE = /```html\s*\n?([\s\S]*?)```/gi;
+const HTML_FENCE_RE = new RegExp(`\`\`\`html[ \\t]*\\r?\\n([\\s\\S]*?)${CLOSE_FENCE}`, 'gim');
 // 🚀 裸 ``` 围栏(无语言标记):酒馆部分卡的模板(如 JS-Slash-Runner 状态栏)输出
 //    "```\n<head><script type=module>..." —— 内容像 HTML 时按面板渲染
-const BARE_FENCE_RE = /```\s*\n?([\s\S]*?)```/gi;
+const BARE_FENCE_RE = new RegExp(`^[ \\t]*\`\`\`[ \\t]*\\r?\\n([\\s\\S]*?)${CLOSE_FENCE}`, 'gim');
 
 /**
  * 🌐 外链界面（loader）URL 提取 —— 与 `useStatusbarPreview.classifyTemplate` 的 loader 分支**同口径**
@@ -135,7 +151,8 @@ function pushPlain(out, text) {
  * @param {string} varsJson 变量树 JSON 字符串（注入 getVariables；须为 JSON 文本）
  * @param {string} panelId 面板唯一 id（高度上报配对用）
  * @param {string} [vendorTagsRaw] 第三方库 `<script src>` 片段（空串则不加）
- * @param {object} [opts] 附加参数：`{ messageId }` → getCurrentMessageId() 返回值
+ * @param {object} [opts] 附加参数：
+ *   `{ messageId, messageText }` → getCurrentMessageId() / getChatMessages() 返回值
  */
 export function buildHtmlSrcdoc(html, varsJson, panelId, vendorTagsRaw, opts) {
     const body = String(html || '');
@@ -145,25 +162,18 @@ export function buildHtmlSrcdoc(html, varsJson, panelId, vendorTagsRaw, opts) {
         .replace(/<\/(script)/gi, '<\\/$1');
     const pid = String(panelId || '');
     const msgId = Number(opts && opts.messageId) || 0;
-    // 🚀 高度上报增强:load 多次重测 + MutationObserver 持续监听(SPA 模板 mount 后高度才稳定)
-    const bridge = '<script>window.getVariables=function(){try{return ' + varsLiteral +
-        ';}catch(e){return {stat_data:{}};}};' +
-        'window.getMessageVar=function(p){var v=window.getVariables();var c=v;' +
-        'try{p.split(".").forEach(function(s){c=(c==null)?undefined:c[s];});}catch(e){c=undefined;}' +
-        'return c;};' +
-        // 🧩 酒馆助手 iframe API（对齐本地预览 preview-frame.html 的 mock 集合）：
-        //    · getCurrentMessageId —— 状态栏用来分辨自己属于哪一层消息
-        //    · updateVariablesWith —— 模板改完变量后由它接管；沙箱里没有酒馆变量后端，
-        //      仅在 iframe 本地快照上生效（与预览帧一致：不写回宿主，避免表单/数据源脱钩）
-        'window.getCurrentMessageId=function(){return ' + msgId + ';};' +
-        'window.errorCatched=function(f){return f;};' +
-        'window.updateVariablesWith=function(fn,opt){try{var v=window.getVariables(opt);' +
-        'if(typeof fn==="function")fn(v);return v;}catch(e){' +
-        'try{console.warn("[chat-seg] updateVariablesWith 失败:",e&&e.message);}catch(_){}}' +
-        'return window.getVariables(opt);};' +
-        'window.replaceVariables=function(vars){try{var cur=window.getVariables();' +
-        'Object.keys(cur).forEach(function(k){delete cur[k];});Object.assign(cur,vars||{});}catch(e){}' +
-        'return Promise.resolve();};' +
+    // � 高度上报增强:load 多次重测 + MutationObserver 持续监听(SPA 模板 mount 后高度才稳定)
+    const bridge = '<script>' +
+        // 🧩 酒馆助手 API 全家桶集中在 useChatSandbox（CT-22~25 同族 bug 的根治点）：
+        //    缺任何一个 API 都会让面板 setup() 抛 ReferenceError → Vue 挂不上 → 空白白框。
+        buildSandboxApiScript({
+            varsJson: varsLiteral,
+            messageId: msgId,
+            messageText: (opts && opts.messageText) || '',
+            lastMessageId: (opts && opts.lastMessageId),
+            macros: opts && opts.macros,
+            worldbooks: opts && opts.worldbooks
+        }) +
         // 🧩 sandbox 无同源权限时访问 localStorage/sessionStorage 会抛 SecurityError（卡内状态栏
         //    模板常拿它存状态），给一层内存实现兜底 —— 保住 sandbox 不放 allow-same-origin
         'function __mkStore(){var m={};return{getItem:function(k){k=String(k);return Object.prototype.hasOwnProperty.call(m,k)?m[k]:null;},' +
