@@ -756,11 +756,13 @@
                                 <span v-if="fetchModelStatus" class="text-[10px]" :class="fetchModelStatus.includes('❌') ? 'text-red-500' : 'text-emerald-600'">{{ fetchModelStatus }}</span>
                             </label>
                             <div class="flex gap-2">
-                                <select v-if="availableModels.length > 0" :value="apiModel" @change="$emit('update:apiModel', $event.target.value)" class="w-full bg-white border border-indigo-400 rounded px-2.5 py-1 text-xs text-gray-800 focus:outline-none">
-                                    <option v-for="m in availableModels" :key="m" :value="m">{{ m }}</option>
-                                </select>
-                                <input v-else :value="apiModel" @input="$emit('update:apiModel', $event.target.value)" list="model-suggestions" type="text" placeholder="例: gpt-4o, local-model" class="w-full bg-white border border-gray-300 rounded px-2.5 py-1 text-xs text-gray-800 focus:border-indigo-500 focus:outline-none">
+                                <!-- 🐛 AI-22：不按「有没有候选」切换控件形态 —— 旧实现拉取成功后把 input 换成
+                                     select，select 只含服务端返回项 ⇒ 手填的私有模型名在界面上消失（值仍在）。 -->
+                                <input :value="apiModel" @input="$emit('update:apiModel', $event.target.value)" list="model-suggestions" type="text" placeholder="例: gpt-4o, local-model" class="w-full bg-white border rounded px-2.5 py-1 text-xs text-gray-800 focus:outline-none" :class="availableModels.length > 0 ? 'border-indigo-400' : 'border-gray-300 focus:border-indigo-500'">
                             </div>
+                            <p v-if="availableModels.length > 0 && apiModel && !availableModels.includes(apiModel)" class="text-[10px] text-amber-600 mt-1">
+                                ⚠️ 当前模型不在已拉取的 {{ availableModels.length }} 个候选中（自定义/私有模型，已原样保留）
+                            </p>
                             <p class="text-[10px] text-gray-500 mt-1.5 leading-relaxed">
                                 本地 LM Studio / Ollama 可留空或填 <code class="text-indigo-600 bg-indigo-500/10 px-1 rounded">local-model</code>；第三方 API 需严格填写模型 ID。
                             </p>

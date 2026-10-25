@@ -18,6 +18,14 @@
                         {{ running ? '⏳ 打标中…' : (paused ? '⏸ 已暂停（可继续）' : '✅ 已结束（保留作记录）') }}
                     </span>
                     <span class="flex-1"></span>
+                    <!-- 🚨 G3：只看失败（大库打标日志几百行，失败项往往淹没在成功项里） -->
+                    <button @click="onlyFail = !onlyFail"
+                            :class="['px-2 py-1 rounded text-[10px] font-bold border transition',
+                                    onlyFail ? 'bg-rose-600 border-rose-500 text-white' : 'bg-zinc-800 border-zinc-700 text-zinc-300 hover:bg-zinc-700']"
+                            :disabled="!failCount"
+                            :title="failCount ? `只显示异常行（共 ${failCount} 行）` : '本次没有异常行'">
+                        🚨 只看失败<span v-if="failCount"> ({{ failCount }})</span>
+                    </button>
                     <button v-if="running" @click="$emit('pause-tagging')"
                             class="px-2 py-1 bg-amber-600 hover:bg-amber-500 rounded text-[10px] text-white font-bold transition">⏸ 暂停</button>
                     <button @click="copyLog" :disabled="!log.length"
@@ -46,22 +54,25 @@
                     <div v-if="!log.length" class="text-zinc-600 text-center py-10">
                         暂无日志 —— 启动打标后，这里会实时展示每张卡的处理过程（①规则 / ②向量 / ③LLM）
                     </div>
-                    <div v-for="(l, i) in log" :key="i" class="whitespace-pre-wrap break-all" :class="levelClass(l.level)">
+                    <div v-else-if="!visibleLog.length" class="text-zinc-500 text-center py-10">
+                        ✅ 本次没有异常行（已开启「只看失败」）
+                    </div>
+                    <div v-for="l in visibleLog" :key="l._i" class="whitespace-pre-wrap break-all" :class="levelClass(l.level)">
                         <span class="text-zinc-600 select-none">{{ fmtTime(l.at) }}</span>
                         <span class="ml-1.5">{{ l.text }}</span>
-                        <button v-if="l.detail" @click.stop="toggleDetail(i)"
+                        <button v-if="l.detail" @click.stop="toggleDetail(l._i)"
                                 class="ml-1.5 px-1.5 py-0.5 rounded border border-zinc-700 text-zinc-400 hover:text-zinc-100 hover:border-zinc-500 text-[10px] align-middle transition">
-                            {{ isDetailOpen(i) ? '收起 ▲' : '🔍 查看' }}
+                            {{ isDetailOpen(l._i) ? '收起 ▲' : '🔍 查看' }}
                         </button>
                         <!-- 🔍 请求详情（过程透明化）：完整发送数据 + AI 原始回复/思考 -->
-                        <div v-if="l.detail && isDetailOpen(i)"
+                        <div v-if="l.detail && isDetailOpen(l._i)"
                              class="mt-1.5 mb-2 border border-zinc-700 rounded-lg overflow-hidden bg-zinc-900/70 font-mono">
                             <div class="px-2.5 py-1.5 border-b border-zinc-800 flex items-center gap-2">
                                 <span class="text-[10px] text-zinc-400 font-bold">🔍 {{ l.detail.title }}<template v-if="l.detail.mode"> · {{ l.detail.mode }}</template></span>
                                 <span class="flex-1"></span>
-                                <button @click.stop="copyDetail(i)"
+                                <button @click.stop="copyDetail(l._i)"
                                         class="px-1.5 py-0.5 bg-zinc-800 border border-zinc-700 rounded text-[10px] text-zinc-300 hover:bg-zinc-700 transition">
-                                    {{ copiedIdx === i ? '已复制 ✓' : '📄 复制全部' }}
+                                    {{ copiedIdx === l._i ? '已复制 ✓' : '📄 复制全部' }}
                                 </button>
                             </div>
                             <div v-if="l.detail.error" class="px-2.5 py-2 text-rose-400 text-[10px] whitespace-pre-wrap break-all">❌ 失败：{{ l.detail.error }}</div>
@@ -101,7 +112,7 @@ export default {
     },
     emits: ['close', 'clear', 'pause-tagging'],
     data() {
-        return { copied: false, openMap: {}, copiedIdx: -1 };
+        return { copied: false, openMap: {}, copiedIdx: -1, onlyFail: false };
     },
     computed: {
         total() { return Number(this.progress && this.progress.total) || 0; },
@@ -109,6 +120,21 @@ export default {
         progressText() { return (this.progress && this.progress.status) || ''; },
         percent() {
             return this.total ? Math.min(100, Math.round(this.doneCount / this.total * 100)) : 0;
+        },
+        /** 🚨 G3：异常行数（err / warn 均算“值得看”——都是没按预期走） */
+        failCount() {
+            return (this.log || []).filter(l => l && (l.level === 'err' || l.level === 'warn')).length;
+        },
+        /** 🚨 G3：实际渲染的行（未开筛选时 = 原数组，零拷开销）
+         *  ⚠️ 带 `_i`（原始下标）：详情展开状态 `openMap` / 复制 `copiedIdx` 都按**原数组下标**索引，
+         *     直接用 filtered 的下标会错位。 */
+        visibleLog() {
+            const src = this.log || [];
+            if (!this.onlyFail) return src.map((l, i) => ({ ...l, _i: i }));
+            return src.reduce((acc, l, i) => {
+                if (l && (l.level === 'err' || l.level === 'warn')) acc.push({ ...l, _i: i });
+                return acc;
+            }, []);
         }
     },
     watch: {

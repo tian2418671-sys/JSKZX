@@ -60,6 +60,72 @@
                                     class="shrink-0 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded text-xs transition">📦 载入推荐模板</button>
                         </div>
 
+                        <!-- ==================== 🏷️ B1：从高频标签生成分组草稿 ==================== -->
+                        <div class="border border-emerald-200 bg-emerald-50 rounded-lg p-3 space-y-2">
+                            <div class="flex items-start justify-between gap-3">
+                                <div class="space-y-1">
+                                    <div class="text-xs font-bold text-emerald-800">🏷️ 从高频标签生成草稿</div>
+                                    <p class="text-[10px] text-emerald-700/90 leading-relaxed">
+                                        扫描全库卡片标签，把<strong>用得足够多、但还没被规则收纳</strong>的标签，
+                                        变成一条条候选分组规则。已在标签池（基础标签）里的、以及已有同规则的不再重复出现。
+                                        <strong>这里只生成草稿</strong>，勾选并入后仍需点「💾 保存」才会生效。
+                                    </p>
+                                </div>
+                                <button @click="generateDrafts" :disabled="draftBusy || !buildDrafts"
+                                        class="shrink-0 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 text-white rounded text-xs transition">
+                                    {{ draftBusy ? '生成中…' : '🔍 生成草稿' }}
+                                </button>
+                            </div>
+
+                            <!-- 🎚️ 门槛可调（小库按公式算出的 5 张往往过高 ⇒ 一条都出不来） -->
+                            <div class="flex items-center gap-2 text-[10px] text-emerald-800/90 bg-white/70 border border-emerald-200 rounded px-2 py-1.5">
+                                <span class="shrink-0">至少命中</span>
+                                <input type="range" min="1" max="30" step="1" v-model.number="draftMinCards"
+                                       class="w-28 accent-emerald-600">
+                                <span class="font-bold w-10 shrink-0">{{ draftMinCards || '默认' }} 张</span>
+                                <span class="text-emerald-600/80">（卡数少就调低；调完点「生成草稿」）</span>
+                            </div>
+
+                            <div v-if="draftResult" class="space-y-2 pt-1">
+                                <p class="text-[10px] text-emerald-800/80">
+                                    共 <strong>{{ draftResult.drafts.length }}</strong> 条候选（门槛：≥ {{ draftResult.effectiveMinCards }} 张卡）；
+                                    已跳过：池内基础标签 <strong>{{ draftResult.filtered.inPool.length }}</strong> 个、
+                                    卡数不足 <strong>{{ draftResult.filtered.belowMinCards }}</strong> 个、
+                                    已有同规则 <strong>{{ draftResult.filtered.duplicate }}</strong> 条。
+                                </p>
+
+                                <div v-if="draftResult.drafts.length === 0" class="text-[11px] text-emerald-700 py-1">
+                                    ✅ 没有需要新增的规则（现有规则 + 标签池已覆盖高频标签）。
+                                </div>
+
+                                <template v-else>
+                                    <div class="flex items-center gap-3 text-[10px]">
+                                        <button @click="toggleAllDrafts(true)" class="underline text-emerald-800 hover:text-emerald-900">全选</button>
+                                        <button @click="toggleAllDrafts(false)" class="underline text-emerald-800 hover:text-emerald-900">全不选</button>
+                                        <button @click="invertDrafts" class="underline text-emerald-800 hover:text-emerald-900">反选</button>
+                                        <span class="ml-auto text-emerald-700">已选 {{ draftCheckedCount }} / {{ draftResult.drafts.length }}</span>
+                                    </div>
+
+                                    <div class="max-h-48 overflow-y-auto custom-scrollbar border border-emerald-200 rounded bg-white">
+                                        <label v-for="d in draftResult.drafts" :key="d.group"
+                                               class="flex items-center gap-2 px-2.5 py-1.5 border-b border-emerald-100 last:border-0 hover:bg-emerald-50/60 cursor-pointer">
+                                            <input type="checkbox" v-model="draftChecked[d.group]" class="w-3.5 h-3.5 accent-emerald-600">
+                                            <span class="text-[11px] font-medium text-gray-800 truncate">{{ d.group }}</span>
+                                            <span class="text-[10px] text-gray-500 shrink-0">{{ d.count }} 张</span>
+                                            <span class="text-[10px] text-gray-400 shrink-0 ml-auto">标签匹配</span>
+                                        </label>
+                                    </div>
+
+                                    <div class="flex justify-end">
+                                        <button @click="mergeDrafts" :disabled="draftCheckedCount === 0"
+                                                class="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 text-white rounded text-xs transition">
+                                            ➕ 并入规则（{{ draftCheckedCount }}）
+                                        </button>
+                                    </div>
+                                </template>
+                            </div>
+                        </div>
+
                         <!-- 规则行 -->
                         <div v-for="(p, idx) in localProfiles" :key="p.id || idx"
                              class="border border-gray-200 rounded-lg p-2.5 bg-gray-50 space-y-1.5"
@@ -358,7 +424,9 @@ export default {
         rollback: { type: Object, default: () => ({}) },           // 回滚进度状态
         llm: { type: Object, default: () => ({}) },                // 🤖 LLM 分辨进度/结果
         groupOptions: { type: Array, default: () => [] },          // [{label, value}]（与侧边栏同序）
-        availableTags: { type: Array, default: () => [] }          // 🏷️ 标签点选数据源（系统标签库 + 全库卡片标签）
+        availableTags: { type: Array, default: () => [] },         // 🏷️ 标签点选数据源（系统标签库 + 全库卡片标签）
+        // 🏷️ B1：高频标签 → 分组草稿（父层算好传入；本组件只负责展示/勾选/并入）
+        buildDrafts: { type: Function, default: null }
     },
     emits: ['close', 'save-profiles', 'reset-profiles', 'scan', 'execute', 'abort', 'rollback', 'llm-run', 'llm-abort'],
     data() {
@@ -372,7 +440,15 @@ export default {
             confirmReset: false,
             scanHint: '',          // 🔍 扫描前置提示（无启用规则 / 改动未保存 —— 避免「点重新扫描无反应」）
             openPickerIdx: -1,     // 🏷️ 当前展开「标签点选」面板的规则行（-1 = 全收起）
-            pickerFilter: ''       // 点选面板内的筛选关键词
+            pickerFilter: '',       // 点选面板内的筛选关键词
+            // 🏷️ B1 标签草稿：null = 未生成；否则 = buildDrafts() 返回结果
+            draftResult: null,
+            draftChecked: {},      // label → true（勾选状态）
+            draftBusy: false,
+            // 🏷️ 门槛可调：`clamp(总卡数×2%, 5, 50)` 对**小库过于严格**（实测 81 张卡库 ⇒ 门槛 5，
+            //    非池内标签几乎都不够 5 张 ⇒ 永远 0 条）。故给用户一个滑杆，默认仍按公式。
+            draftMinCards: 0,      // 0 = 跟随默认公式（由首次生成的 effectiveMinCards 回填）
+            draftMaxDrafts: 20
         };
     },
     computed: {
@@ -398,6 +474,11 @@ export default {
         presetSource() { return AUTO_GROUP_PRESET_SOURCE; },
 
         groupValues() { return (this.groupOptions || []).map(o => o.value); },
+        // 🏷️ B1：草稿勾选数（模板展示 & 「并入」按钮禁用判断）
+        draftCheckedCount() {
+            const list = (this.draftResult && this.draftResult.drafts) || [];
+            return list.filter(d => this.draftChecked[d.group]).length;
+        },
         plan() { return (this.scan && this.scan.plan) || null; },
         moves() { return (this.plan && this.plan.moves) || []; },
         visibleMoves() { return this.moves.slice(0, 500); },
@@ -493,6 +574,84 @@ export default {
             });
         },
         removeProfile(idx) { this.localProfiles.splice(idx, 1); },
+
+        // ==================== 🏷️ B1：高频标签 → 分组草稿 ====================
+        //  ⚠️ 只做「生成 + 勾选 + 并入 localProfiles」，**不直接写配置**（保存仍走 doSave）。
+        //  ⚠️ 名字不能与 data 键同名（AR-56）：data 里是 draftResult / draftChecked。
+
+        generateDrafts() {
+            if (typeof this.buildDrafts !== 'function') return;
+            this.draftBusy = true;
+            try {
+                const opts = { maxDrafts: Number(this.draftMaxDrafts) || 20 };
+                if (Number(this.draftMinCards) > 0) opts.minCards = Number(this.draftMinCards);
+                const res = this.buildDrafts(opts) || {};
+                // 防御：父层异常返回时也要给出一致空结构，避免模板读 undefined 崩溃
+                this.draftResult = {
+                    drafts: Array.isArray(res.drafts) ? res.drafts : [],
+                    filtered: res.filtered || { inPool: [], belowMinCards: 0, duplicate: 0, emptyTag: 0 },
+                    effectiveMinCards: Number(res.effectiveMinCards) || 0,
+                    totalCandidates: Number(res.totalCandidates) || 0
+                };
+                // 首次生成时把实际生效的门槛回填到滑杆（用户能看到「现在用的是什么值」）
+                if (!(Number(this.draftMinCards) > 0) && this.draftResult.effectiveMinCards > 0) {
+                    this.draftMinCards = this.draftResult.effectiveMinCards;
+                }
+                // 默认全选（草稿都是「高频且未收纳」，全选是合理默认；用户可取消）
+                const next = {};
+                for (const d of this.draftResult.drafts) next[d.group] = true;
+                this.draftChecked = next;
+            } catch (e) {
+                console.error('[自动分组] 生成草稿失败', e);
+                this.draftResult = { drafts: [], filtered: { inPool: [], belowMinCards: 0, duplicate: 0, emptyTag: 0 }, effectiveMinCards: 0, totalCandidates: 0 };
+            } finally {
+                this.draftBusy = false;
+            }
+        },
+        toggleAllDrafts(on) {
+            const next = {};
+            for (const d of (this.draftResult && this.draftResult.drafts) || []) next[d.group] = !!on;
+            this.draftChecked = next;
+        },
+        invertDrafts() {
+            const next = {};
+            for (const d of (this.draftResult && this.draftResult.drafts) || []) next[d.group] = !this.draftChecked[d.group];
+            this.draftChecked = next;
+        },
+        mergeDrafts() {
+            const picked = ((this.draftResult && this.draftResult.drafts) || []).filter(d => this.draftChecked[d.group]);
+            if (!picked.length) return;
+
+            // 目标分组不能与现有规则重复（同一分组只允许一条规则，与 isGroupUsedByOther 口径一致）
+            const usedGroups = new Set(this.localProfiles.map(p => String(p.group || '').trim()).filter(Boolean));
+            let added = 0, skipped = 0;
+            for (const d of picked) {
+                const g = String(d.group || '').trim();
+                if (!g) { skipped++; continue; }
+                if (usedGroups.has(g)) { skipped++; continue; }
+                this.localProfiles.push({
+                    id: createProfileId(),
+                    group: g,
+                    enabled: true,
+                    match: { type: 'tag', pattern: String(d.match && d.match.pattern || g).toLowerCase() },
+                    note: d.reason || '',
+                    llmCriteria: '',
+                    _wordInput: '',
+                    _error: ''
+                });
+                usedGroups.add(g);
+                added++;
+            }
+
+            // 并入后从草稿列表移除已处理项（避免重复并入；未选中的保留）
+            const remain = ((this.draftResult && this.draftResult.drafts) || [])
+                .filter(d => !this.draftChecked[d.group] || !usedGroups.has(String(d.group || '').trim()));
+            if (this.draftResult) this.draftResult = { ...this.draftResult, drafts: remain };
+
+            this.presetNote = skipped
+                ? `已并入 ${added} 条草稿，跳过 ${skipped} 条（目标分组已有规则）`
+                : `已并入 ${added} 条草稿，记得点「💾 保存」才会生效`;
+        },
         // 🏷️ 标签点选（2026-09-20 用户需求：收纳条件参考「标签分组」点选形式，不再全靠手填）
         toggleTagPicker(idx) {
             this.openPickerIdx = this.openPickerIdx === idx ? -1 : idx;

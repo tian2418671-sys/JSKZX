@@ -33,10 +33,19 @@
                                 {{ isFetchingModels ? '⏳ 正在拉取...' : '🔄 自动拉取服务端模型' }}
                             </button>
                         </div>
-                        <select v-if="availableModels.length > 0" :value="apiModel" @change="$emit('update:apiModel', $event.target.value)" class="w-full bg-zinc-800 border border-indigo-500 rounded px-3 py-1.5 text-xs text-zinc-200">
-                            <option v-for="m in availableModels" :key="m" :value="m">{{ m }}</option>
-                        </select>
-                        <input v-else :value="apiModel" @input="$emit('update:apiModel', $event.target.value)" list="model-suggestions" type="text" placeholder="例: gpt-4o, local-model" class="w-full bg-zinc-800 border border-zinc-700 rounded px-3 py-1.5 text-xs text-zinc-200">
+                        <!-- 🐛 AI-22：拉取成功后**不切换控件形态**（旧实现 v-if/v-else 把 input 换成 select，
+                             而 select 的 option 只来自服务端返回 ⇒ 手填的私有模型名在界面上「消失」，用户
+                             误以为配置被清空）。现在统一用一个 input + datalist：既能自由手填，又能从拉取
+                             到的候选里选；`apiModel` 永远完整显示，不依赖候选列表。
+                             ⚠️ datalist 用**全局** `#model-suggestions`（App.vue 常驻），HTML 规定一个 input
+                                只能绑一个 datalist，因此动态候选由 App.vue 合并进那一个列表。 -->
+                        <input :value="apiModel" @input="$emit('update:apiModel', $event.target.value)" list="model-suggestions" type="text" placeholder="例: gpt-4o, local-model" class="w-full bg-zinc-800 border rounded px-3 py-1.5 text-xs text-zinc-200 focus:outline-none" :class="availableModels.length > 0 ? 'border-indigo-500' : 'border-zinc-700'">
+                        <p v-if="availableModels.length > 0 && apiModel && !availableModels.includes(apiModel)" class="text-[10px] text-amber-400 mt-1">
+                            ⚠️ 当前模型不在服务端返回的 {{ availableModels.length }} 个候选中（可能是自定义/私有模型，已原样保留）
+                        </p>
+                        <p v-else-if="availableModels.length > 0" class="text-[10px] text-zinc-500 mt-1">
+                            已拉取 {{ availableModels.length }} 个候选 · 输入框可直接手填，或从候选中选
+                        </p>
                     </div>
                     <p v-if="fetchModelStatus" class="text-[10px]" :class="fetchModelStatus.includes('❌') ? 'text-red-400' : 'text-emerald-400'">{{ fetchModelStatus }}</p>
                     <div class="border-t border-zinc-800 pt-3">

@@ -255,6 +255,7 @@
             :llm="autoGroupLlm"
             :group-options="autoGroupGroupOptions"
             :available-tags="globalAvailableTags"
+            :build-drafts="buildAutoGroupDrafts"
             @close="closeAutoGroupModal"
             @save-profiles="saveAutoGroupProfiles"
             @reset-profiles="resetAutoGroupProfiles"
@@ -452,8 +453,13 @@
             @save="saveApiConfig"
         />
 
-        <!-- 模型名称下拉建议（供聊天面板与设置弹窗共用；置于常驻 DOM 避免被 v-if 移除） -->
+        <!-- 模型名称下拉建议（供聊天面板与设置弹窗共用；置于常驻 DOM 避免被 v-if 移除）
+             🐛 AI-22：这里同时合并「拉取到的服务端候选」（availableModels）。
+                 原因：HTML 规定一个 input 只能绑定一个 datalist，而设置弹窗曾用 v-if/v-else
+                 在 input/select 间切换控件形态 ⇒ 手填的私有模型名在下拉里看不见。改为单一
+                 input + 本 datalist 后，「已拉取候选」「内置建议」并存，且当前值永远完整显示。 -->
         <datalist id="model-suggestions">
+            <option v-for="m in availableModels" :key="'dyn-' + m" :value="m"></option>
             <option value="local-model">本地 LM Studio / Ollama 默认</option>
             <option value="gpt-3.5-turbo">ChatGPT 3.5 速度快</option>
             <option value="gpt-4o">ChatGPT 4o 最聪明</option>
@@ -520,12 +526,17 @@
             :elapsed-sec="qcElapsedSec"
             :token-threshold="qcTokenThreshold"
             :report="qcReport"
+            :portrait="qcPortrait"
+            :has-portrait="qcHasPortrait"
             @toggle-step="(id, v) => (qcEnabled[id] = v)"
             @update:tokenThreshold="(v) => (qcTokenThreshold = v)"
             @run="runQualityCheck"
             @cancel="cancelQualityCheck"
             @locate="locateQualityItem"
             @close="closeQualityCheck"
+            @filter-tag="onQcFilterTag"
+            @open-ai-tag="onQcOpenAiTag"
+            @open-auto-group="onQcOpenAutoGroup"
         />
 
         <!-- ================= [ 🚀 启动自动任务设置（v2.3.6 五功能之一） ] ================= -->
@@ -5734,10 +5745,12 @@ export default {
             autoGroupScan, autoGroupExec, autoGroupRollback, autoGroupGroupOptions,
             autoGroupLlm, runLlmJudge, abortLlmJudge,
             scanAutoGroup, executeAutoGroup, abortAutoGroup, rollbackAutoGroup,
-            saveAutoGroupProfiles, resetAutoGroupProfiles
+            saveAutoGroupProfiles, resetAutoGroupProfiles,
+            autoGroupTagCounts, buildAutoGroupDrafts
         } = useAutoGroup({
             autoGroupProfiles, autoGroupLastRun,
             library, allCategories, customCategories, currentCategoryKey, currentFolderPath, sanitizeImportedTags,
+            systemCommonTags,
             moveCardToGroup, buildGroupOptions, nativeAlert, confirmDialog, addLog, syncConfigToDiskDebounced,
             // 🤖 LLM 判定层：统一 API 通道（sendChatMessage）+ 模型/回复提取工具（与 AI 打标/测卡同源）
             apiEndpoint, apiKey, apiType, resolveApiModel, extractReplyContent
@@ -5806,6 +5819,7 @@ export default {
             reportSkipped, wbEntryCount, ensureWorldbookLoaded, selectWorldbook,
             // ⚡ 秒开：书名取法（`wb.data` 不再常驻）+ 元数据后台补齐状态
             wbDisplayName, wbMetaFilling, wbMetaProgress,
+            wbSkippedFiles,
             // 🧠 PK-27 / S2'：L1 摘要消费 + 批量读正文入口（v4-P0 接线恢复）
             releaseWorldbookBody, consumeWorldbookBodies,
             hasKeyIndex, compareKeyHashes, isExactSame,
@@ -5936,10 +5950,14 @@ export default {
             steps: qcSteps, currentIndex: qcCurrentIndex, elapsedSec: qcElapsedSec, report: qcReport,
             enabled: qcEnabled, tokenThreshold: qcTokenThreshold, running: qcRunning,
             openQualityCheck, closeQualityCheck, run: runQualityCheck, cancel: cancelQualityCheck,
-            locate: locateQualityItem, buildReport: buildQualityReport, QC_STEPS: qcStepsMeta
+            locate: locateQualityItem, buildReport: buildQualityReport, QC_STEPS: qcStepsMeta,
+            // 📊 阶段二 · 结构画像（质检弹窗第 2 个页签）
+            portrait: qcPortrait, hasPortrait: qcHasPortrait
         } = useQualityCheck({
             library, worldbooks, activeWorldbook, estimateCardTokens,
             refreshLibrary, entryHealthReport,
+            // 📊 阶段二：结构画像需要对照「标签池」（`systemCommonTags` 在 App.vue 顶层定义）
+            systemCommonTags,
             // 🧪 质检 S2 查重：**静默**（不弹查重弹窗 —— 否则会把质检报告弹窗顶掉）
             startSmartDedupe: async (o) => { await startSmartDedupe(Object.assign({ silent: true }, o || {})); },
             addLog, showToast,
@@ -5984,6 +6002,35 @@ export default {
         const scheduleStartupTasks = () => {
             try { return startupScheduler.schedule(startupTasks.value); }
             catch (e) { addLog('🚀 启动任务调度失败：' + ((e && e.message) || e), 'error'); return { scheduled: false }; }
+        };
+
+        // ================= [ 📊 结构画像的三个交互（阶段二） ] =================
+        // ⚠️ AR-54 教训：新增 `@事件` 必须**同时**加进 setup 返回对象 **和** ctx ——
+        //    漏一处就是「按钮点了毫无反应」（`ctx.xxx → undefined`）。
+
+        /** 点矩阵单元格 → 按该标签筛选（复用既有搜索语法 `tag:`，不新造查询引擎） */
+        const onQcFilterTag = (payload) => {
+            const p = payload || {};
+            const tag = String(p.tag || '').trim();
+            if (!tag) return;
+            showQualityCheckModal.value = false;          // 先让位（全屏遮罩会挡住结果）
+            try {
+                searchQueryInput.value = `tag:${tag}`;
+                addLog(`📊 画像筛选：${tag}${p.group ? ` @ ${p.group}` : ''}`, 'info');
+            } catch (e) { /* 忽略 */ }
+            try { showToast(`已按标签「${tag}」筛选`, 'info', 2200); } catch (e) { /* 忽略 */ }
+        };
+
+        /** B3：从画像页签跳去打标（未选卡时由 openAITagModal 自己给提示 —— 见 AI-issue-1 的修复） */
+        const onQcOpenAiTag = () => {
+            showQualityCheckModal.value = false;
+            try { openAITagModal(); } catch (e) { addLog('打开 AI 打标失败：' + ((e && e.message) || e), 'error'); }
+        };
+
+        /** B3：从画像页签跳去自动分组 */
+        const onQcOpenAutoGroup = () => {
+            showQualityCheckModal.value = false;
+            try { showAutoGroupModal.value = true; } catch (e) { addLog('打开自动分组失败：' + ((e && e.message) || e), 'error'); }
         };
 
         // 🔎 全库词条搜索与反向引用：组合式函数注入
@@ -6068,6 +6115,7 @@ export default {
             // 🏷️ 页面标题自动命名（订阅主进程回传的 <title>）
             subscribePageTitle: subscribeHeavyCardPageTitle, applyPageTitle: applyHeavyCardPageTitle,
             addHeavyCard, updateHeavyCard, removeHeavyCard,
+            addHeavyCardLocal,   // 📂 导入本地卡（文件夹 / 单个 .html）
             openHeavyCard, closeHeavyCard,
             reportRect: reportHeavyCardRect, syncViewVisibility: syncHeavyViewVisibility,
             reloadHeavyCard, changeZoom: changeHeavyCardZoom,
@@ -6932,6 +6980,8 @@ export default {
             // 🗂️ 自动分组（收纳规则 + 预览 + 执行 + 回滚）
             autoGroupProfiles, autoGroupLastRun, showAutoGroupModal, openAutoGroupModal, closeAutoGroupModal,
             autoGroupScan, autoGroupExec, autoGroupRollback, autoGroupGroupOptions,
+            // 🏷️ B1：高频标签 → 分组草稿（模板经弹窗 props 使用）
+            autoGroupTagCounts, buildAutoGroupDrafts,
             // 🤖 LLM 判定层（模板经弹窗 props/emit 使用：:llm / @llm-run / @llm-abort）
             autoGroupLlm, runLlmJudge, abortLlmJudge,
             scanAutoGroup, executeAutoGroup, abortAutoGroup, rollbackAutoGroup,
@@ -7025,6 +7075,7 @@ export default {
             hasKeyIndex, compareKeyHashes, isExactSame,
             // ⚡ 秒开：书名取法（`wb.data` 不再常驻）+ 元数据后台补齐状态
             wbDisplayName, wbMetaFilling, wbMetaProgress,
+            wbSkippedFiles,
             // ⚙️ 预设管理
             presets, activePreset, lastPresetDirPath,
             presetSearchQuery, isImportingPreset, importPresetUrl,
@@ -7061,6 +7112,7 @@ export default {
             heavyCards, activeHeavyCard, heavyCardSearchQuery, filteredHeavyCards,
             heavyCardStatus, heavyCardZoom, heavyCardFrameUrl, heavyCardMounted,
             addHeavyCard, updateHeavyCard, removeHeavyCard,
+            addHeavyCardLocal,   // 📂 导入本地卡（文件夹 / 单个 .html）
             openHeavyCard, closeHeavyCard,
             reportHeavyCardRect, syncHeavyViewVisibility,
             reloadHeavyCard, changeHeavyCardZoom,
@@ -7173,6 +7225,9 @@ export default {
             // ⚠️ `closeQualityCheck` 必须在这里（模板 `@close="closeQualityCheck"` 走的就是这个返回对象）——
             //    曾漏暴露 ⇒ 点「✕ 关闭 / 知道了」**毫无反应**（弹窗关不掉，用户实测抓获）。
             closeQualityCheck, runQualityCheck, cancelQualityCheck, locateQualityItem, buildQualityReport, qcCurrentIndex,
+            // 📊 阶段二 · 结构画像：portrait/hasPortrait 走 prop，三个交互走 `@事件`
+            //    （AR-54：新增 @事件 必须同时进返回对象 + ctx，否则按钮点了没反应）
+            qcPortrait, qcHasPortrait, onQcFilterTag, onQcOpenAiTag, onQcOpenAutoGroup,
             // 🚀 v2.3.6 启动自动任务（配置 + 调度器；探针可驱动）
             startupTasks, showStartupTasksModal, openStartupTasks, onStartupTasksChange, scheduleStartupTasks, startupScheduler, STARTUP_TASK_DEFS,
             // 🧩 2026-10-03 预填充兼容（模式 + 记忆表；探针/UI 可读）

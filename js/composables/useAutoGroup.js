@@ -25,12 +25,15 @@ import {
     normalizeAutoGroupLastRun,
     resolveRollbackCard,
     sanitizeFolderName,
+    draftProfilesFromTags,
     AUTO_GROUP_ROOT_GROUP
 } from '../utils/autoGroup.js';
 import {
     buildLlmGroupSpecs, llmSpecsSignature, llmCardCacheKey, collectLlmCandidates,
     buildLlmMessages, parseLlmJudgement, assignJudgements, LLM_DEFAULT_BATCH_SIZE
 } from '../utils/autoGroupLLM.js'; // 🤖 LLM 判定层（纯函数）
+// 🏷️ 标签读取**必须走统一入口**（口径 = `tags` → `customTags`，与质检 S3 / 结构画像一致）
+import { tagsOf } from '../utils/tagStats.js';
 
 export function useAutoGroup({
     // —— App.vue 持有并持久化的状态（随 app_config.json 落盘）——
@@ -38,6 +41,7 @@ export function useAutoGroup({
     autoGroupLastRun,
     // —— 共享状态 ——
     library, allCategories, customCategories, currentCategoryKey, currentFolderPath, sanitizeImportedTags,
+    systemCommonTags,   // 🏷️ 标签池基础标签（草稿生成时过滤掉，避免把「基础标签」变成分组）
     // —— 工具 ——
     moveCardToGroup, buildGroupOptions, nativeAlert, confirmDialog, addLog, syncConfigToDiskDebounced,
     // —— 🤖 LLM 判定层：统一 API 通道（sendChatMessage：渲染层直接 fetch 会被 CORS 拦）——
@@ -56,6 +60,45 @@ export function useAutoGroup({
     const autoGroupGroupOptions = computed(() => {
         try { return buildGroupOptions() || []; } catch (e) { return []; }
     });
+
+    // ==================== 🏷️ B1 从高频标签生成分组草稿（只读，不写任何配置） ====================
+    // 规格：docs/规格与计划/功能规格/B1-B3-标签回灌闭环-实现规格.md
+    //   目标：库里 139 个「已用但不在池内」的标签，能一键变成**候选分组规则**，用户勾选后再保存。
+    //   ⚠️ 只生成草稿、只存在于弹窗内存；`save-profiles` 之前不动 autoGroupProfiles。
+
+    /** 全库标签计数（Map<tag, 卡数>）—— 直接从 library 聚合，不依赖质检是否跑过 */
+    const autoGroupTagCounts = computed(() => {
+        const m = new Map();
+        for (const card of (library.value || [])) {
+            if (!card) continue;
+            // ⚠️ 必须用 tagsOf（`tags` → `customTags` 回退）；自己读 card.tags 会漏掉
+            //    只用 customTags 的老卡 —— 实测正是该问题导致草稿恒为 0 条。
+            for (const t of tagsOf(card)) {
+                m.set(t, (m.get(t) || 0) + 1);
+            }
+        }
+        return m;
+    });
+
+    /** 单卡上的标签集合（用于把卡片数也传给门槛判定） */
+    const autoGroupLibraryTotal = computed(() => (library.value || []).length);
+
+    /**
+     * 按当前已保存档案 + 标签池，生成候选分组草稿（纯展示，勾选后由 UI 决定是否并入）。
+     * @returns {{drafts: Array, filtered: object, effectiveMinCards: number, totalCandidates: number}}
+     */
+    const buildAutoGroupDrafts = (opts = {}) => {
+        try {
+            return draftProfilesFromTags(autoGroupTagCounts.value, autoGroupProfiles.value, {
+                total: autoGroupLibraryTotal.value,
+                commonTags: (systemCommonTags.value || []).slice(),
+                ...opts
+            });
+        } catch (e) {
+            console.error('[自动分组] 生成标签草稿失败', e);
+            return { drafts: [], filtered: { inPool: [], belowMinCards: 0, duplicate: 0, emptyTag: 0 }, effectiveMinCards: 0, totalCandidates: 0 };
+        }
+    };
 
     // ==================== 🤖 LLM 判定层状态（建议默认不勾选；只喂未命中/冲突卡） ====================
 
@@ -449,6 +492,8 @@ export function useAutoGroup({
         autoGroupScan, autoGroupExec, autoGroupRollback, autoGroupGroupOptions,
         autoGroupLlm, runLlmJudge, abortLlmJudge,
         scanAutoGroup, executeAutoGroup, abortAutoGroup, rollbackAutoGroup,
-        saveAutoGroupProfiles, resetAutoGroupProfiles
+        saveAutoGroupProfiles, resetAutoGroupProfiles,
+        // 🏷️ B1：高频标签 → 分组草稿（只读生成；勾选后由弹窗并入 localProfiles 再保存）
+        autoGroupTagCounts, buildAutoGroupDrafts
     };
 }

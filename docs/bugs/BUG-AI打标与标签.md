@@ -448,3 +448,58 @@
 10. 改**世界书材料构建**：必须**四处同源**（① 规则 / ② 向量 / ③ LLM / 预览共用一个纯函数 `js/utils/wbMaterial.js`），且词条标题以 `comment` 优先（[AI-14]）；材料的**长度**变化要顺带确认分段与采样上限（[AI-14] + Q8 的可调上限）。
 11. 改**读世界书正文**：批量一律走 `consumeWorldbookBodies`，改完跑 `npm run guard:batch-read`（[AI-12](BUG-AI打标与标签.md#ai-12--世界书打标--规则层在正文未载入时静默未命中规则层等于关闭) / [AI-13](BUG-AI打标与标签.md#ai-13--向量层整批正文同时驻留内存--guardbatch-read-长期红灯npm-run-check-不可用)）；**不要依赖其他模块的加载副作用**。
 12. 改**打标提示词**：卡与书**共用一套 `llmRolePrompts`**，改文案前先确认两端的口径（[AI-15]：世界书必须走 `wb` 覆盖或世界书默认文案，不能沿用角色卡口径）。
+
+---
+
+## AI-21 · 拉取模型列表静默覆盖用户已填模型名
+
+- **等级**：🔴 严重（用户配置被静默破坏并落盘）
+- **来源**：`docs/规格与计划/计划与记录/热测试-2026-10-16.md` §「🐛 #hot-bug-1」
+- **现象**：用户在「⚡ API 引擎与模型设置」手填可用模型名后点「拉取模型列表」，若接口返回的列表不含该模型（或返回垃圾串），**已填的模型名被静默改写并立刻落盘**。此后打标/测卡全部失败但界面看不出原因，重启仍是脏值。
+- **真实触发场景**：`gcli.ggchan.dev` 的 `/v1/models` 返回 `{id:"当前无可用模型"}` ⇒ `apiModel` 被写成该中文串（实测取证）。
+- **根因**（三个缺陷叠加，缺一不会出事）：
+  1. **零合法性校验**：`js/composables/useChat.js:84-89` 只做 `.filter(Boolean)`，`"当前无可用模型"` 能通过；
+  2. **静默覆盖**：`:93-94` `if (!modelList.includes(apiModel.value)) { apiModel.value = modelList[0]; }`，且 `fetchModelStatus` 还显示「✅ 成功获取 N 个模型」，给人「一切正常」的错觉；
+  3. **落盘传播**：覆盖后经 `syncConfigToDisk()` 写入 `app_config.json`。
+- **修复**（三道防线）：
+  1. **新增 `js/utils/modelId.js`**：`isLikelyModelId(s)` —— 长度 **2~128**（HuggingFace 全路径可达 80~100 字符，原设想 64 会误杀）+ 字符集 `^[a-zA-Z0-9._\-:/@+]+$`（Vertex AI 格式含 `@`）+ 排除提示语（无可用/不可用/暂无/未找到/not available）+ 排除纯数字；
+  2. **`fetchAvailableModels` 增加过滤 + 分类提示**：过滤后为空 ⇒ **保留原模型** + 明确提示「接口返回的 N 项均不像是模型名」；非空 ⇒ 更新 `availableModels` 但**不改 `apiModel`**；
+  3. **根因级防线**：**仅当原 `apiModel` 为空字符串时才自动填 `modelList[0]`** —— 即使列表全合法，也不替用户改选择。
+- **验证**：`test/modelId.test.mjs`（7 条纯函数边界）+ `test/chatApiModel.test.mjs`（4 条行为：原非空不覆盖 / 原为空才填 / 垃圾列表保留原值 / 空列表保留原值）；真机 CDP 断言「点拉取后 `apiModel` 逐字不变 + `app_config.json` 零污染」（见规格 §6.2）。
+- **防再犯**：
+  ① **任何「拉取/刷新」类操作都不得改写用户的持久化选择** —— 只能更新候选列表；
+  ② 校验「像不像目标值」时，**先查真实生态的合法命名**（`@`、`+`、超长 path），不要凭直觉设上限；
+  ③ 状态文案必须与真实结果一致：过滤掉了东西就不能显示「✅ 成功获取」。
+- **规格**：[`../规格与计划/功能规格/G1-拉取模型列表静默覆盖-修复规格.md`](../规格与计划/功能规格/G1-拉取模型列表静默覆盖-修复规格.md)
+
+---
+
+## AI-22 · 手填模型名在拉取后「从界面消失」（值仍在，但看不见）
+
+- **等级**：🟡 中（不丢数据，但用户会以为配置被清空）
+- **发现方式**：修 AI-21 时用真机探针实测发现（`scripts/probes/_probe-g1-model-overwrite.mjs`）
+- **现象**：用户手填了一个**不在服务端列表里**的私有模型名（如自建网关的 `my-private-model`）→ 点「拉取模型列表」→ 控件**从输入框切换成下拉框**，而下拉框的选项**只来自服务端返回** ⇒ 用户填的名字**在界面上完全看不到**，看起来像「被清空了」。
+  实测：底层 `apiModel` **仍然保留**（状态栏文案回显「当前模型「probe-sentinel-model-xyz」不在列表中（已保留，未改动）」），但下拉框显示空白。
+- **根因**（`js/components/ApiSettingsModal.vue:36-39`）：
+  ```html
+  <select v-if="availableModels.length > 0" :value="apiModel" @change="...">
+      <option v-for="m in availableModels" :key="m" :value="m">{{ m }}</option>
+  </select>
+  <input v-else :value="apiModel" ...>
+  ```
+  `v-if` 一旦为真就用 select 渲染，而 `apiModel` 不在 `availableModels` 里时，select **没有任何 option 与之匹配** ⇒ 显示空。
+- **影响**：不丢数据（值在 `ref` 里、也未被覆盖），但**用户无法确认自己填了什么**，容易误判「配置丢了」而重新手打一遍，或误以为 AI-21 没修好。
+- **✅ 已修复**（2026-10-25）—— **做法比原建议更彻底**：不再「按有无候选切换控件形态」，而是**恒用 `input` + 全局 `datalist`**：
+  1. `js/components/ApiSettingsModal.vue`：删掉 `select v-if` / `input v-else`，统一为
+     `<input list="model-suggestions">`（拉取到候选时边框高亮）；底部加一行提示：
+     「⚠️ 当前模型不在服务端返回的 N 个候选中（可能是自定义/私有模型，已原样保留）」。
+  2. `js/components/App.vue`：全局 `#model-suggestions` datalist **合并动态候选**
+     （`v-for="m in availableModels"`）+ 原内置建议，两者并存。
+     ⚠️ HTML 规定一个 input 只能绑**一个** datalist，所以不能各挂一个 —— 必须合并到同一个。
+  3. `js/components/AITagModal.vue`：**同款缺陷一并修**（打标窗也是 `select v-if` / `input v-else`），
+     改为同样的 `input + #model-suggestions`，并加同款「不在候选」提示。
+- **验证**：真机 CDP 探针 `scripts/probes/_probe-a22-model-visible.mjs` **10/10 通过**：
+  控件恒为 `INPUT`（大 select 数量 0）／拉取前后输入框 value 逐字等于哨兵值／
+  出现「不在候选」说明／datalist 已合并（68 项）／跑完清理零污染。
+  另 `npm test` **1169/0**、`guard:scope` 0 违规、`build:web` 成功、真实启动无 `[Vue 错误]`。
+- **防再犯**：**「受控组件的形态切换」必须保证「当前值可见」** —— 只要 `v-if` / `v-else` 换了控件类型，就要检查当前值是否在两个分支里都渲染得出来（同族坑：AR-56 `data` 与 `methods` 同名导致插值空串，都是「值存在但界面看不见」）。

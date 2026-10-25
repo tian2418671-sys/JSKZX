@@ -1291,3 +1291,30 @@
   浏览库、查重、版本对比、导入、打包是**不同流程**，进度不能互相借用（AR-42 的教训）。
 - 运行时问题优先查 `userData/crash.log`（`render-process-gone` 详情 + 自动 reload 记录）。
   ⚠️ 但**崩溃日志本身可能不存在**（主进程同死时写不进去，见 PK-20）→ 别把「没日志」当成「没崩溃」。
+
+---
+
+## AR-70 · Toast 层级 9999 盖住弹窗头部 → 「✕ 关闭」点不到
+
+- **等级**：🔴 严重（弹窗关不掉，用户只能刷新）
+- **发现方式**：写「结构画像」真机探针时，`elementFromPoint` 命中测试抓出
+- **现象**：质检跑完弹出「✅ 质检完成」Toast（固定在右上角），此时点弹窗头部的「✕ 关闭」
+  **毫无反应**；点「知道了」也无效（若 Toast 恰好盖住其位置）。
+- **根因**（源码确证）：
+  - `js/components/ToastContainer.vue:6` —— 容器 `style="z-index: 9999;"`；
+  - `js/components/QualityCheckModal.vue:11` —— 弹窗 `z-[110]`；
+  - ⇒ **9999 > 110**，Toast 渲染在弹窗**之上**，且它在右上角、正好压住「✕ 关闭」。
+  - 实测 `elementFromPoint(关闭按钮中心)` 返回 `SPAN|✅`（Toast 的图标），而非按钮本身。
+- **影响面**：不止质检 —— 所有 `z-[110]` 级别的弹窗（质检 / 其它同层弹窗）右上角关闭按钮，
+  在 Toast 显示期间都点不到。**属普遍性问题**。
+- **修复**：
+  - 方案定位：**不能靠调低 Toast 的 z-index**（它会低于其它全局浮层，导致提示看不见）；
+    也**不能**只在某个弹窗上改 —— 应在「弹窗打开期间」把 Toast 挪出关闭按钮的点击区。
+  - 采用：Toast 容器已带 `pointer-events-none`（外层）+ 单条 `pointer-events-auto`（内层）。
+    ⚠️ 内层 `pointer-events-auto` 会让 Toast **吃掉鼠标事件**（即使视觉上是半透明）。
+    改为**整体 `pointer-events-none`**（提示仅展示、不可点），从根上消除「挡住点击」。
+- **验证**：`elementFromPoint` 命中测试返回按钮本身；真实 `Input.dispatchMouseEvent`
+  点击「✕ 关闭」后弹窗消失。
+- **防再犯**：**浮层（Toast / Tooltip / 通知）一律 `pointer-events: none`**，
+  除非它确实需要交互（那就要保证不覆盖任何按钮）。同族教训：
+  AR-60（菜单被原生视图盖住）/ AR-64（absolute 浮层压住按钮）/ AR-67（原生层盖住 DOM）。

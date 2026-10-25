@@ -411,3 +411,116 @@ export function resolveRollbackCard(cards, entry) {
     }
     return { status: 'ambiguous' };
 }
+
+// =====================================================================
+// 🏷️ B1：从高频标签生成「自动分组档案草稿」（纯函数 · 只读）
+// =====================================================================
+//
+// 上游裁决（Q4 / Q5）定的双闸门：
+//   · minCards  = 单标签最低卡数门槛 = clamp(total*0.02, 5, 50)（可手改）
+//   · maxDrafts = 最多输出条数 = 20（可手改）
+//
+// ⚠️ 三重过滤顺序不可换：
+//   ① 在标签池内 ⇒ 跳过（`systemCommonTags` 天然是「基础分类维度」，不该再生成分组）
+//   ② 卡数 < minCards ⇒ 跳过（长尾）
+//   ③ 已有同 group+type+pattern 档案 ⇒ 跳过（幂等，绝不重复）
+//
+// ⚠️ 大小写铁律（见本文件顶部铁律 1）：`extractCardTags` 输出**已小写**，
+//   而 `compileProfile` 用 `piece.toLowerCase()` 去比对 ⇒ 草稿的 `match.pattern`
+//   **必须写小写**，否则「病娇」这类含中文的标签虽无影响，但英文标签会漏判。
+//   本函数返回的 `label` 保留原始大小写（供 UI 显示）。
+//
+// 🚫 本函数**不落盘、不调 IPC、不碰 moveCardToGroup** —— 只产出草稿，供 UI 预览。
+
+/** minCards 动态默认值（上游 Q5 定锤） */
+export function defaultMinCards(total) {
+    const n = Math.max(0, Number(total) || 0);
+    return Math.min(50, Math.max(5, Math.floor(n * 0.02)));
+}
+
+/**
+ * 从标签计数生成分组档案草稿
+ * @param {Map<string,number>|Array<[string,number]>} tagCounts  computeTagStats().tagCounts
+ * @param {Array} existingProfiles  normalizeGroupProfiles() 结果（用于幂等去重）
+ * @param {object} opts
+ * @param {number} opts.total       库总卡数（算动态 minCards）
+ * @param {string[]} [opts.commonTags=[]]  标签池（第 1 重过滤）
+ * @param {number} [opts.minCards]  不传则用 defaultMinCards(total)
+ * @param {number} [opts.maxDrafts=20]
+ * @returns {{drafts:Array, filtered:object, effectiveMinCards:number, effectiveMaxDrafts:number, poolEmpty:boolean}}
+ */
+export function draftProfilesFromTags(tagCounts, existingProfiles, opts = {}) {
+    // 兼容 Map 与 Array<[k,v]>
+    let counts = new Map();
+    if (tagCounts instanceof Map) counts = tagCounts;
+    else if (Array.isArray(tagCounts)) counts = new Map(tagCounts);
+
+    const total = Math.max(0, Number(opts.total) || 0);
+    const effectiveMinCards = Number.isFinite(Number(opts.minCards)) && Number(opts.minCards) > 0
+        ? Number(opts.minCards)
+        : defaultMinCards(total);
+    const effectiveMaxDrafts = Math.min(100, Math.max(1, Number(opts.maxDrafts) || 20));
+
+    const pool = Array.isArray(opts.commonTags)
+        ? opts.commonTags.map((t) => String(t == null ? '' : t).trim()).filter(Boolean)
+        : [];
+    const poolEmpty = pool.length === 0;
+    const poolSet = new Set(pool);
+
+    // 已有档案的 dedupeKey 集合（与 normalizeGroupProfiles 的键构造**逐字一致**）
+    const existingKeys = new Set();
+    for (const p of (Array.isArray(existingProfiles) ? existingProfiles : [])) {
+        if (!p || typeof p !== 'object') continue;
+        const g = typeof p.group === 'string' ? p.group.trim() : '';
+        const m = p.match && typeof p.match === 'object' ? p.match : {};
+        const t = m.type || 'tag';
+        const pat = typeof m.pattern === 'string' ? m.pattern.trim() : '';
+        if (g) existingKeys.add(`${g}\u0000${t}\u0000${pat.toLowerCase()}`);
+    }
+
+    const filtered = { inPool: [], belowMinCards: 0, duplicate: 0, emptyTag: 0 };
+    const candidates = [];
+
+    for (const [rawTag, rawCount] of counts.entries()) {
+        const label = String(rawTag == null ? '' : rawTag).trim();
+        if (!label) { filtered.emptyTag++; continue; }
+        const count = Math.max(0, Number(rawCount) || 0);
+
+        // ① 池内基础标签 ⇒ 跳过（池为空时该重过滤自动失效）
+        if (!poolEmpty && poolSet.has(label)) {
+            filtered.inPool.push({ tag: label, count });
+            continue;
+        }
+        // ② 卡数不足
+        if (count < effectiveMinCards) { filtered.belowMinCards++; continue; }
+        // ③ 已有同档案
+        const key = `${label}\u0000tag\u0000${label.toLowerCase()}`;
+        if (existingKeys.has(key)) { filtered.duplicate++; continue; }
+
+        candidates.push({ group: label, pattern: label.toLowerCase(), label, count });
+    }
+
+    // 按卡数降序；同数按名称（稳定，便于单测与 UI 可预期）
+    candidates.sort((a, b) => (b.count - a.count) || a.label.localeCompare(b.label));
+
+    const picked = candidates.slice(0, effectiveMaxDrafts);
+    const drafts = picked.map((c) => ({
+        group: c.group,
+        label: c.label,
+        match: { type: 'tag', pattern: c.pattern },
+        note: '',
+        count: c.count,
+        reason: `命中 ${c.count} 张卡 ≥ 门槛 ${effectiveMinCards}`
+    }));
+
+    filtered.duplicate += Math.max(0, candidates.length - picked.length);   // 被 maxDrafts 截掉的数量并入「已存在/未采用」
+
+    return {
+        drafts,
+        filtered,
+        effectiveMinCards,
+        effectiveMaxDrafts,
+        poolEmpty,
+        totalCandidates: candidates.length
+    };
+}

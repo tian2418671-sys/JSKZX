@@ -44,6 +44,8 @@ export function useWorldbooks({
     // ⚡ 秒开阶段 2 状态：元数据（书名/词条数）后台补齐中
     const wbMetaFilling = ref(false);
     const wbMetaProgress = ref({ done: 0, total: 0 });
+    /** 🩹 G4：本轮扫描被剔除的非世界书文件 + 原因（供 UI 查看「为什么少了几个」） */
+    const wbSkippedFiles = ref([]);
     const isWbScanning = computed(() => wbScanProgress.value.phase === 'scanning' || wbScanProgress.value.phase === 'parsing');
     /** 0~100（total 未知时返回 0，避免出现 NaN 或假进度） */
     const wbScanPercent = computed(() => {
@@ -388,6 +390,11 @@ export function useWorldbooks({
                         const invalidPaths = new Set(
                             data.filter(m => m.valid === false).map(m => m.path)
                         );
+                        // 🩹 G4：剔除**必须带原因**（否则用户只看到「少了几个文件」无从判断）
+                        const invalidReasonOf = new Map(
+                            data.filter(m => m.valid === false)
+                                .map(m => [m.path, m.reason || '结构校验未通过（不是标准世界书）'])
+                        );
                         let filled = 0;
                         let l1Count = 0;
                         let oversizedCount = 0;
@@ -415,19 +422,35 @@ export function useWorldbooks({
                         });
                         if (invalidPaths.size > 0) {
                             const before = worldbooks.value.length;
-                            const removedNames = worldbooks.value
+                            const removed = worldbooks.value
                                 .filter(w => invalidPaths.has(w.path))
                                 .slice(0, 5)
-                                .map(w => w.name)
-                                .filter(Boolean);
+                                .map(w => ({
+                                    name: w.name,
+                                    // 🩹 G4：带上原因（按 path 查；缺省给通用说明，不静默）
+                                    reason: invalidReasonOf.get(w.path) || '结构校验未通过（不是标准世界书）'
+                                }))
+                                .filter(x => x.name);
                             worldbooks.value = worldbooks.value.filter(w => !invalidPaths.has(w.path));
                             // 当前编辑对象若被剔除 → 清空，避免编辑已失效的旧对象
                             if (activeWorldbook.value && invalidPaths.has(activeWorldbook.value.path)) {
                                 activeWorldbook.value = null;
                             }
                             const more = invalidPaths.size > 5 ? ` 等 ${invalidPaths.size} 个` : '';
-                            addLog(`🛡️ 已从列表剔除 ${before - worldbooks.value.length} 个非世界书文件`
-                                + `（${removedNames.join('、')}${more}）`, 'warning');
+                            // 🩹 G4：日志里**逐条给出剔除原因**（用户复制日志即可自查）
+                            const detail = removed.map(x => `${x.name}（${x.reason}）`).join('；');
+                            addLog(`🛡️ 已从列表剔除 ${before - worldbooks.value.length} 个非世界书文件${more}`
+                                + (detail ? ` —— 原因：${detail}` : ''), 'warning');
+                            // 供 UI 查看完整清单（不只前 5 个）
+                            wbSkippedFiles.value = data
+                                .filter(m => m.valid === false)
+                                .map(m => ({
+                                    path: m.path,
+                                    name: (m.path || '').split(/[\\/]/).pop() || '(未知文件)',
+                                    reason: m.reason || '结构校验未通过（不是标准世界书）'
+                                }));
+                        } else {
+                            wbSkippedFiles.value = [];   // 本轮无剔除 → 清空上次残留
                         }
                         triggerRef(worldbooks);
                         addLog(`✅ 元数据补齐：${filled} 本（书名 + 词条数 + L1 摘要 ${l1Count} 本）`, 'success');
@@ -1388,6 +1411,8 @@ export function useWorldbooks({
         wbScanProgress, isWbScanning, wbScanPercent, rescanWorldbooks,
         // ⚡ 秒开阶段 2：元数据后台补齐状态
         wbMetaFilling, wbMetaProgress,
+        // 🩹 G4：被剔除的非世界书文件 + 原因（`[{path,name,reason}]`）
+        wbSkippedFiles,
         // 📢 DF-18：跳过可见化 + 超大书懒加载
         reportSkipped, wbEntryCount, wbDisplayName, ensureWorldbookLoaded, selectWorldbook,
         // ⚡ PK-26 后续：批量流程（查重）用后释放正文，防 OOM

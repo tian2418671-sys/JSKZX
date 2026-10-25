@@ -827,6 +827,11 @@ protocol.registerSchemesAsPrivileged([
 
 /** 🎬 本地目录模式：cardId -> 本地根目录（进程内登记，重启后由卡清单重建） */
 const heavyCardLocalRoots = new Map();
+/**
+ * 🎬 把 `heavycard-local` 协议绑到指定 session 的函数（由 registerAppProtocol 赋值）。
+ * ⚠️ 重型卡每个都用独立 partition session，只绑 defaultSession 会让卡内请求 100% ERR_FAILED。
+ */
+let heavyCardProtocolBinder = null;
 
 // 🧩 插件「效果」页预览内存存储：渲染进程生成完整预览 HTML（含内联宿主桩脚本），
 // 通过 IPC 存入主进程内存，再由 app:// 协议独立 URL 提供给 iframe 加载。
@@ -956,12 +961,20 @@ function registerAppProtocol() {
   //      ① 只服务已登记在 `heavyCardLocalRoots` 里的卡；
   //      ② 解析后的路径必须仍在根目录内（防 `..` 穿越）；
   //      ③ 只读文件，不支持写。
-  protocol.handle('heavycard-local', (request) => {
+  //
+  //  🐞 2026-10-25 真 bug（用户实测「本地卡加载失败」）：
+  //     `protocol.handle()` 注册的是 **defaultSession**，而重型卡每个都用**独立 partition**
+  //     （`persist:heavycard-<id>_g<N>`）⇒ 卡内的 `heavycard-local://` 请求**没有处理器**，
+  //     直接 `ERR_FAILED (-2)`、页面停在 about:blank（表现为「加载失败」且无任何有用报错）。
+  //     修法：抽出 handler，defaultSession 与**每个卡 session** 都注册一份（幂等）。
+  const heavyLocalHandler = (request) => {
     try {
       const url = new URL(request.url);
       const cardId = url.hostname || '';
       const rootDir = heavyCardLocalRoots.get(cardId);
-      if (!rootDir) return new Response('Not Found', { status: 404 });
+      if (!rootDir) {
+        return new Response('Not Found', { status: 404 });
+      }
 
       let rel = decodeURIComponent(url.pathname || '/');
       if (rel === '/' || rel === '') rel = '/index.html';
@@ -1004,7 +1017,32 @@ function registerAppProtocol() {
     } catch (e) {
       return new Response('Not Found', { status: 404 });
     }
-  });
+  };
+
+  /** 已注册过协议的 session 集合（避免重复 handle 报错） */
+  const heavyLocalBoundSessions = new WeakSet();
+  /**
+   * 把 heavycard-local 协议绑到指定 session（幂等）。
+   * ⚠️ 重型卡用独立 partition ⇒ **必须**对每个卡的 session 单独绑定，
+   *    只绑 defaultSession 会让卡内请求 100% 失败（ERR_FAILED）。
+   */
+  function bindHeavyLocalProtocol(ses) {
+    try {
+      if (!ses || heavyLocalBoundSessions.has(ses)) return true;
+      // 先尝试解除（若之前绑过但句柄丢了），失败忽略
+      try { ses.protocol.unhandle('heavycard-local'); } catch (e) { /* 未注册过 */ }
+      ses.protocol.handle('heavycard-local', heavyLocalHandler);
+      heavyLocalBoundSessions.add(ses);
+      return true;
+    } catch (e) {
+      console.warn('[heavycard-local] 协议绑定失败:', e && e.message);
+      return false;
+    }
+  }
+  // 主界面（defaultSession）也绑一份，便于预览/调试
+  bindHeavyLocalProtocol(session.defaultSession);
+  // 暴露给重型卡 manager：每建一个 view 就绑它的 session
+  heavyCardProtocolBinder = bindHeavyLocalProtocol;
 }
 
 function createWindow() {
@@ -1579,12 +1617,16 @@ app.whenReady().then(() => {
         responseHeaders: {
           ...details.responseHeaders,
           'Content-Security-Policy': [
-            "default-src 'self' app: local-file:; " +
-            "img-src 'self' app: local-file: data: blob:; " +   // 不放行 http(s) 外联图(防追踪像素/内网探测)
-            "style-src 'self' app: 'unsafe-inline'; " +          // Vue/Tailwind 运行时内联样式所需
-            "script-src 'self' app:; " +
-            "font-src 'self' app: data:; " +
-            "connect-src 'self' http: https: ws: wss:"           // 聊天测卡需连用户自定义 API 地址，无法进一步收紧
+            // 🎬 重型卡本地模式：`heavycard-local:` 必须出现在**所有**相关指令里，
+            //    否则本地卡的脚本/样式/图片/字体全被 CSP 拦掉 ⇒ 页面空白、显示「加载失败」。
+            //    （2026-10-25 实测：漏配时 target URL 正常但 title 为空、内容全白。）
+            "default-src 'self' app: local-file: heavycard-local:; " +
+            "img-src 'self' app: local-file: heavycard-local: data: blob:; " +   // 不放行 http(s) 外联图(防追踪像素/内网探测)
+            "style-src 'self' app: heavycard-local: 'unsafe-inline'; " +          // Vue/Tailwind 运行时内联样式所需
+            "script-src 'self' app: heavycard-local:; " +
+            "font-src 'self' app: heavycard-local: data:; " +
+            "media-src 'self' app: heavycard-local: data: blob:; " +              // 本地卡内的音视频素材
+            "connect-src 'self' http: https: ws: wss: heavycard-local:"           // 聊天测卡需连用户自定义 API 地址，无法进一步收紧
           ]
         }
       });
@@ -3639,7 +3681,8 @@ app.whenReady().then(() => {
           // 🛡️ PK-24：已判定为「非世界书」且 mtime 未变 → 直接回报无效，不读盘
           const vc0 = validCache[p];
           if (vc0 && vc0.mtime === mt && vc0.valid === false) {
-            return { path: p, wbName: null, entryCount: null, valid: false, cached: true };
+            // 🩹 G4：必须带回 reason —— 渲染层要告诉用户「为什么这本不在列表里」
+            return { path: p, wbName: null, entryCount: null, valid: false, cached: true, reason: '此前已判定为非世界书（缓存，文件未改动）' };
           }
           // 🛡️ S1' 体积守卫：超限书**不读正文、不算完整摘要**（否则 8 并发遇 200MB 书 → 1.6GB 峰值）
           //    ⚠️ 与扫描主路径 `SCAN_PARSE_MAX_BYTES` 同口径，避免「扫描认为有效、查重认为排除」的口径分裂
@@ -3705,7 +3748,11 @@ app.whenReady().then(() => {
             if (!valid) {
               // ❌ 非世界书：**不写 metaCache**（避免产生假书名/假词条数），并清理可能存在的旧记录
               if (metaCache[p]) { delete metaCache[p]; }
-              return { path: p, wbName: null, entryCount: null, valid: false, cached: false };
+              // 🩹 G4：给出可读原因（区分「结构不对」与「解析失败」两种截然不同的情况）
+              return {
+                path: p, wbName: null, entryCount: null, valid: false, cached: false,
+                reason: '结构校验未通过（不是标准世界书：缺 entries 或字段形态不符）'
+              };
             }
             const entries = Array.isArray(data.entries) ? data.entries
               : (data.entries && typeof data.entries === 'object' ? Object.values(data.entries) : null);
@@ -3735,7 +3782,8 @@ app.whenReady().then(() => {
             validCache[p] = { mtime: mt, valid: false };
             if (metaCache[p]) delete metaCache[p];
             dirty = true;
-            return { path: p, wbName: null, entryCount: null, valid: false, error: e.message, cached: false };
+            // 🩹 G4：带出解析失败原文摘要（便于用户判断是「文件损坏」还是「根本不是 JSON」）
+            return { path: p, wbName: null, entryCount: null, valid: false, error: e.message, cached: false, reason: 'JSON 解析失败：' + e.message };
           }
         }));
         for (const x of part) if (x) out.push(x);
@@ -5088,6 +5136,8 @@ app.whenReady().then(() => {
   const heavyView = createHeavyViewManager({
     win: mainWindow,
     userDataPath: app.getPath('userData'),
+    // 📂 本地卡协议绑定器：每建一个 view 要给它那条 partition session 绑一次
+    bindProtocol: (ses) => (typeof heavyCardProtocolBinder === 'function' ? heavyCardProtocolBinder(ses) : false),
     emit: (channel, payload) => {
       try {
         if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, payload);
@@ -5443,6 +5493,81 @@ app.whenReady().then(() => {
         return { success: false, error: '该文件夹里没有 index.html' };
       }
       return { success: true, dir };
+    } catch (e) {
+      return { success: false, error: e.message };
+    }
+  });
+
+  /**
+   * 📂 导入本地卡（2026-10-25 新增）
+   *
+   * 用户反馈：「重型卡宣称支持本地 HTML，但找不到导入入口」。
+   * 现实里下载到的独立前端卡有两种形态：
+   *   ① 一个文件夹（内含 index.html 与素材） —— 已有 `heavycard:pickLocalDir` 可选；
+   *   ② **单个 .html 文件**（样式/脚本全内联） —— 原来**完全没入口**，这是本次补的缺口。
+   *
+   * 单文件形态的处理：复制到 userData 下的专属目录里（**不原地引用用户文件**），
+   * 避免用户移动/删除源文件后卡就坏了；<title> 顺带作为默认卡名。
+   *
+   * @returns {{success:boolean, dir?:string, entry?:string, title?:string, isSingleFile?:boolean, error?:string}}
+   */
+  ipcMain.handle('heavycard:importLocalHtml', async (event, opts) => {
+    try {
+      const mode = (opts && opts.mode) === 'file' ? 'file' : 'dir';
+      if (mode === 'dir') {
+        // 复用既有目录选择逻辑，保持行为一致
+        const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
+          title: '选择独立前端角色卡的本地文件夹（需含 index.html）',
+          properties: ['openDirectory']
+        });
+        if (canceled || !filePaths || !filePaths.length) return { success: false, error: '用户取消' };
+        const dir = filePaths[0];
+        if (!fs.existsSync(path.join(dir, 'index.html'))) {
+          return { success: false, error: '该文件夹里没有 index.html（请选择卡的主目录）' };
+        }
+        return { success: true, dir, entry: 'index.html', isSingleFile: false };
+      }
+
+      // —— 单文件 .html ——
+      const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
+        title: '选择独立前端角色卡的 HTML 文件',
+        properties: ['openFile'],
+        filters: [{ name: '网页', extensions: ['html', 'htm'] }]
+      });
+      if (canceled || !filePaths || !filePaths.length) return { success: false, error: '用户取消' };
+      const srcFile = filePaths[0];
+      if (!/\.html?$/i.test(srcFile)) return { success: false, error: '请选择 .html 或 .htm 文件' };
+
+      // 读 <title> 作默认卡名（读不到就退回文件名）；限制读取量，避免超大文件卡住
+      let title = '';
+      try {
+        const fd = await fs.promises.open(srcFile, 'r');
+        try {
+          const buf = Buffer.alloc(Math.min(65536, (await fd.stat()).size));
+          await fd.read(buf, 0, buf.length, 0);
+          const head = buf.toString('utf-8');
+          const m = head.match(/<title[^>]*>([\s\S]{0,200}?)<\/title>/i);
+          if (m && m[1]) title = m[1].replace(/\s+/g, ' ').trim();
+        } finally {
+          await fd.close();
+        }
+      } catch (e) { /* 读不到就忽略 */ }
+
+      // 复制到 userData/heavycard-local/<时间戳>/index.html
+      const stamp = new Date().toISOString().replace(/[-:T.Z]/g, '').slice(0, 14);
+      const destDir = path.join(app.getPath('userData'), 'heavycard-local', `single-${stamp}-${Math.random().toString(36).slice(2, 8)}`);
+      await fs.promises.mkdir(destDir, { recursive: true });
+      const destFile = path.join(destDir, 'index.html');
+      await fs.promises.copyFile(srcFile, destFile);
+
+      return {
+        success: true,
+        dir: destDir,
+        entry: 'index.html',
+        title: title || path.basename(srcFile, path.extname(srcFile)),
+        isSingleFile: true,
+        sourcePath: srcFile
+      };
     } catch (e) {
       return { success: false, error: e.message };
     }

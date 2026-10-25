@@ -405,6 +405,26 @@
                            class="w-full h-8 bg-zinc-800/80 border border-zinc-700/60 rounded-lg pl-8 pr-2 text-xs text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-amber-500/80 transition">
                 </div>
 
+                <!-- 🩹 G4：剔除原因提示（只在本轮确实剔除了文件时出现；默认收起，避免占高度） -->
+                <div v-if="wbSkippedFiles && wbSkippedFiles.length"
+                     class="text-[10px] rounded-md border border-amber-500/40 bg-amber-500/10 text-amber-300 overflow-hidden">
+                    <button @click="showWbSkipped = !showWbSkipped"
+                            class="w-full px-2 py-1 flex items-center gap-1 text-left hover:bg-amber-500/15 transition">
+                        <span>🛡️ 已排除 {{ wbSkippedFiles.length }} 个非世界书文件</span>
+                        <span class="flex-1"></span>
+                        <span class="opacity-70">{{ showWbSkipped ? '收起 ▲' : '看原因 ▼' }}</span>
+                    </button>
+                    <div v-if="showWbSkipped" class="px-2 pb-1.5 space-y-1 max-h-40 overflow-y-auto custom-scrollbar">
+                        <div v-for="(f, i) in wbSkippedFiles" :key="i" class="leading-snug">
+                            <span class="font-mono break-all">{{ f.name }}</span>
+                            <span class="text-amber-400/80"> — {{ f.reason }}</span>
+                        </div>
+                        <p class="text-amber-500/70 pt-1 border-t border-amber-500/20">
+                            这些文件不会被当成世界书（多为角色卡 / 预设 / 大表格 / 损坏 JSON）；如需使用请自行转换格式。
+                        </p>
+                    </div>
+                </div>
+
                 <!-- 行2：高频操作（合并/全库 等宽）+ 更多工具折叠 -->
                 <div class="flex items-center gap-1.5">
                     <button @click="openWbMergeModal" title="选择多本世界书进行合并"
@@ -785,12 +805,16 @@
                 </div>
                 <!-- 📌 能力边界说明：避免用户拿 exe / apk 去试，白折腾一场 -->
                 <p class="text-[10px] leading-relaxed text-zinc-500 rounded-md px-2 py-1.5 bg-amber-500/5 border border-amber-500/20">
-                    当前仅支持 <span class="text-amber-400 font-bold">HTML 网页链接</span> 形式的卡；<br>
+                    支持 <span class="text-amber-400 font-bold">网页链接</span> 与
+                    <span class="text-emerald-400 font-bold">本地 HTML</span> 两种卡；<br>
                     <span class="text-zinc-400">exe、apk 等本地程序暂不支持。</span>
                 </p>
                 <div class="flex items-center gap-1.5">
-                    <button @click="addHeavyCardByUrl" class="flex-1 h-7 flex items-center justify-center gap-1 px-2.5 bg-zinc-800 hover:bg-rose-600 text-zinc-200 text-[11px] rounded-lg border border-zinc-700/60 transition"
-                            title="添加一张新的独立前端角色卡（仅支持 HTML 网页链接；exe / apk 暂不支持）">➕ 添加</button>
+                    <button @click="addHeavyCardByUrl" class="flex-1 h-7 flex items-center justify-center gap-1 px-2 bg-zinc-800 hover:bg-rose-600 text-zinc-200 text-[11px] rounded-lg border border-zinc-700/60 transition"
+                            title="用网页链接添加（http / https）">🔗 网址</button>
+                    <!-- 📂 本地卡导入入口（2026-10-25 新增）：用户反馈找不到导入本地 HTML 的地方 -->
+                    <button @click="addHeavyCardLocalFlow" class="flex-1 h-7 flex items-center justify-center gap-1 px-2 bg-zinc-800 hover:bg-emerald-600 text-zinc-200 text-[11px] rounded-lg border border-zinc-700/60 transition"
+                            title="导入本地 HTML 卡（可整个文件夹，也可单个 .html 文件）">📂 本地</button>
                     <button @click="refreshHeavyCardStorage" class="h-7 px-2 flex items-center justify-center bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-[11px] rounded-lg border border-zinc-700/60 transition"
                             title="重新统计各卡存档占用">🔄</button>
                 </div>
@@ -808,7 +832,7 @@
                         <button @click.stop="removeHeavyCardById(card)" title="删除该卡（存档目录保留，可手动清理）"
                                 class="shrink-0 px-1 py-0.5 text-[10px] bg-zinc-700/50 hover:bg-rose-600 text-zinc-300 hover:text-white rounded">🗑️</button>
                     </div>
-                    <div class="text-[10px] text-zinc-500 truncate" :title="card.url">{{ heavyCardHost(card.url) }}</div>
+                    <div class="text-[10px] text-zinc-500 truncate" :title="card.localDir || card.url">{{ heavyCardHost(card.url) }}</div>
                     <div class="flex items-center gap-2 text-[9px] text-zinc-600">
                         <span>{{ card.lastOpenedAt ? ('上次 ' + formatShortTime(card.lastOpenedAt)) : '未打开' }}</span>
                         <span v-if="heavyStorageMap[card.id]" class="font-mono">{{ formatByteSize(heavyStorageMap[card.id]) }}</span>
@@ -817,7 +841,10 @@
 
                 <div v-if="heavyCards.length === 0" class="flex flex-col items-center justify-center h-full text-zinc-500 text-xs text-center p-4 gap-3">
                     <span>还没有独立前端角色卡。</span>
-                    <button @click="addHeavyCardByUrl" class="h-7 px-3 bg-rose-600 hover:bg-rose-500 text-white text-[11px] rounded-lg shadow transition">➕ 添加一张</button>
+                    <div class="flex flex-col gap-2 w-full max-w-[180px]">
+                        <button @click="addHeavyCardByUrl" class="h-7 bg-rose-600 hover:bg-rose-500 text-white text-[11px] rounded-lg shadow transition">🔗 用网址添加</button>
+                        <button @click="addHeavyCardLocalFlow" class="h-7 bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] rounded-lg shadow transition">📂 导入本地 HTML</button>
+                    </div>
                 </div>
                 <div v-else-if="filteredHeavyCards.length === 0" class="text-center py-8 text-zinc-500 text-xs">🔍 没有匹配的独立前端角色卡</div>
             </div>
@@ -880,6 +907,8 @@ export default {
         // 📊 [世界书模式] 统计折叠浮层（2026-09-25 用户要求：常驻 3x2 网格 → 折叠 + 浮空）
         //    与高级工具区**同位置互斥**（同时只显示一个）；点外部即关（复用 onDocPointerDown）。
         const showWbStats = ref(false);
+        // 🩹 G4：世界书剔除原因展开状态（默认收起，不占常驻高度）
+        const showWbSkipped = ref(false);
         const toggleWbStats = () => {
             showWbStats.value = !showWbStats.value;
             if (showWbStats.value) showWbAdvanced.value = false;
@@ -928,6 +957,9 @@ export default {
             heavyStorageMap.value = out;
         };
         const heavyCardHost = (url) => {
+            // 📂 本地卡：`heavycard-local://<cardId>/index.html` 的 host 是内部 id，
+            //    直接显示会变成 `hc_local_20261025083454` 这种让人看不懂的串。
+            if (/^heavycard-local:/i.test(String(url || ''))) return '📂 本地文件';
             try { return new URL(url).host; } catch (e) { return url || ''; }
         };
         const formatShortTime = (ts) => {
@@ -960,7 +992,7 @@ export default {
         /** 添加卡：弹出输入框填 URL */
         const addHeavyCardByUrl = async () => {
             const url = await ctx.appPrompt(
-                '请输入独立前端角色卡的入口网址（http/https）\n\n⚠️ 当前仅支持 HTML 网页链接形式的卡，exe / apk 等本地程序暂不支持。',
+                '请输入独立前端角色卡的入口网址（http/https）\n\n💡 若卡是下载到本地的 HTML，请改用「📂 本地」导入。',
                 'https://'
             );
             if (!url || !/^https?:\/\//i.test(String(url).trim())) return;
@@ -968,6 +1000,34 @@ export default {
             if (card) {
                 await selectHeavyCard(card);
             }
+        };
+
+        /**
+         * 📂 导入本地 HTML 卡（2026-10-25 新增）
+         *
+         * 用户反馈原话：「重型卡宣称支持本地 html 但没有找到如何导入的入口」。
+         * 原来「本地」能力藏在备份面板里一个不起眼的「用本地」按钮，且必须先有卡才能用。
+         *
+         * 这里给两条明确路径：
+         *   · 整个文件夹（内含 index.html + 素材）—— 卡作者的原始打包形态
+         *   · 单个 .html 文件 —— 别人分享给你的单文件卡（会复制进软件数据目录保管）
+         */
+        const addHeavyCardLocalFlow = async () => {
+            const pickFile = await ctx.confirmDialog(
+                '导入本地 HTML 卡',
+                '你手上的卡是哪种形态？\n\n' +
+                '【确定】= 单个 .html 文件（别人分享的单文件卡，会复制一份到软件数据目录保管）\n' +
+                '【取消】= 整个文件夹（含 index.html 与素材，选文件夹即可）'
+            );
+            const mode = pickFile ? 'file' : 'dir';
+            const res = await ctx.addHeavyCardLocal(mode);
+            if (!res || !res.success) {
+                // 用户点「取消」原生选择框不是错误，不打扰
+                if (res && res.error && /取消|cancel/i.test(res.error)) return;
+                await ctx.nativeAlert(`导入失败：${(res && res.error) || '未知错误'}`, 'error');
+                return;
+            }
+            await selectHeavyCard(res.card);
         };
 
         /** 删除卡（二次确认；存档目录不自动删，避免误删几十小时进度） */
@@ -1201,6 +1261,9 @@ export default {
             hasActiveFilters,
             showWbAdvanced,
             showWbStats, toggleWbStats, toggleWbAdvanced,
+        // 🩹 G4：剔除原因（直接取 ctx；缺省给空数组，避免旧 ctx 未更新时模板崩）
+        wbSkippedFiles: ctx.wbSkippedFiles || ref([]),
+        showWbSkipped,
             handleSortChange,
             modeCountText,
             quickCategoryChips,
@@ -1357,7 +1420,7 @@ export default {
             heavyCardPage, heavyCardTotalPages, heavyCardPageSlice, changeHeavyCardPage,
             heavyStorageMap, refreshHeavyCardStorage,
             heavyCardHost, formatShortTime, formatByteSize,
-            selectHeavyCard, addHeavyCardByUrl, removeHeavyCardById,
+            selectHeavyCard, addHeavyCardByUrl, addHeavyCardLocalFlow, removeHeavyCardById,
             wbFilterType: ctx.wbFilterType,
             filteredWorldbooks: ctx.filteredWorldbooks,
             // ⛔ 已移除 wbScanProgress / isWbScanning / wbScanPercent 绑定：

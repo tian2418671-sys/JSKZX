@@ -134,6 +134,12 @@ export function normalizeHeavyCard(raw) {
         createdAt: Number(raw.createdAt) || 0,
         lastOpenedAt: Number(raw.lastOpenedAt) || 0,
         totalPlayMs: Number(raw.totalPlayMs) || 0,
+        // 🩹 C3：上次成功打开时的地址快照（用于换址判定；空 = 首次/旧配置）
+        lastOpenUrl: String(raw.lastOpenUrl || ''),
+        // 📂 本地目录模式：登记过的本地根目录（含 index.html）。
+        //    ⚠️ 必须在白名单里显式保留 —— 这是白名单式归一化，漏一行就会被静默丢弃，
+        //       表现为「导入本地卡后列表有了、一打开却还是走远程地址」。
+        localDir: String(raw.localDir || ''),
         // 🏷️ 名字是否仍是"从 URL 自动猜的"（true ⇒ 页面加载后可用 <title> 覆盖）
         //    ⚠️ 旧配置没有这个字段：若名字与 guessNameFromUrl 的结果一致，也视为自动名
         autoName: raw.autoName !== undefined
@@ -161,6 +167,8 @@ export function useHeavyCards({ appMode, syncConfigToDiskDebounced, addLog, show
     const activeHeavyCard = ref(null);
     const heavyCardSearchQuery = ref('');
     const heavyCardStatus = ref('idle'); // idle | loading | ready | error | crashed
+    /** 加载失败的具体原因（主进程已翻译成中文，直接展示给用户） */
+    const heavyCardErrorText = ref('');
     const heavyCardZoom = ref(1);
     const heavyCardFrameUrl = ref('');
     /** view 是否已挂载（手动备份等场景需要临时卸载） */
@@ -193,6 +201,25 @@ export function useHeavyCards({ appMode, syncConfigToDiskDebounced, addLog, show
     const loadFromConfig = (list) => {
         const arr = Array.isArray(list) ? list.map(normalizeHeavyCard).filter(Boolean) : [];
         heavyCards.value = arr.length ? arr : [normalizeHeavyCard({ ...PRESET_HEAVY_CARD, createdAt: Date.now() })];
+        // 📂 本地卡用的 `heavycard-local://` 协议，其「根目录表」在主进程是**内存 Map**，
+        //    应用重启后为空 ⇒ 必须在这里把每张本地卡重新登记一次，否则打开就是 404
+        //    （用户看到的现象：卡还在列表里，一点就「加载失败」且毫无提示）。
+        try { reRegisterLocalRoots(); } catch (e) { /* 不阻塞启动 */ }
+    };
+
+    /**
+     * 📂 把所有带 localDir 的卡重新登记到主进程（幂等，可反复调）。
+     * 失败的单张不影响其它卡，且不弹窗（启动阶段尽量安静），只记一条日志。
+     */
+    const reRegisterLocalRoots = async () => {
+        try {
+            if (!window.electronAPI?.heavyCard?.setLocalRoot) return;
+            const locals = (heavyCards.value || []).filter((c) => c && c.localDir);
+            for (const c of locals) {
+                try { await window.electronAPI.heavyCard.setLocalRoot(toPlainCard(c), c.localDir); }
+                catch (e) { /* 单张失败跳过 */ }
+            }
+        } catch (e) { /* 忽略 */ }
     };
 
     /** 供 useConfigPersistence 收集 */
@@ -209,7 +236,14 @@ export function useHeavyCards({ appMode, syncConfigToDiskDebounced, addLog, show
         totalPlayMs: c.totalPlayMs,
         autoName: !!c.autoName,
         settings: c.settings,
-        backupStats: c.backupStats
+        backupStats: c.backupStats,
+        // 📂 本地卡根目录 —— **必须收集**，否则写盘时被剥掉：
+        //    重启后卡还在列表里，但 `localDir` 丢了 ⇒ 只剩一个假的
+        //    `heavycard-local://<id>/index.html` 当 url ⇒ 一打开就 404、用户看到「加载失败」。
+        //    ⚠️ 这是白名单式收集，与 normalizeHeavyCard 必须**成对维护**（漏一处就丢数据）。
+        localDir: c.localDir || '',
+        // 🩹 C3：换址判定用的地址快照，同样必须持久化
+        lastOpenUrl: c.lastOpenUrl || ''
     }));
 
     /** 添加 */
@@ -232,9 +266,62 @@ export function useHeavyCards({ appMode, syncConfigToDiskDebounced, addLog, show
         return card;
     };
 
+    /**
+     * 📂 添加「本地 HTML」卡（2026-10-25 新增；用户反馈找不到导入入口）
+     *
+     * 支持的两种形态（主进程弹原生选择框）：
+     *   · mode='dir'  → 选文件夹（含 index.html）
+     *   · mode='file' → 选单个 .html 文件（会复制到 userData 内，不原地引用）
+     *
+     * ⚠️ 为什么单文件要复制：用户下完卡常把文件放桌面/下载夹，事后清理就删了。
+     *    原地引用会导致「昨天还好好的卡，今天打不开」。复制一份自己保管更稳。
+     *
+     * @param {'dir'|'file'} mode
+     * @returns {Promise<{success:boolean, card?:object, error?:string}>}
+     */
+    const addHeavyCardLocal = async (mode = 'dir') => {
+        try {
+            if (!window.electronAPI?.heavyCard?.importLocalHtml) {
+                return { success: false, error: '当前版本不支持导入本地卡（IPC 通道缺失）' };
+            }
+            const res = await window.electronAPI.heavyCard.importLocalHtml({ mode });
+            if (!res || !res.success) return { success: false, error: (res && res.error) || '导入失败' };
+
+            const dir = res.dir;
+            // 用目录名/标题作为卡名；单文件优先用 <title>
+            const fallbackName = String(dir || '').split(/[\\/]/).filter(Boolean).pop() || '本地卡';
+            const name = String(res.title || '').trim() || fallbackName;
+
+            // 本地卡的 url 用一个占位（真实加载走 heavycard-local:// 协议），便于列表展示
+            const url = `heavycard-local://${encodeURIComponent(name)}/index.html`;
+            const card = normalizeHeavyCard({
+                id: makeHeavyCardId(`local:${dir}`),
+                name,
+                url,
+                icon: '📁',
+                note: res.isSingleFile ? `本地单文件：${res.sourcePath || ''}` : `本地目录：${dir}`,
+                autoName: false,
+                gen: 1,
+                createdAt: Date.now(),
+                localDir: dir
+            });
+            heavyCards.value = [...heavyCards.value, card];
+            persist();
+
+            // 立刻向主进程登记本地根目录（否则打开时会 404）
+            try { await window.electronAPI.heavyCard.setLocalRoot(toPlainCard(card), dir); } catch (e) { /* 打开时会再登记一次 */ }
+
+            if (typeof addLog === 'function') {
+                addLog(`📂 已导入本地卡「${name}」${res.isSingleFile ? '（单文件已复制到软件数据目录）' : ''}`, 'success');
+            }
+            return { success: true, card };
+        } catch (e) {
+            return { success: false, error: e.message };
+        }
+    };
+
     /** 更新（浅合并） */
-    const updateHeavyCard = (id, patch) => {
-        const idx = heavyCards.value.findIndex((c) => c.id === id);
+    const updateHeavyCard = (id, patch) => {        const idx = heavyCards.value.findIndex((c) => c.id === id);
         if (idx < 0) return false;
         const next = normalizeHeavyCard({ ...heavyCards.value[idx], ...patch });
         const arr = heavyCards.value.slice();
@@ -253,6 +340,7 @@ export function useHeavyCards({ appMode, syncConfigToDiskDebounced, addLog, show
             activeHeavyCard.value = null;
             heavyCardMounted.value = false;
             heavyCardStatus.value = 'idle';
+            heavyCardErrorText.value = '';
         }
         persist();
         return true;
@@ -403,6 +491,7 @@ export function useHeavyCards({ appMode, syncConfigToDiskDebounced, addLog, show
         heavyCardZoom.value = card.settings?.zoom || 1;
         heavyCardMounted.value = true;
         heavyCardStatus.value = 'loading';
+        heavyCardErrorText.value = '';
         heavyCardIdle.value = false;
         markHeavyCardActivity();
         lastRectKey = '';
@@ -439,15 +528,24 @@ export function useHeavyCards({ appMode, syncConfigToDiskDebounced, addLog, show
             const res = await window.electronAPI.heavyCard.open(effective, openRect);
             if (!res || !res.success) {
                 heavyCardStatus.value = 'error';
+                heavyCardErrorText.value = String((res && (res.desc || res.error)) || '无法启动内嵌浏览器进程');
                 if (typeof addLog === 'function') addLog(`独立前端角色卡打开失败: ${(res && res.error) || '未知'}`, 'error');
                 return false;
             }
             // 记录最近打开时间
             updateHeavyCard(card.id, { lastOpenedAt: Date.now() });
+            // 🩹 C3（换址提示）：记住「这次成功打开时的地址」，下次打开时对比。
+            //    用途：换了域名/端口/本地目录后，浏览器存储可能读不到旧存档 —— 必须明确告知用户，
+            //    而不是让用户一脸懵「我的进度怎么没了」。
+            try {
+                const snapUrl = card.localDir ? `heavycard-local://${card.id}/index.html` : String(card.url || '');
+                updateHeavyCard(card.id, { lastOpenUrl: snapUrl });
+            } catch (e) { /* 忽略：不影响打开 */ }
             try { await window.electronAPI.heavyCard.setZoom(card.id, heavyCardZoom.value); } catch (e) { /* 忽略 */ }
             return true;
         } catch (e) {
             heavyCardStatus.value = 'error';
+            heavyCardErrorText.value = String((e && e.message) || '未知异常');
             if (typeof addLog === 'function') addLog(`独立前端角色卡打开异常: ${e.message}`, 'error');
             return false;
         }
@@ -461,6 +559,7 @@ export function useHeavyCards({ appMode, syncConfigToDiskDebounced, addLog, show
         stopAutoBackupTimer();
         heavyCardMounted.value = false;
         heavyCardStatus.value = 'idle';
+        heavyCardErrorText.value = '';
     };
 
     // =========================================================
@@ -490,6 +589,7 @@ export function useHeavyCards({ appMode, syncConfigToDiskDebounced, addLog, show
         const card = activeHeavyCard.value;
         if (!card) return;
         heavyCardStatus.value = 'loading';
+        heavyCardErrorText.value = '';
         try { await window.electronAPI.heavyCard.reload(card.id, ignoreCache); } catch (e) { /* 忽略 */ }
     };
 
@@ -887,12 +987,14 @@ export function useHeavyCards({ appMode, syncConfigToDiskDebounced, addLog, show
         // 状态
         heavyCards, activeHeavyCard, heavyCardSearchQuery, filteredHeavyCards,
         heavyCardStatus, heavyCardZoom, heavyCardFrameUrl, heavyCardMounted,
+        heavyCardErrorText,
         // 持久化
         loadFromConfig, collectForConfig,
         // 🏷️ 页面标题改名
         subscribePageTitle, applyPageTitle,
         // CRUD
         addHeavyCard, updateHeavyCard, removeHeavyCard,
+        addHeavyCardLocal,   // 📂 导入本地卡（文件夹 / 单个 .html）
         // 打开关闭
         openHeavyCard, closeHeavyCard,
         // 备份 / 恢复

@@ -6,6 +6,7 @@
  * 依赖通过参数注入，保持原有行为不变。
  */
 import { ref } from 'vue';
+import { partitionModelIds } from '../utils/modelId.js';   // 🏷️ AI-21：模型名合法性过滤
 
 export function useChat({
     apiEndpoint, apiKey, apiModel, apiType,
@@ -81,20 +82,35 @@ export function useChat({
             }
             // 兼容 OpenAI / LM Studio 标准格式 { data: [{ id }] } 与裸数组
             const raw = result.data;
-            let modelList = [];
+            let rawList = [];
             if (Array.isArray(raw.data)) {
-                modelList = raw.data.map(m => (typeof m === 'string' ? m : (m && (m.id || m.name)))).filter(Boolean);
+                rawList = raw.data.map(m => (typeof m === 'string' ? m : (m && (m.id || m.name)))).filter(Boolean);
             } else if (Array.isArray(raw)) {
-                modelList = raw.map(m => (typeof m === 'string' ? m : (m && (m.id || m.name)))).filter(Boolean);
+                rawList = raw.map(m => (typeof m === 'string' ? m : (m && (m.id || m.name)))).filter(Boolean);
             }
-            if (modelList.length > 0) {
-                availableModels.value = modelList;
-                fetchModelStatus.value = `✅ 成功获取 ${modelList.length} 个模型！`;
-                if (!modelList.includes(apiModel.value)) {
-                    apiModel.value = modelList[0]; // 当前模型不在列表中时自动选中第一个
-                }
+            // 🏷️ AI-21：先过「像不像模型名」这道闸（中转站会返回「当前无可用模型」这类提示语）
+            const { valid: modelList, rejected } = partitionModelIds(rawList);
+            if (modelList.length === 0) {
+                // 一个合法模型都没有 ⇒ **保留用户已填的值**，且如实告知（绝不显示「✅ 成功」）
+                fetchModelStatus.value = rawList.length
+                    ? `⚠️ 接口返回的 ${rawList.length} 项均不像是模型名（示例：${String(rawList[0]).slice(0, 20)}），已保留当前模型「${apiModel.value || '（空）'}」`
+                    : '⚠️ 接口已响应，但未抓取到有效模型列表';
+                availableModels.value = [];   // 不把垃圾写进下拉候选
+                return;
+            }
+            availableModels.value = modelList;
+            const prevModel = String(apiModel.value || '').trim();
+            // 🔒 根因级防线：**原值非空就绝不改写**；只有原本为空时才自动选第一项
+            if (!prevModel) {
+                apiModel.value = modelList[0];
+                fetchModelStatus.value = `✅ 成功获取 ${modelList.length} 个模型（原模型为空，已自动选中「${modelList[0]}」）`;
+            } else if (modelList.includes(prevModel)) {
+                fetchModelStatus.value = `✅ 成功获取 ${modelList.length} 个模型（当前模型「${prevModel}」在列表中）`;
             } else {
-                fetchModelStatus.value = '⚠️ 接口已响应，但未抓取到有效模型列表';
+                fetchModelStatus.value = `✅ 成功获取 ${modelList.length} 个模型；当前模型「${prevModel}」不在列表中（已保留，未改动）`;
+            }
+            if (rejected.length) {
+                fetchModelStatus.value += ` ｜ 已忽略 ${rejected.length} 项无效返回`;
             }
         } catch (err) {
             console.error('拉取模型列表失败:', err);

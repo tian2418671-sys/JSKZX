@@ -249,6 +249,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
         // 📂 本地目录模式
         pickLocalDir: () => ipcRenderer.invoke('heavycard:pickLocalDir'),
         setLocalRoot: (card, dir) => ipcRenderer.invoke('heavycard:setLocalRoot', { card, dir }),
+        // 📂 导入本地卡：mode='dir' 选文件夹（需含 index.html）/ mode='file' 选单个 .html
+        importLocalHtml: (opts) => ipcRenderer.invoke('heavycard:importLocalHtml', opts || {}),
         // 😴 闲置隐藏
         setIdle: (id, idle) => ipcRenderer.invoke('heavycard:setIdle', { id, idle }),
         // 被拦截请求实时通知

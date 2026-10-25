@@ -26,6 +26,27 @@
                     当前仅支持 <span class="text-amber-500/90">HTML 网页链接</span> 形式的卡；exe、apk 等本地程序暂不支持
                 </p>
             </div>
+
+            <!-- 🎮 C4：继续游玩（最近玩过的几张，一眼回到上次进度） -->
+            <div v-if="recentPlays.length" class="w-full max-w-md px-4">
+                <p class="text-[10px] text-zinc-500 mb-1.5 px-1">🎮 继续游玩</p>
+                <div class="space-y-1">
+                    <button v-for="r in recentPlays" :key="r.card.id"
+                            @click="openHeavyCard(r.card, hostBox)"
+                            class="w-full text-left px-2.5 py-1.5 rounded-lg border border-zinc-700/60 bg-zinc-900/60 hover:bg-zinc-800 hover:border-rose-500/50 transition flex items-center gap-2">
+                        <span class="text-base shrink-0">{{ r.card.icon || '🎬' }}</span>
+                        <span class="min-w-0 flex-1">
+                            <span class="block text-[11px] text-zinc-200 truncate">{{ r.card.name }}</span>
+                            <span class="block text-[9px] text-zinc-500 truncate">
+                                {{ r.stats.playLabel }} · 累计 {{ r.stats.totalPlayLabel }}
+                            </span>
+                        </span>
+                        <span class="text-[9px] shrink-0" :class="r.stats.backupWarn ? 'text-amber-400' : 'text-zinc-500'">
+                            {{ r.stats.backupWarn ? '⚠️ ' + r.stats.backupLabel : '💾 ' + r.stats.backupLabel }}
+                        </span>
+                    </button>
+                </div>
+            </div>
         </div>
 
         <template v-else>
@@ -114,8 +135,21 @@
                 </div>
             </div>
 
-            <!-- 💾 备份历史面板 -->
-            <!-- ⚠️ 布局修复（UI 实测反馈）：原来是 `absolute right-3 top-3` 的浮层，
+            <!-- 🩹 C3：换址提示（存档可能读不到 —— 必须明确告知，不能静默） -->
+            <div v-if="urlChangeNotice"
+                 class="shrink-0 px-3 py-2 border-b border-amber-500/40 bg-amber-500/10 text-amber-200 flex items-start gap-2">
+                <span class="text-base leading-none shrink-0 pt-0.5">⚠️</span>
+                <div class="min-w-0 flex-1 space-y-0.5">
+                    <p class="text-[11px] font-bold">这张卡换过地址，存档可能读不到</p>
+                    <p class="text-[10px] text-amber-300/90 leading-snug">{{ urlChangeNotice.message }}</p>
+                    <p v-if="urlChangeNotice.verdict === 'cross'" class="text-[10px] text-amber-400/80 leading-snug">
+                        建议：先恢复一份旧备份确认能看到进度，再决定是否继续使用新地址。
+                    </p>
+                </div>
+                <button @click="dismissUrlChange" class="shrink-0 px-2 py-0.5 text-[10px] bg-amber-600/20 hover:bg-amber-600 text-amber-200 hover:text-white border border-amber-500/40 rounded transition">知道了</button>
+            </div>
+
+            <!-- 💾 备份历史面板 -->            <!-- ⚠️ 布局修复（UI 实测反馈）：原来是 `absolute right-3 top-3` 的浮层，
                  会直接盖住右上角的「数据目录 / 清缓存 / 离线 / 浏览器」等按钮（截图可见）。
                  改为**在工具栏下方按正常文档流展开**：面板开着时把卡视图往下挤，
                  所有按钮始终可点，不产生遮挡。 -->
@@ -182,23 +216,92 @@
                 </div>
 
                 <div class="flex-1 min-h-0 overflow-y-auto custom-scrollbar p-2 space-y-1.5">
-                    <div v-for="b in backupsDesc" :key="b.name"
-                         class="rounded-lg border border-zinc-700/60 bg-zinc-800/50 px-2.5 py-2">
-                        <div class="flex items-center gap-1.5">
-                            <span class="px-1 py-0.5 text-[9px] rounded shrink-0"
-                                  :class="kindClass(b.kind)">{{ kindLabel(b.kind) }}</span>
-                            <span class="text-[11px] text-zinc-200 font-mono truncate flex-1" :title="b.name">{{ formatStamp(b.createdAt) }}</span>
-                            <span class="text-[9px] text-zinc-500 shrink-0 font-mono">g{{ b.gen }}</span>
-                        </div>
-                        <div class="flex items-center gap-2 mt-1">
-                            <span class="text-[9px] text-zinc-500">{{ formatBytes(b.totalBytes) }}</span>
-                            <span class="text-[9px] text-zinc-600">{{ b.fileCount }} 文件</span>
-                            <span class="flex-1"></span>
-                            <button @click="onRestore(b)" :disabled="heavyCardBackupBusy"
-                                    class="px-2 py-0.5 text-[10px] bg-amber-600/20 hover:bg-amber-600 text-amber-300 hover:text-white border border-amber-500/30 rounded transition disabled:opacity-40">↩ 恢复</button>
-                            <button @click="onDeleteBackup(b)" class="px-2 py-0.5 text-[10px] bg-zinc-700/50 hover:bg-rose-600 text-zinc-400 hover:text-white rounded transition">🗑️</button>
-                        </div>
+                    <!-- 🔀 视图切换：按天时间线（C1） / 空间占用榜（C2） -->
+                    <div class="flex items-center gap-1 pb-1">
+                        <button @click="backupView = 'timeline'"
+                                :class="backupView === 'timeline' ? 'bg-emerald-600/25 text-emerald-200 border-emerald-500/50' : 'theme-element hover:border-emerald-500/50'"
+                                class="px-2 py-0.5 text-[10px] border rounded transition">🕘 时间线</button>
+                        <button @click="backupView = 'storage'"
+                                :class="backupView === 'storage' ? 'bg-emerald-600/25 text-emerald-200 border-emerald-500/50' : 'theme-element hover:border-emerald-500/50'"
+                                class="px-2 py-0.5 text-[10px] border rounded transition">📊 占用</button>
+                        <span class="flex-1"></span>
+                        <span class="text-[9px] text-zinc-500 font-mono">
+                            <template v-if="backupView === 'timeline'">
+                                {{ backupTimeline.total }} 份 · {{ formatBytes(backupTimeline.totalBytes) }}
+                            </template>
+                            <template v-else>
+                                合计 {{ formatBytes(storageRanking.grandTotal) }}
+                            </template>
+                        </span>
                     </div>
+
+                    <!-- ══════ 🕘 C1：按天折叠时间线 ══════ -->
+                    <template v-if="backupView === 'timeline'">
+                        <div v-for="day in backupTimeline.days" :key="day.key"
+                             class="rounded-lg border border-zinc-700/60 overflow-hidden">
+                            <button @click="toggleDay(day.key)"
+                                    class="w-full px-2.5 py-1.5 bg-zinc-800/70 hover:bg-zinc-800 flex items-center gap-2 text-left transition">
+                                <span class="text-[10px] text-zinc-600 shrink-0">{{ day.expanded ? '▾' : '▸' }}</span>
+                                <span class="text-[11px] font-bold text-zinc-200">{{ day.label }}</span>
+                                <span class="text-[9px] text-zinc-500">{{ day.dateLabel }}</span>
+                                <span class="flex-1"></span>
+                                <span class="text-[9px] text-zinc-500">{{ day.items.length }} 份 · {{ formatBytes(day.totalBytes) }}</span>
+                            </button>
+
+                            <div v-show="day.expanded" class="bg-zinc-900/40">
+                                <div v-for="b in day.items" :key="b.name"
+                                     class="px-2.5 py-1.5 border-t border-zinc-800/70 flex items-center gap-1.5">
+                                    <span class="text-[10px] text-zinc-500 font-mono shrink-0 w-9">{{ b.timeLabel }}</span>
+                                    <span class="px-1 py-0.5 text-[9px] rounded shrink-0" :class="kindClass(b.kind)">{{ kindLabel(b.kind) }}</span>
+                                    <span class="text-[9px] text-zinc-500 shrink-0 font-mono">g{{ b.gen }}</span>
+                                    <span class="text-[9px] text-zinc-500">{{ formatBytes(b.totalBytes) }}</span>
+                                    <span class="text-[9px] text-zinc-600">{{ b.fileCount }} 文件</span>
+                                    <span class="flex-1"></span>
+                                    <button @click="onRestore(b)" :disabled="heavyCardBackupBusy"
+                                            class="px-2 py-0.5 text-[10px] bg-amber-600/20 hover:bg-amber-600 text-amber-300 hover:text-white border border-amber-500/30 rounded transition disabled:opacity-40 shrink-0">↩</button>
+                                    <button @click="onDeleteBackup(b)" class="px-1.5 py-0.5 text-[10px] bg-zinc-700/50 hover:bg-rose-600 text-zinc-400 hover:text-white rounded transition shrink-0">🗑️</button>
+                                </div>
+                            </div>
+                        </div>
+                    </template>
+
+                    <!-- ══════ 📊 C2：空间占用榜 ══════ -->
+                    <template v-else>
+                        <div class="rounded-lg border border-zinc-700/60 bg-zinc-800/40 px-2.5 py-2 space-y-1">
+                            <div class="flex items-center gap-2 text-[10px]">
+                                <span class="text-zinc-400">当前存档分区</span>
+                                <span class="flex-1"></span>
+                                <span class="font-mono text-emerald-300">
+                                    {{ storageRanking.currentBytes === null ? '读取中/不可用' : formatBytes(storageRanking.currentBytes) }}
+                                </span>
+                            </div>
+                            <div class="flex items-center gap-2 text-[10px]">
+                                <span class="text-zinc-400">备份合计（{{ storageRanking.totalCount }} 份）</span>
+                                <span class="flex-1"></span>
+                                <span class="font-mono text-sky-300">{{ formatBytes(storageRanking.backupBytes) }}</span>
+                            </div>
+                            <div class="flex items-center gap-2 text-[10px] pt-1 border-t border-zinc-700/50">
+                                <span class="text-zinc-300 font-bold">总占用</span>
+                                <span class="flex-1"></span>
+                                <span class="font-mono text-zinc-100 font-bold">{{ formatBytes(storageRanking.grandTotal) }}</span>
+                            </div>
+                            <p v-if="storageRanking.currentUnavailable" class="text-[9px] text-amber-500/80">
+                                ⚠️ 当前分区占用暂未读到，上表合计只含备份体积
+                            </p>
+                        </div>
+
+                        <div v-if="storageRanking.items.length" class="space-y-1 pt-1">
+                            <p class="text-[9px] text-zinc-500 px-1">按体积从大到小（前 {{ storageRanking.shownCount }} / {{ storageRanking.totalCount }}）</p>
+                            <div v-for="(it, i) in storageRanking.items" :key="it.name"
+                                 class="rounded border border-zinc-700/50 bg-zinc-800/30 px-2 py-1 flex items-center gap-1.5">
+                                <span class="text-[9px] text-zinc-600 font-mono w-4 shrink-0">{{ i + 1 }}</span>
+                                <span class="px-1 py-0.5 text-[9px] rounded shrink-0" :class="kindClass(it.kind)">{{ kindLabel(it.kind) }}</span>
+                                <span class="text-[9px] text-zinc-400 font-mono truncate">{{ formatStamp(it.createdAt) }}</span>
+                                <span class="flex-1"></span>
+                                <span class="text-[9px] font-mono text-zinc-300 shrink-0">{{ formatBytes(it.totalBytes) }}</span>
+                            </div>
+                        </div>
+                    </template>
 
                     <div v-if="heavyCardBackups.length === 0" class="py-8 text-center text-[11px] text-zinc-500">
                         还没有备份。<br>点顶部「📦 备份」立即生成一份。
@@ -222,7 +325,12 @@
                 </div>
                 <div v-else-if="heavyCardStatus === 'error' || heavyCardStatus === 'crashed'" class="absolute inset-0 flex items-center justify-center flex-col gap-3 text-zinc-400 bg-zinc-950/90">
                     <span class="text-3xl">⚠️</span>
-                    <p class="text-xs">{{ heavyCardStatus === 'crashed' ? '渲染进程已崩溃' : '加载失败（可能是网络或站点问题）' }}</p>
+                    <p class="text-xs">{{ heavyCardStatus === 'crashed' ? '渲染进程已崩溃' : '加载失败' }}</p>
+                    <!-- 具体原因：告诉用户是网络问题、站点故障还是网址写错，而不是只说"失败" -->
+                    <p v-if="heavyCardErrorText" class="text-[11px] text-zinc-500 max-w-md text-center px-6 leading-relaxed">{{ heavyCardErrorText }}</p>
+                    <p v-else class="text-[11px] text-zinc-500 max-w-md text-center px-6 leading-relaxed">
+                        可能是网络不通或对方站点无响应。请检查网络后点「重试」，或点「用浏览器打开」确认该网址本身是否能访问。
+                    </p>
                     <div class="flex gap-2">
                         <button @click="onReload" class="px-3 py-1.5 bg-rose-600 hover:bg-rose-500 text-white text-[11px] rounded-lg transition">重试</button>
                         <button @click="onOpenExternal" class="px-3 py-1.5 bg-zinc-700 hover:bg-zinc-600 text-zinc-200 text-[11px] rounded-lg transition">用浏览器打开</button>
@@ -240,6 +348,20 @@
             <!-- 底部状态条 -->
             <div class="px-3 py-1.5 border-t border-zinc-800 bg-zinc-900 shrink-0 flex items-center gap-3 text-[10px] text-zinc-500">
                 <span>{{ statusMeta.hint }}</span>
+                <!-- 📊 C4：游玩/备份摘要（存档管家的核心价值信号） -->
+                <span class="hidden md:inline-flex items-center gap-1.5 shrink-0">
+                    <span class="text-zinc-600">·</span>
+                    <span>{{ playStats.playLabel }}</span>
+                    <template v-if="playStats.totalPlayMs > 0">
+                        <span class="text-zinc-700">|</span>
+                        <span>累计 {{ playStats.totalPlayLabel }}</span>
+                    </template>
+                </span>
+                <span class="inline-flex items-center gap-1 shrink-0"
+                      :class="playStats.backupWarn ? 'text-amber-400' : 'text-zinc-500'">
+                    <span class="text-zinc-700">|</span>
+                    <span>{{ playStats.backupWarn ? '⚠️' : '💾' }} {{ playStats.backupLabel }}</span>
+                </span>
                 <span class="flex-1"></span>
                 <span v-if="storageInfo" class="font-mono">占用 {{ formatBytes(storageInfo.bytes) }}</span>
             </div>
@@ -249,6 +371,12 @@
 
 <script>
 import { inject, ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue';
+// 📦 C1~C4 存档管家纯函数（按天折叠时间线 / 占用榜 / 换址判定 / 游玩统计）
+//    规格：docs/规格与计划/功能规格/C1-C4-重型卡存档管家-实现规格.md
+import {
+    groupBackupsByDay, computeStorageRanking, describePlayStats,
+    sortByRecentPlay, compareOrigins, formatBytes as fmtBytes
+} from '../utils/heavyCardStorage.js';
 
 export default {
     name: 'HeavyCardWorkspace',
@@ -261,6 +389,7 @@ export default {
             appMode,
             heavyCards, activeHeavyCard,
             heavyCardStatus, heavyCardZoom, heavyCardMounted, heavyCardIdle,
+            heavyCardErrorText,
             openHeavyCard,
             reportHeavyCardRect: reportRect,
             syncHeavyViewVisibility: syncViewVisibility,            reloadHeavyCard,
@@ -378,6 +507,70 @@ export default {
         };
         const kindLabel = (k) => (KIND_META[k] || KIND_META.auto).label;
         const kindClass = (k) => (KIND_META[k] || KIND_META.auto).cls;
+
+        // ══════════ 📦 C1~C4 存档管家 ══════════
+        //  ⚠️ 名不能与 data/props 同名（AR-56），且全部从纯函数算，不在此写判断逻辑。
+
+        /** 备份面板视图：按天折叠（C1） / 占用榜（C2） */
+        const backupView = ref('timeline');     // 'timeline' | 'storage'
+        /** C1：被手动折叠/展开的日期（覆盖默认「最近 3 天展开」） */
+        const dayOverride = ref({});
+
+        /** C1：按天折叠的存档时间线 */
+        const backupTimeline = computed(() => {
+            const list = (heavyCardBackups && heavyCardBackups.value) || [];
+            const r = groupBackupsByDay(list, { expandDays: 3 });
+            // 把用户的手动展开/折叠覆盖上去（key → bool）
+            const ov = dayOverride.value || {};
+            const days = r.days.map(d => (Object.prototype.hasOwnProperty.call(ov, d.key)
+                ? { ...d, expanded: !!ov[d.key] }
+                : d));
+            return { ...r, days };
+        });
+        const toggleDay = (key) => {
+            const cur = backupTimeline.value.days.find(d => d.key === key);
+            dayOverride.value = { ...dayOverride.value, [key]: !(cur && cur.expanded) };
+        };
+
+        /** C2：空间占用榜（currentBytes 不可用时纯函数会返回 null，UI 需区分） */
+        const storageRanking = computed(() => {
+            const list = (heavyCardBackups && heavyCardBackups.value) || [];
+            const cur = storageInfo.value && storageInfo.value.bytes;
+            return computeStorageRanking(list, cur === undefined ? null : cur, { topN: 20 });
+        });
+
+        /** C4：当前卡的游玩/备份摘要（列表项与状态条共用） */
+        const playStats = computed(() => describePlayStats(activeHeavyCard.value || {}, Date.now()));
+
+        /** C4：最近玩过的几张（空状态页展示「继续游玩」） */
+        const recentPlays = computed(() => {
+            const arr = (heavyCards && heavyCards.value) || [];
+            return sortByRecentPlay(arr, { topN: 5 });
+        });
+
+        // ══════════ 🩹 C3：换址提示 ══════════
+        //  场景：用户把卡从 A 站点换到 B 站点（或换了本地目录）。
+        //  浏览器存储按 **origin** 隔离 ⇒ 跨域名换址后旧存档读不到，进度像「凭空消失」。
+        //  这里在**打开卡之后**对比上次地址快照，发现不兼容就明确告知（不静默）。
+        const urlChangeNotice = ref(null);   // { verdict, message, oldOrigin, newOrigin } | null
+        const dismissUrlChange = () => { urlChangeNotice.value = null; };
+
+        const checkUrlChange = (card) => {
+            if (!card) return null;
+            const prev = String(card.lastOpenUrl || '');
+            const cur = card.localDir
+                ? `heavycard-local://${card.id}/index.html`
+                : String(card.url || '');
+            if (!prev || !cur || prev === cur) return null;
+            try {
+                const cmp = compareOrigins(prev, cur);
+                // 'same' = 同域名仅路径变化，存档可继续用 ⇒ 不打扰
+                if (!cmp || cmp.verdict === 'same') return null;
+                return cmp;
+            } catch (e) {
+                return null;
+            }
+        };
         const formatStamp = (iso) => {
             const d = new Date(iso);
             if (!d.getTime()) return String(iso || '');
@@ -620,6 +813,18 @@ export default {
                     if (p.state === 'loading' || p.state === 'ready' || p.state === 'error' || p.state === 'crashed') {
                         heavyCardStatus.value = p.state;
                     }
+                    // 记录具体失败原因（主进程已翻译成中文），用于错误层展示。
+                    // ⚠️ 只在 error 时写入；loading 时**不清空** ——
+                    //    「失败 → 后继 did-start-loading(重定向/重试)」时序会把刚写的文案冲掉，
+                    //    导致用户只看到「加载失败」看不到原因。清空动作放在 openHeavyCard 里做。
+                    if (p.state === 'error') {
+                        const d = String(p.desc || '').trim();
+                        if (d) heavyCardErrorText.value = d;
+                    }
+                    // 🩹 C3：页面就绪后再提示换址（避免加载中打扰）
+                    if (p.state === 'ready') {
+                        try { urlChangeNotice.value = checkUrlChange(activeHeavyCard.value); } catch (e) { /* 忽略 */ }
+                    }
                 });
             } catch (e) { /* 旧版本无该通道时忽略 */ }
 
@@ -664,13 +869,20 @@ export default {
             //    工作区永远 v-show=false、永远显示"请选择"、诊断属性也只剩 `data-hc-active`。
             appMode, activeHeavyCard, heavyCards,
             heavyCardStatus, heavyCardZoom, heavyCardMounted,
+            heavyCardErrorText,
             hostBox, storageInfo,
             statusMeta, hostOf, formatBytes,
+            // ⚠️ AR-54：模板里「继续游玩」按钮要用它，必须在这里暴露（漏了 ⇒ 点了报 not a function）
+            openHeavyCard,
             // 💾 备份面板
             showBackupPanel, backupsDesc, heavyCardBackupBusy, heavyCardBackups,
             kindLabel, kindClass, formatStamp,
             toggleBackupPanel, onRefreshBackups, onOpenBackupDir,
             onBackup, onRestore, onDeleteBackup,
+            // 📦 C1~C4 存档管家
+            backupView, backupTimeline, toggleDay,
+            storageRanking, playStats, recentPlays,
+            urlChangeNotice, dismissUrlChange,
             // ⏱️ 自动备份设置
             autoCfg, onAutoToggle, onAutoKeep, onAutoInterval,
             // 📴 离线 / 📦 迁移 / 📂 本地目录 / 😴 闲置

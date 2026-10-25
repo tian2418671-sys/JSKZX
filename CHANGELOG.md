@@ -5,6 +5,462 @@
 
 ---
 
+## 🩹 v2.4.5 · 阶段零：拉取模型列表不再静默覆盖已保存的模型名（AI-21 / P0）（2026-10-25）
+
+> 本轮来源：`docs/规格与计划/功能规格/迭代方向-高价值方案评估-20261025.md` 经上游评审
+> **Greenlight** 后，按上游「阶段零 → 阶段四」路线图施工；本条为**阶段零（P0 止血）**，独立提交。
+
+### 🔴 缺陷修复
+
+- **AI-21 拉取模型列表静默覆盖用户已填模型名**（`热测试-2026-10-16.md` #hot-bug-1）：
+  - 根因：`js/composables/useChat.js` 的 `fetchAvailableModels` 在「当前模型不在返回列表中」时
+    **无条件** `apiModel.value = modelList[0]`，且对返回项**零校验**（只做 `.filter(Boolean)`），
+    覆盖后经 `syncConfigToDisk()` **落盘**。真实触发：中转站 `/v1/models` 返回 `{id:"当前无可用模型"}`
+    ⇒ 用户的模型名被写成中文提示串，此后打标/测卡全部失败且界面看不出原因。
+  - 修复（三道防线）：
+    1. **新增 `js/utils/modelId.js`**：`isLikelyModelId()` / `partitionModelIds()` —— 长度 **2~128**
+       （HuggingFace 全路径可达 80~100 字符）+ 字符集 `^[a-zA-Z0-9._\-:/@+]+$`（允许 Vertex AI 的 `@`）
+       + 排除提示语（无可用/不可用/暂无/未找到/not available）+ 排除纯数字 + **先拦换行再 trim**
+       （`'gpt-4o\n'` 曾因先 trim 而蒙混过关，实测踩到后修正顺序）；
+    2. **过滤后为空 ⇒ 保留原值** + 明确提示「接口返回的 N 项均不像是模型名」，不再显示「✅ 成功」；
+    3. **根因级防线**：**原值非空则绝不改写** `apiModel`，仅当原值为空字符串时才自动填 `modelList[0]`。
+- **顺带发现并修复 AI-22**（🟡）：`ApiSettingsModal.vue` / `AITagModal.vue` 都用
+  `v-if="availableModels.length > 0"` 把 input 换成 select，而 select 的 option 只来自服务端返回
+  ⇒ 手填的私有模型名**在界面上「消失」**（底层值仍在，用户会误以为配置被清空）。
+  修：**取消控件形态切换**，统一 `input` + 全局 `#model-suggestions` datalist（`App.vue` 里把
+  拉取到的动态候选与原内置建议**合并到同一个 datalist** —— HTML 规定一个 input 只能绑一个）；
+  并在「当前模型不在候选中」时显式提示「自定义/私有模型，已原样保留」。
+  两处组件同款缺陷一并修（`ApiSettingsModal` + `AITagModal`）。
+
+### 🔬 验证
+
+- 新增单测 **26 条全绿**：`test/modelId.test.mjs`（22 条：合法命名 / `@` / `+` / 90 字长路径 /
+  中文提示语 / 换行 / HTML / 纯数字 / 超长 / 非字符串 / 分流 / 常量）+ `test/chatApiModel.test.mjs`
+  （7 条行为：原非空不覆盖 / 原为空才填 / 垃圾列表保留原值且不谎报成功 / 空列表保留原值 /
+  在列表中保持原值 / 混合列表说明忽略数 / 拉取失败不动值）。
+- **全量回归**：`npm test` **1169 通过 / 0 失败**（原 1143 → 1169，+26）。
+- **门禁**：`npm run guard:scope` 扫描 103 文件、**未定义标识符 0 个**；`npm run build:web` 构建成功。
+- **真实启动冒烟**：源码版 Electron 启动无 `[Vue 错误]`、`crash.log` 无新增。
+- **真机 CDP 探针** `scripts/probes/_probe-g1-model-overwrite.mjs` **8/8 通过**（走真实 UI 路径：
+  展开「设置(S)」→「API 引擎与模型设置」→ 写入哨兵模型名 → 真实点击「拉取模型列表」）：
+  状态文案回显「✅ 成功获取 62 个模型；当前模型「probe-sentinel-model-xyz」不在列表中（**已保留，未改动**）」
+  ⇒ 底层值未被覆盖；探针跑完自动清理，**零污染**。
+- **AI-22 真机探针** `scripts/probes/_probe-a22-model-visible.mjs` **10/10 通过**：
+  控件恒为 `INPUT`（大 select 数量 0）／拉取前后输入框 value 逐字等于哨兵值／
+  出现「不在候选」说明／datalist 已合并（68 项）／跑完清理零污染。
+
+### 📌 施工纪律
+
+- **主进程零改动、零新增 IPC**（`git diff main.js preload.js` 为空）。
+- 缺陷先登记后修复（铁律 5）：`docs/bugs/BUG-AI打标与标签.md` AI-21 完整条目 + `README.md` 总索引。
+- 本提交**不含**任何 A / B / C 功能迭代代码（按上游要求独立 Commit）。
+
+---
+
+## 🧩 v2.4.5 · 阶段一：两个纯函数（结构画像 + 标签回灌草稿）（2026-10-25）
+
+> 按上游「阶段零 → 阶段四」路线图，本条为**阶段一（纯函数先行 + 单测过关）**，无 UI、可独立合入。
+
+### ✨ 新增纯函数
+
+- **`js/utils/libraryPortrait.js`**（方向 A 数据层 · 只读）：
+  - `buildPortrait(library, { tagStats, commonTags, estimateCardTokens, tokenSample })` → `{ matrix, poolHealth, tokenStats, readiness }`
+  - 只做质检**没有**的三件事：① 标签 × 分组交叉矩阵 ② 标签池健康度（对照 `systemCommonTags`）
+    ③ Token 分位数 P50/P90/P99 + 最重 N 张。**不新增任何统计口径**，标签一律复用 `computeTagStats`
+    的输出，Token 一律用注入的同一个 `estimateCardTokens`。
+  - `readiness` 明确区分「没数据」与「数据为 0」（PK-31 / AI-17 同型防呆）：未勾选 S3 时
+    矩阵与池健康度置 `false` 由 UI 置灰，**绝不用 0 冒充**。
+  - **复用 S4 的 token 结果**：传 `tokenSample` 时不再二次遍历（11k 库实测 23.9ms → 13.4ms）。
+  - `portraitReportLines()` 生成 Markdown 摘要（供质检 `buildReport()` 末尾追加，上游 Q9）。
+  - ⚠️ **未实现「活跃度时间线」**（上游 Q8 否决：`mtime` 会被批量移动/重命名/恢复成批刷新 ⇒ 虚假尖峰）。
+- **`js/utils/autoGroup.js` 追加 `draftProfilesFromTags()`**（方向 B1 · 只读）：
+  - `defaultMinCards(total)` = `clamp(total*0.02, 5, 50)`（上游 Q5 闸门一：89 张→5 / 1000 张→20 / 11849 张→50）。
+  - `maxDrafts` 默认 20（闸门二），双闸门均可手改。
+  - **三重过滤顺序固定**：① 在 `systemCommonTags` 内跳过（天然黑名单，不硬编码）② 卡数 < minCards 跳过
+    ③ 已有同 `group+type+pattern` 档案跳过（复用 `normalizeGroupProfiles` 同款 `dedupeKey`，幂等）。
+  - 池被用户清空时自动跳过第 ① 重过滤（尊重「绝不自动回填默认」铁律），并置 `poolEmpty` 供 UI 提示。
+  - **大小写铁律**：草稿 `match.pattern` **写小写**（`extractCardTags` 输出已小写、`compileProfile`
+    用 `piece.toLowerCase()` 比对），`label` 保留原始大小写供显示。否则英文标签会漏判。
+  - 🚫 不落盘、不调 IPC、不碰 `moveCardToGroup` —— 只产出草稿供 UI 预览。
+
+### 🔬 验证
+
+- 新增单测 **50 条全绿**：`test/libraryPortrait.test.mjs`（25 条：分位数插值 / 空库 / 无标签 /
+  未分类列排最后 / 同卡重复标签去重 / 行列双截断 / 行列排序 / 池空 / 池内未用 / 已用未入池 /
+  未勾 S3 置灰 / **S4 样本复用不重复遍历**（spy 断言调用 0 次）/ 估算缺失返回 null / 估算抛错不中断 /
+  最重列表 / Markdown 摘要）+ `test/draftProfilesFromTags.test.mjs`（25 条：三档 minCards /
+  上限封顶 / maxDrafts 截断 / 4 个黑名单标签全过滤 / 池空不滤 / 幂等去重 / 大小写归一重复 /
+  **pattern 必须小写** / 结构符合 schema / 能被 `normalizeGroupProfiles` 接收 / 空值与非数组入参 /
+  稳定排序）。
+- **全量回归**：`npm test` **1219 通过 / 0 失败**（阶段零后 1169 → 1219，+50）。
+- **门禁**：`guard:scope` 扫描 104 文件、0 违规；`build:web` 成功；**主进程零改动**。
+- **11,849 张同构库实测**：`buildPortrait` **23.9ms**（复用 S4 样本 **13.4ms**，矩阵 30×6，
+  全库 1600 标签 / 6 分组）；`draftProfilesFromTags` **0.36ms**。
+- **双闸门行为实证**（11,849 张库、含 400 个长尾标签）：12 条高频标签→12 条草稿；2 个池内基础标签被过滤；
+  **400 个长尾标签全部被 `minCards=50` 拦下**；池空时过滤自动失效。
+
+### 📌 施工纪律
+
+- 主进程零改动、零新增 IPC；无 UI 改动（阶段二才接 `QualityCheckModal` / `AutoGroupModal`）。
+- 未提交、未推送（待用户指令）。
+
+### ➕ 阶段一附：`js/utils/heavyCardStorage.js`（方向 C 纯函数）
+
+> 阶段一「纯函数先行」的第三项 —— 方向 C 的四个纯函数（无 UI、可独立合入）。
+
+- `compareOrigins(oldUrl, newUrl)`（**C3 核心**）：返回 `same` / `cross` / `local` / `unknown`。
+  - **上游架构级加固已落地**：重型卡存档落盘在 `partition` 目录、与 Origin 强绑定，跨源复制
+    LevelDB 会读不出旧数据 ⇒ 必须显式判定。
+  - **`file://` 陷阱已拦**：`new URL('file:///E:/a').origin === 'null'`（字符串），两个不同本地
+    路径会**都得到 `'null'`** ⇒ 若直接比对会误判同源。本实现按 `local` 单独一类处理，
+    文案为「本地文件夹路径已变更」（上游微调指令）。
+  - 一侧本地、一侧网址 ⇒ `unknown`（不假定可沿用）；解析失败 ⇒ `unknown`（保守）。
+- `groupBackupsByDay(backups, { expandDays=3 })`（C1）：按天折叠、天内倒序、默认只展开最近 3 天
+  （自动备份每 30 分钟一份，全平铺会拉爆面板）；`createdAt` 非法 ⇒ 归「时间未知」并强制展开。
+- `computeStorageRanking(backups, currentBytes, { topN=20 })`（C2）：降序 + 占比；
+  **`currentBytes` 为 `null`/负数 ⇒ 判为「不可用」而非 0**（`Number(null) === 0` 是陷阱，
+  与 AI-21 同类；已用 `!== null` 显式拦截）。
+- `describePlayStats(card)` / `sortByRecentPlay(cards)`（C4）：今天/昨天/N 天前、
+  **「已 N 天未备份 ⚠️」阈值 3 天**（上游 D-C4：存档管家最核心的价值信号）、`formatDuration`。
+
+**验证**
+
+- 新增单测 **31 条全绿**（`test/heavyCardStorage.test.mjs`）：4 类 Origin 判定（含 `file://` 双
+  `'null'` 陷阱、协议/端口差异、一侧本地一侧网址、解析失败）+ 时间线折叠与非法日期 + 占用榜
+  校验等式与 `null` 语义 + 游玩状态阈值边界 + 时长/字节格式化边界。
+- **全量回归**：`npm test` **1250 通过 / 0 失败**（+31）；`guard:scope` 105 文件 0 违规；`build:web` 成功。
+- **真实数据验证**（本机 8 个真实重型卡分区 / 61.75MB，只读）：
+  占用等式 **61.74 + 61.75 = 123.49 MB 校验 OK**；时间线 8 份折叠为 3 天；
+  同域换路径→`same`、跨域→`cross`、本地换目录→`local`、换端口→`cross`；
+  游玩状态正确输出「今天玩过 / 累计 12 小时 / **已 4 天未备份 ⚠️**」。
+
+---
+
+## 📊 v2.4.5 · 阶段二：结构画像接入质检弹窗 + 修 AR-70（Toast 挡住关闭按钮） （2026-10-25）
+
+### 🎯 做了什么
+
+- **`QualityCheckModal.vue` 新增页签栏**：`📋 巡检清单` / `📊 结构画像` 两个视图切换
+  （原弹窗只有一个清单视图，画像数据接进来了却无处显示）。
+- **画像三区块**：① 标签×分组矩阵热力表（行=分组，列=标签，格内为卡片数，可点）
+  ② 池健康双栏（池内从未使用 / 已用但不在池内）③ Token 四分位 + 最重卡片列表（可展开）。
+- **B3 两个出口按钮**：矩阵单元格点击 → `filter-tag` 筛卡；池健康「已用但不在池内」
+  点击 → `open-ai-tag` 打标 / `open-auto-group` 建分组。
+- **`useQualityCheck.js`**：S3 步骤补输出 `tagCounts`、S4 补输出 `tokenSample`，
+  `portrait` 为 computed（依赖 `steps`/`library`/`systemCommonTags`），`buildReport()` 末尾追加画像段。
+- **`App.vue`** 透传 `:portrait` / `:has-portrait` + 3 个 `@事件`（按 AR-54 纪律，setup return 与 ctx 两处都核对过）。
+
+### 🐞 顺带修掉 AR-70（真实缺陷，非本阶段引入）
+
+- **现象**：质检跑完弹出「✅ 质检完成」Toast（固定右上角），此时点弹窗「✕ 关闭」**毫无反应**，且**无任何 JS 报错**。
+- **根因**：`ToastContainer` 容器 `z-index: 9999`，而项目所有弹窗是 `z-100 / 110 / 120`
+  ⇒ Toast 永远在弹窗之上，右上角正好压住关闭按钮。
+  实测 `elementFromPoint(关闭按钮中心)` 返回 `SPAN|✅`（Toast 图标），不是按钮。
+- **影响面**：不止质检 —— **所有弹窗的右上角关闭按钮，在 Toast 显示期间都点不到**。
+- **修**：Toast 降至 `z-index: 90`（高于普通内容、低于全部弹窗）；同时把**非交互 Toast**
+  改为 `pointer-events-none`，只有带 `onClick` 的才 `pointer-events-auto`。
+- **验证**：命中测试返回 `BUTTON|✕ 关闭`（`isBtn: true`），点击后弹窗数 `1 → 0`。
+
+### 🧪 验证
+
+- **真机探针 `_probe-qc-portrait.mjs`：11/11 通过**（此前 10/11，唯一失败项即关闭）。
+  实测真实库：矩阵 **30 行 × 73 个可点单元格**、全库 **241 标签 / 8 分组**、
+  池内从未使用 **21/53**、已用但不在池内 **139**、
+  Token P50 **28,652** / 最大 **887,446**（**复用 S4 样本，不重复扫描**）。
+- `guard:scope` 扫描 105 文件、**0 违规**；`npm test` **1254 / 1254 通过**；
+  `npm run build:web` 成功；**主进程零改动**。
+
+### 📌 施工纪律
+
+- 新增 `@事件` 时按 **AR-54** 核对了 setup return 与 ctx 两处；
+- 浮层一律 `pointer-events: none`（AR-70 教训）；
+- 未提交、未推送（待用户指令）。
+
+## 🧩 v2.4.5 · 阶段二续：B1 标签回灌草稿 / G3 只看失败 / G4 剔除原因 （2026-10-25）
+
+### 🏷️ B1｜从高频标签生成分组草稿
+
+- **位置**：自动分组弹窗 →「📋 收纳规则」页签，「📦 推荐模板」下方。
+- **做什么**：扫描全库标签计数，把「用得够多、但还没被规则收纳」的标签变成候选分组规则；
+  可勾选 / 全选 / 反选，再「➕ 并入规则」，**仍需点「💾 保存」才生效**（不直接写配置）。
+- **三重过滤**（复用既有纯函数 `draftProfilesFromTags`）：池内基础标签跳过 → 卡数不足门槛 → 已有同规则去重。
+- **门槛可调**：`clamp(总卡数×2%, 5, 50)` 对**小库过于严格**（实测 81 张卡库 → 门槛 5，
+  非池内标签几乎都不够 ⇒ 永远 0 条）。故加滑杆，默认仍按公式，用户可下调。
+- **踩到的坑（重要）**：初版读 `card.tags`，但库项上标签在 **`customTags`** 字段 ⇒ 草稿恒为 0 条。
+  改用统一入口 `tagsOf()`（`tags` → `customTags` 回退，与质检 S3 / 结构画像**同口径**）。
+- **实测**：真实库 81 张卡 / 241 标签 / 池内 53 个 → 默认门槛下生成 **14 条候选**；并入后规则行 3 → 31。
+
+### 🚨 G3｜打标日志「只看失败」
+
+- 日志窗标题栏新增 `🚨 只看失败 (N)` 开关（`err` + `warn` 均计入）。
+- **关键细节**：筛选后行的原始下标必须保留（`_i`），否则详情展开 / 复制按钮会**错位**到别的行。
+- 无异常时按钮置灰并提示；筛选后为空时显示「✅ 本次没有异常行」。
+
+### 🩹 G4｜世界书剔除原因说明
+
+- **问题**：非世界书文件被剔除时，日志只报数量与前 5 个名字，**不说为什么**。
+- **根因**：`wb:meta` 的 `valid:false` 分支**不带 reason**（主进程 `skipped` 里其实有，但 meta 通道没传）。
+- **修**：主进程补 reason（区分「结构校验未通过」与「JSON 解析失败」并带错误原文）；
+  渲染层在侧栏世界书区显示 `🛡️ 已排除 N 个非世界书文件` 提示条，**默认收起**，点「看原因」展开逐条列出；
+  日志同步逐条输出原因（可复制自查）。
+- **实测（真实库）**：构造 2 个非法 + 1 个合法文件 → 提示条显示「已排除 2 个」，
+  展开分别给出 `JSON 解析失败：Expected property name...` 与 `结构校验未通过（缺 entries）`，合法文件正常入库。
+
+### 📌 施工纪律 / 门禁
+
+- **E4（搜索语法提示）经核查已存在**（`t:` / `a:` / `w:` / `f:` / `-排除` / 多词 AND，位于 ⚙️ 浮层），**未重复实现**。
+- `guard:scope` 105 文件 **0 违规**；`npm test` **1254 / 1254**；`build:web` 成功。
+- **主进程改动仅 9 行**（只加 `reason` 字段，无 IPC 签名变化；`preload.js` 零改动）。
+- 探针留档：`_probe-b1-tag-drafts.mjs`（6/6）、`_probe-g4-wb-meta-reason.mjs`（4/4）、`_probe-g4-wb-skip-reason.mjs`（2/2）。
+- 测试数据（`H:\01\全局世界书\_g4test`、`I:\03\_g4test`）**已删除**，`scan_cache.json` 已清理对应记录，真实库恢复 36 本。
+- 未提交、未推送（待用户指令）。
+
+## 📦 v2.4.5 · 阶段三：重型卡存档管家（C1~C4）接入工作区 （2026-10-25）
+
+### 🎯 做了什么
+
+- **C1 存档时间线**：备份面板默认视图改为**按天折叠**（今天 / 昨天 / 具体日期），
+  最近 3 天默认展开，可点标题手动折叠/展开；每日显示份数与合计体积。
+- **C2 空间占用榜**：面板内可切到「📊 占用」视图，显示**当前存档分区 / 备份合计 / 总占用**三元组，
+  并列出体积最大的前 20 份备份（降序）。
+- **C3 换址提示**：记住每次成功打开时的地址（`lastOpenUrl`），下次打开若 origin 变化，
+  在工具栏下方**明确提示**「这张卡换过地址，存档可能读不到」，可点「知道了」关闭。
+  同域名仅路径变化**不打扰**。
+- **C4 游玩/备份摘要**：底部状态条显示「今天玩过 · 累计 X · ⚠️ 已 N 天未备份」；
+  空状态页新增「🎮 继续游玩」，按最近游玩排序列出 5 张，直接点击打开。
+
+### 🐞 过程中发现并修掉的两个真实缺陷
+
+1. **AR-54 同型（自己引入，已当场修）**：「继续游玩」按钮调用 `openHeavyCard`，
+   但该函数只从 `ctx` 解构、**没出现在 setup 的 return 里** ⇒ 点击报
+   `e.openHeavyCard is not a function`（Vue runtime-5）。
+   修：在 return 中显式暴露。随后写了一次性检查脚本，把模板中所有引用与 return 暴露做了对账。
+2. **C3 本地卡换目录文案错误（既有缺陷）**：`isFileUrl` 只认 `file://`，
+   而重型卡「本地目录模式」用的是 **`heavycard-local://<cardId>/index.html`**
+   ⇒ 本地卡换目录被判为 `unknown`「地址无法解析」，而非 `local`「本地文件夹路径已变更」。
+   修：`isFileUrl` 同时识别两种协议；补 3 条回归单测。
+
+### 🧪 验证
+
+- **真机探针 7/7**：卡打开、工具栏出现、C1/C2 视图切换、C4 状态条、**零 JS 异常**。
+- **C1/C2 计算 9/9**（真实数据形态）：4 天分组、最近 2 天展开、今日含 2 份、
+  降序排序正确、**占用等式 `6000000 + 9876543 = 15876543` 成立**、
+  `currentBytes` 为 null 时不计入且标记 `currentUnavailable`。
+- **C3 判定 5/5**：same / cross（域名、端口）/ local / unknown 全部符合预期。
+- `guard:scope` 105 文件 **0 违规**；`npm test` **1257 / 1257**（新增 3 条）；
+  `build:web` 成功；**主进程零改动**（本轮纯渲染层）。
+- 探针留档：`_probe-c1c2-logic.mjs`、`_probe-c1c2c4-ui.mjs`、`_probe-c3-urlchange.mjs`。
+- 未提交、未推送（待用户指令）。
+
+## 🔒 v2.4.5 · 阶段四：全量门禁 + 双库回归 + 零污染断言 （2026-10-25）
+
+### ✅ 门禁链（全绿）
+
+| 检查 | 结果 |
+| --- | --- |
+| `guard:scope` | 105 文件 · **0 未定义标识符** |
+| `npm test` | **1257 / 1257**（49 suites） |
+| `npm run build:web` | 成功 |
+| `check-doc-links` | 111 个 md · 530 条相对链接 **全部可解析** |
+| 主进程改动 | **仅 9 行**（G4 补 `reason` 字段，无 IPC 签名变化）；`preload.js` **零改动** |
+
+### 🧪 真库回归（`E:\AI\酒馆工具\角色卡`，111 个文件）
+
+- `_probe-qc-portrait`（质检画像 + AR-70 弹窗关闭）：**11 / 11**
+- `_probe-b1-tag-drafts`（标签回灌草稿）：**6 / 6** —— 真实库 241 标签 → **14 条候选**
+- `_probe-g1-model-overwrite`（模型名不被覆盖）：**8 / 8**
+- `_probe-a22-model-visible`（手填模型名可见）：**10 / 10**
+
+### 📊 大库回归（`I:\03\角色色卡`，11,614 张）
+
+| 项 | 结果 |
+| --- | --- |
+| `buildPortrait`（矩阵 + 池健康 + Token 分位） | **19.3 ms** |
+| `draftProfilesFromTags` | **0.6 ms** |
+| 画像矩阵行数 | 19 |
+| 草稿门槛自动抬升 | 50（`clamp(11614×2%, 5, 50)` 触发上界） |
+
+### 🔒 零污染断言
+
+- **卡片库 111 个文件 mtime 全部未变** —— 读操作零写入 ✅
+- `app_config.json` / `tavern_manager_config.json`：**SHA256 与测试前逐位一致** ✅
+- `scan_cache.json`：正常变化（G4 期间写入「已判定非世界书」的缓存记录）；
+  测试用的 `_g4test` 目录及缓存记录**已彻底清除（0 条残留）** ✅
+
+### 🐞 阶段四揪出的问题：探针自身缺陷（3 处，均非功能回归）
+
+1. **`_probe-g1` 与 `_probe-a22` 用 `document.querySelector('.fixed')` 定位弹窗** ——
+   页面上同时存在多个 `.fixed` 弹窗时（如实测中自动分组弹窗抢先），读到的是**无关弹窗**，
+   导致「模型名未被覆盖」「手填名可见」两项判为失败。**功能本身一直是好的**。
+   修：改为按内容锚定（`/API 引擎|模型名称|拉取模型/`）。
+2. **`_probe-g1` 的断言口径已过时**：AI-22 修复后手填值会进入候选，
+   文案走「在列表中」分支而非「不在列表中（已保留）」——两种都属正常，探针改为二选一，并保留
+   「未谎报『已自动选中』」这条真正的防线断言。
+3. **大库探针的调用签名写错**：`buildPortrait(library, deps, opts)` 是三参数，
+   初版误写成单对象 ⇒ `matrix` 恒为 null（假空态）。修正后矩阵正常产出 19 行。
+
+> 📌 教训：**探针报红不等于功能坏了**。断红后先看「断言在读哪个元素 / 期望哪种文案」，
+> 再判断是功能回归还是探针过时 —— 否则会把好功能改坏。
+
+### 📌 状态
+
+- 未提交、未推送（待用户指令）。
+- 测试环境已复原：删除了 `_g4test` 测试目录，`app_config.json` 从备份恢复至逐位一致。
+
+## 📖 v2.4.5 · 质检弹窗：新增「使用说明」页 + 去掉内部编号 S1~S5 （2026-10-25）
+
+### ① 去掉用户看不懂的内部编号（用户反馈）
+
+巡检清单的复选框原来写「S1 重新扫描卡库」「S2 查重扫描」…——**S1/S2 是内部步骤编号，对用户毫无意义**。
+改为纯动作名：
+
+| 原来 | 现在 |
+| --- | --- |
+| S1 重新扫描卡库 | 刷新卡库数据 |
+| S2 查重扫描 | 查重扫描 |
+| S3 标签分析 | 标签分析 |
+| S4 卡片质量巡检 | 卡片质量巡检 |
+| S5 世界书词条体检 | 世界书词条体检 |
+
+同步清理了其余 4 处编号泄露：
+- 「需要「S3 标签分析」」→「需要先做一次「标签分析」」
+- 「♻️ 复用 S4 结果」→「♻️ 复用「卡片质量巡检」的结果（未重复扫描）」
+- 「超过即计入 S4「Token 超阈值」」→「计入「卡片质量巡检」的 Token 超阈值」
+- `libraryPortrait.js` 导出报告正文里的「（复用 S4 结果）」→「（复用「卡片质量巡检」的结果）」
+
+> 代码内部的 `id: 'tags'` 等标识**未改动**，不影响任何逻辑与已存配置。
+
+### ② 新增「❓ 使用说明」
+
+- **入口**：标题栏右侧「❓ 说明」按钮 + 页签栏「❓ 使用说明」（两个入口指向同一页）。
+- **内容**：定位说明（全程只读）→ 五个检查项逐个解释（含「哪个步骤依赖哪个」）→
+  结构画像三个视角怎么读 → 推荐用法三步 → 常见疑问（跑很久是不是卡住 / 为什么画像是灰的 /
+  报告数字会不会变 / 会不会误删东西）。
+
+### 🐞 热测中发现并修掉的 2 个布局缺陷（自己引入）
+
+1. **底部工具栏串页**：底部「复制报告 / 导出 / 知道了」是常驻的，说明页也显示它 ⇒
+   既与说明页自带的「知道了，去巡检」重复，又把正文挤出可视区。改为 `v-if="activeTab !== 'help'"`。
+2. **画像区块漏到说明页**：画像区用的是 `<template v-else>`（=「不是清单页」），
+   加了说明页后说明页也满足「不是清单页」⇒ 说明页滚到底会**跟着出现 ①②③ 三个画像区块**。
+   改为 `v-else-if="activeTab === 'portrait'"`。
+
+> ⚠️ 教训：给「二分结构的页签」加第三个页签时，必须把 `v-else` 改成 `v-else-if="xxx === 'B'"`，
+> 否则新页签会同时渲染 B 的内容。
+
+### 🧪 验证
+
+- 真机探针 `_probe-qc-help-tabs.mjs`：**9 / 9**
+  （说明页有内容 · 无画像真实区块 · 无底部栏；画像页有矩阵 · 有底部栏 · 无说明内容；
+  清单页有检查项 · **无 S 编号** · 无画像区块）。
+- `guard:scope` 105 文件 **0 违规**；`npm test` **1257 / 1257**；`build:web` 成功。
+- 未提交、未推送（待用户指令）。
+
+---
+
+## 📂 v2.4.5 · 重型卡：补上「本地 HTML 卡」的导入入口（2026-10-25）
+
+> 用户实测反馈：「宣称支持本地 html 但没有找到如何导入的入口，来解决这个问题，加一本地问入口」。
+> 核实：`useHeavyCards.js` 里其实**已有** `addHeavyCardLocal()` 与 `setLocalRoot` IPC，
+> 但**侧栏只有一个「➕ 添加 <网址>」**，本地入口从未接到界面上 ⇒ 功能存在但用户找不到。
+
+### ✨ 改动
+
+- **侧栏重型卡区改成三按钮**：`🔗 网址`（新增远程卡） / `📂 本地`（新增本地 HTML 卡） / `🔄`（刷新）。
+  - 本地卡支持**选单个 .html 文件**与**选整个文件夹**两种模式（选文件时自动以其所在目录为根）。
+  - 空状态提示补一行：*「支持 网页链接 与 本地 HTML 两种卡；exe、apk 等本地程序暂不支持」*。
+- **`SidebarPanel.vue`**：新增 `addHeavyCardLocalFlow()`，按 `mode` 分派单文件/目录两条路径。
+- **`heavyCardHost()`**：`heavycard-local:` 协议显示为 **`📂 本地文件`**，不再暴露内部协议串。
+- **`normalizeHeavyCard` / `collectForConfig` 白名单补 `localDir` + `lastOpenUrl`**（成对维护，
+  历史多次因漏一侧导致重启后丢字段）。
+- **新增 `reRegisterLocalRoots()`**：`loadFromConfig` 后重新向主进程登记所有本地卡根目录
+  （主进程 `heavyCardLocalRoots` 是内存 Map，重启即空 ⇒ 不重登记会让本地卡打开 404）。
+- **`main.js` 新增 `heavycard:importLocalHtml` IPC** + `preload.js` 桥接。
+- **新增单测** `test/heavyCardLocalDir.test.mjs` **4 条**：钉住 `localDir` 在
+  `normalizeHeavyCard` 与 `collectForConfig` 两侧都不丢。
+
+### 🧪 验证
+
+- 真机探针：**22 / 22**（入口可见 · 三按钮齐 · 加入本地卡后列表出现 · 名称/来源正确）。
+- IPC 直连：**5 / 5**（选目录 / 选单文件 / 取消 / 非法路径 / 重复添加）。
+- `npm test` **1261 / 1261**（原 1257 + 4）；`guard:scope` **0 违规**；`build:web` 成功。
+
+---
+
+## 🩹 v2.4.5 · 热测修复：本地卡打不开 + 「已就绪」却一片空白（AR-71 ~ AR-74）（2026-10-25）
+
+> 用户连续两次实测反馈：①「已经确认无法加载」（本地卡）；②「其他的重型卡加载速度很慢有时候完全无反应」；
+> ③「问题加载成功为什么没有任何反应」。三个现象各自对应一个独立根因，累计修复 4 个缺陷。
+
+### 🔴 AR-71 · 本地 HTML 卡全部加载失败（自定义协议绑错 session）
+
+- **现象**：`loadURL` 直接 `ERR_FAILED (-2)`，卡页面停在 `about:blank`，
+  `body.length === 0`、`document.title === ""`、**零网络事件**；主进程**完全没有协议处理器日志**。
+- **根因**：`protocol.handle('heavycard-local', ...)` 只注册在 **`session.defaultSession`**。
+  而重型卡为了存档隔离，**每张卡都用独立 partition**（`persist:heavycard-<id>_g<N>`）⇒
+  该 session 上根本没有这个协议的处理器，请求必然失败。**不是路径问题、不是路径穿越、不是白名单问题**
+  （排查时先怀疑过 `heavyCardLocalRoots` 未登记，加了诊断日志后确认处理器「一次都没被调用」才锁定 session）。
+- **修复**：抽出 `heavyLocalHandler`，新增 `bindHeavyLocalProtocol(ses)`（`WeakSet` 记录已绑、幂等，
+  重复调用不报错）；`defaultSession` 绑一份便于预览，**每个新建 `WebContentsView` 的 session 各绑一份**
+  （`manager.js` 通过 `createHeavyViewManager({ bindProtocol })` 回调拿到 binder）。
+- **验证**：主进程日志由 `loadURL rejected ... ERR_FAILED (-2)` 变为 `loadURL resolved`；
+  卡页面 `body.length > 0`、能正常交互存档。
+
+### 🔴 AR-72 · 加载失败被误报成「已就绪」→ 用户看到一片空白
+
+- **现象**（用户原话「加载成功为什么没有任何反应」）：徽标「已就绪」，卡区域全白。
+  探针实测：`readyState: complete`、视口 `920×548` 正常，但
+  `document.body.innerHTML.length === 0`、`document.title === ""`、
+  `documentElement.outerHTML` 只剩 `<html><head></head><body></body></html>`；
+  `location` 在重载后变成 `chrome-error://chromewebdata/`。
+- **根因**：Chromium 在**主文档加载失败**时（`ERR_CONNECTION_TIMED_OUT` / `ERR_SSL_PROTOCOL_ERROR` 等）
+  **仍会触发 `did-stop-loading`**，而旧代码在该事件里**无条件**上报 `ready`。
+- **修复**：`did-stop-loading` 内改为**三项实证检查**后才判 ready ——
+  ① `wc.getURL()` 不是 `chrome-error://chromewebdata/`；
+  ② `executeJavaScript` 能正常执行（渲染进程未崩）；
+  ③ `document.body.innerHTML.length > 0`。
+  任一不满足即上报 `error` 并置 `entry.failedOnce`。
+- **顺带**：新增 `describeLoadError(code, desc)`，把 17 个常见 Chromium 错误码翻译成可读中文
+  （`-107` → 「对方网站的安全证书有问题（TLS 握手失败），通常是站点自身故障，与本软件无关」、
+  `-105` → 「域名解析失败」、`-118` → 「连接超时」等），错误层直接展示该文案；
+  无具体原因时给保底提示「可能是网络不通或对方站点无响应…点『重试』或『用浏览器打开』」。
+- **顺带修 AR-54 同型**：`heavyCardErrorText` 在 `HeavyCardWorkspace.vue` 的 `setup` 里**漏了解构**
+  （模板与 return 都写了，唯独 `const { ... } = ctx` 漏了）⇒ 启动即报
+  `[Vue 错误] heavyCardErrorText is not defined`。已补。
+
+### 🟠 AR-73 · 加载超时兜底被自身重置 → 「加载中」永不结束
+
+- **现象**：故障卡连续 30 秒以上一直显示「加载中」，25 秒超时兜底形同不存在。
+- **根因**：某些站点 TLS 握手失败后 Chromium 会**反复触发 `did-start-loading`**（内部重试），
+  而 `armLoadTimeout()` 每次都 `clearLoadTimeout()` 再重设 ⇒ 计时器永远差一点到期。
+- **修复**：`armLoadTimeout()` 改为「**已在计时就不重置**」（`if (loadTimer) return;`），
+  只有 `did-stop-loading` / 视图销毁才清空计时器。超时上报时同时置 `entry.failedOnce = true`。
+- **验证**：故障卡 **6 秒内**正确转为「加载失败 + 可读原因」；随后 Chromium 自行重试成功时
+  又能自愈回「已就绪」（保留原有的「可自愈」设计）。
+
+### 🟠 AR-74 · 失败后再点同一张卡毫无反应（复用分支不重载）
+
+- **根因**：`open()` 对已存在的视图只做「更新布局 + 恢复可见」，不再 `loadURL`
+  ⇒ 上次失败留下的空页面被原样保留，用户点卡看不到任何变化。
+- **修复**：`entry.failedOnce` 标记（`did-fail-load` / 超时 / 空内容时置位，`did-start-loading` 时清除），
+  `open()` 的复用分支检测到该标记就 `reloadIgnoringCache()`。
+- **顺带修**：`bindEvents(cardId, view)` 原来在 `entry` 创建**之前**调用 ⇒ 事件回调里
+  `entry.failedOnce` 写入的是 `undefined`。改为先建 `entry` 再 `bindEvents(cardId, view, entry)`。
+
+### 🧪 验证
+
+- `npm test` **1261 / 1261**；`guard:scope` 105 文件 **0 违规**；`build:web` 成功；源码版启动无 `[Vue 错误]`。
+- 真机 CDP 实测（源码版 Electron + 真实卡库 7 张卡）：
+  - 本地卡（绳墨导出）→ **已就绪**、页面有内容；
+  - 正常远程卡（宗门志）→ **已就绪**，`title: "无名掌门 · 宗门志"`、`body` **535,275 字符**、视口 `920×548`；
+  - 故障卡（`landlord.ericfu66.icu`，实测 TLS 被服务端 `ECONNRESET`、HTTP 80 返回 502）→
+    **6 秒内**转「加载失败 + 可读原因」，其后自行重试成功时自愈为「已就绪」；
+  - 故障卡（`zhangmen-seven.vercel.app` 断网时）→ 正确显示「加载失败」，不再假就绪。
+- **补充说明**：两张卡之所以失败，是**本机到这些境外站点的网络不通**（`ERR_CONNECTION_TIMED_OUT` /
+  TLS 握手被拒），**不是软件缺陷**；本次修的是「失败必须如实告知用户」的行为。
+- 未提交、未推送（待用户指令）。
+
+
 ## 🚀 v2.4.2 · 独立前端角色卡（新功能）+ 卡内面板渲染家族去根（CT-22~26）（2026-10-18）
 
 > 本轮来源：用户先要求「显示展示和方便管理的独立前端角色卡」，热测试抓修 6 轮 UI/行为缺陷，

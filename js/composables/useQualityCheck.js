@@ -19,17 +19,25 @@
 import { ref, reactive, computed } from 'vue';
 import { computeTagStats } from '../utils/tagStats.js';
 import { auditCards, DEFAULT_TOKEN_THRESHOLD } from '../utils/cardAudit.js';
+import { buildPortrait, portraitReportLines } from '../utils/libraryPortrait.js';   // 📊 结构画像（阶段二）
 
 /** 大库分片粒度：每 200 项让出一次（规格 §3.1） */
 export const CHUNK = 200;
 
-/** 步骤定义（顺序即执行顺序；`defaultOn` 为默认勾选态） */
+/**
+ * 步骤定义（顺序即执行顺序；`defaultOn` 为默认勾选态）
+ *
+ * ⚠️ 面向用户的文案里**不要出现 S1/S2/S3 这类内部编号**（用户明确反馈「看不懂、不该出现」）。
+ *    编号只保留在本文件的注释与代码 `id` 中，用于内部引用与报告定位；
+ *    界面标题一律用**人能读懂的动作名**。
+ *    报告里的定论文案（如「需要先做标签分析」）同样用动作名，不写编号。
+ */
 export const QC_STEPS = [
-    { id: 'rescan', title: 'S1 重新扫描卡库', desc: '保证数据新鲜（复用现有扫描）', defaultOn: true },
-    { id: 'dedupe', title: 'S2 查重扫描', desc: '复用现有查重（结果可在查重弹窗查看）', defaultOn: true },
-    { id: 'tags', title: 'S3 标签分析', desc: '无标签卡 / 覆盖率 / 单标签卡 / Top 榜', defaultOn: true },
-    { id: 'audit', title: 'S4 卡片质量巡检', desc: '简介空 / 无标签 / 开场白空 / Token 超阈值', defaultOn: true },
-    { id: 'wb', title: 'S5 世界书词条体检', desc: '范围 = 当前打开的书（空词条 / 孤儿 / 重复）', defaultOn: true }
+    { id: 'rescan', title: '刷新卡库数据', desc: '重新扫描一遍卡库，确保下面的检查都用最新数据', defaultOn: true },
+    { id: 'dedupe', title: '查重扫描', desc: '找出重复/高度相似的卡片（结果可在查重弹窗里细看）', defaultOn: true },
+    { id: 'tags', title: '标签分析', desc: '统计无标签卡、标签覆盖率、单标签卡与热门标签榜', defaultOn: true },
+    { id: 'audit', title: '卡片质量巡检', desc: '检查简介为空、没有标签、开场白为空、内容过大等问题', defaultOn: true },
+    { id: 'wb', title: '世界书词条体检', desc: '检查当前打开的世界书：空词条 / 孤儿词条 / 重复词条', defaultOn: true }
 ];
 
 /** 让出主线程（分片用；不依赖 setTimeout 精度，只要一个微/宏任务边界） */
@@ -41,6 +49,8 @@ export function useQualityCheck(deps = {}) {
     const library = deps.library || ref([]);
     const worldbooks = deps.worldbooks || ref([]);
     const activeWorldbook = deps.activeWorldbook || ref(null);
+    // 📊 结构画像需要对比「标签池」；未注入时按空池处理（画像的池健康度会提示「池为空」）
+    const systemCommonTags = deps.systemCommonTags || ref([]);
     const estimateCardTokens = deps.estimateCardTokens || null;
     const refreshLibrary = deps.refreshLibrary || null;
     const startSmartDedupe = deps.startSmartDedupe || null;
@@ -71,6 +81,37 @@ export function useQualityCheck(deps = {}) {
         const s = steps.value.find((x) => x.id === id);
         if (s) Object.assign(s, patch);
     };
+
+    // ── 📊 结构画像（阶段二 · 上游 Q1/Q2/Q11：作为本弹窗的第 2 个页签） ──────────
+    //   ⚠️ 刻意**不新建弹窗 / 不新增命令** —— 与质检共享同一份生命周期，
+    //      「未跑质检就点画像」不存在空态歧义（未跑时 readiness 全 false，UI 提示先跑质检）。
+    //   ⚠️ 必须**显式依赖** steps.value 与 library.value / systemCommonTags.value，
+    //      否则会重蹈 AI-16 / CT-02「computed 缺依赖 ⇒ 永远停在旧值」。
+    const portrait = computed(() => {
+        // 从已完成的步骤里取数据（S3 的 tagStats / S4 的 token 结果）
+        const s3 = steps.value.find((x) => x.id === 'tags');
+        const s4 = steps.value.find((x) => x.id === 'audit');
+        const tagStats = (s3 && (s3.status === 'done' || s3.status === 'cancelled') && s3.data) ? s3.data : null;
+
+        // S4 已跑 ⇒ 复用它的 token 结果，避免对 11k 库二次全量遍历（上游补充 3）
+        let tokenSample = null;
+        if (s4 && (s4.status === 'done' || s4.status === 'cancelled') && s4.data && s4.data.tokenSample) {
+            tokenSample = s4.data.tokenSample;
+        }
+
+        return buildPortrait(library.value || [], {
+            tagStats,
+            commonTags: systemCommonTags.value || [],
+            estimateCardTokens,
+            tokenSample
+        });
+    });
+
+    /** 画像是否已有可用数据（UI 用来决定显示「先跑质检」还是真图表） */
+    const hasPortrait = computed(() => {
+        const r = portrait.value && portrait.value.readiness;
+        return !!(r && (r.matrix || r.poolHealth || r.tokenStats));
+    });
 
     /** 打开弹窗（并把上一次结果留着，便于对照） */
     const openQualityCheck = () => { showQualityCheckModal.value = true; };
@@ -110,6 +151,9 @@ export function useQualityCheck(deps = {}) {
         const full = computeTagStats(items);   // 终值口径（与分片结果一致，取终值更直观）
         const topTags = [...acc.top.entries()].map(([tag, count]) => ({ tag, count }))
             .sort((a, b) => (b.count - a.count) || a.tag.localeCompare(b.tag)).slice(0, 15);
+        // 📊 阶段二：结构画像（标签×分组矩阵 / 标签池健康度）需要**全量** tagCounts。
+        //    `full.tagCounts` 是 Map，不能直接放进 report 数据（也便于探针 returnByValue），
+        //    ⇒ 转成数组随 data 一起传出；`buildPortrait` 两种形态都接受。
         return {
             status: 'done',
             summary: `共 ${full.total} 张卡：无标签 ${full.untagged} 张、覆盖率 ${full.coveragePct}%、单标签 ${full.singleTag} 张、标签种类 ${acc.top.size}`,
@@ -117,7 +161,12 @@ export function useQualityCheck(deps = {}) {
                 ...full.untaggedItems.slice(0, 50).map((x) => ({ kind: 'card', path: x.path, name: x.name, detail: '无标签' })),
                 ...topTags.map((t) => ({ kind: 'tag', name: t.tag, detail: `${t.count} 张卡`, tag: t.tag }))
             ],
-            data: { total: full.total, untagged: full.untagged, coveragePct: full.coveragePct, singleTag: full.singleTag, tagCount: acc.top.size, topTags }
+            data: {
+                total: full.total, untagged: full.untagged, coveragePct: full.coveragePct,
+                singleTag: full.singleTag, tagCount: acc.top.size, topTags,
+                // ⚠️ 画像专用：全量标签计数（`[[tag, count], ...]`，按 count 降序）
+                tagCounts: [...acc.top.entries()].sort((a, b) => (b[1] - a[1]) || String(a[0]).localeCompare(String(b[0])))
+            }
         };
     };
 
@@ -126,6 +175,9 @@ export function useQualityCheck(deps = {}) {
         const items = library.value || [];
         const merged = new Map();
         let scanned = 0;
+        // 📊 阶段二：顺手把每卡 token 收集起来，供「结构画像」复用，避免 11k 库二次全量遍历。
+        //    索引与 library 一一对应（分片遍历是顺序推进，所以 push 顺序 == 库顺序）。
+        const tokenSample = [];
         for (let i = 0; i < items.length; i += CHUNK) {
             if (cancelRequested.value) return { status: 'cancelled', summary: '已中止' };
             const part = items.slice(i, i + CHUNK);
@@ -136,6 +188,12 @@ export function useQualityCheck(deps = {}) {
                 for (const h of rule.hits) { if (m.hits.length < 50) m.hits.push(h); }
                 merged.set(rule.id, m);
             }
+            // 复用同一个估算函数（缺失时按 0，与 auditCards 内部口径一致）
+            for (const it of part) {
+                let t = 0;
+                try { t = Number(estimateCardTokens ? estimateCardTokens(it) : ((it && it._tokens) || 0)) || 0; } catch (e) { t = 0; }
+                tokenSample.push(t);
+            }
             scanned += part.length;
             if (i + CHUNK < items.length) await yieldToUi();
         }
@@ -145,7 +203,7 @@ export function useQualityCheck(deps = {}) {
             status: 'done',
             summary: `巡检 ${scanned} 张卡：${rules.map((r) => `${r.title} ${r.count}`).join(' / ')}（阈值 ${tokenThreshold.value} token）`,
             items: rules.flatMap((r) => r.hits.map((h) => ({ kind: 'card', path: h.path, name: h.name, detail: `${r.title}${h.detail ? ' · ' + h.detail : ''}` }))),
-            data: { total: scanned, totalHits, rules }
+            data: { total: scanned, totalHits, rules, tokenSample }
         };
     };
 
@@ -249,6 +307,16 @@ export function useQualityCheck(deps = {}) {
             }
             lines.push('');
         }
+        // 📊 结构画像三小段（上游 Q9：并入同一份 Markdown，不另做导出）
+        try {
+            const pl = portraitReportLines(portrait.value);
+            if (pl.length) {
+                lines.push('## 📊 结构画像');
+                lines.push('');
+                lines.push(...pl);
+                lines.push('');
+            }
+        } catch (e) { /* 画像摘要失败不影响主报告 */ }
         return lines.join('\n');
     };
 
@@ -280,6 +348,8 @@ export function useQualityCheck(deps = {}) {
         // 状态
         showQualityCheckModal, running, cancelRequested, steps, currentIndex, report,
         enabled, tokenThreshold, elapsedMs, elapsedSec: computed(() => (elapsedMs.value / 1000).toFixed(1)),
+        // 📊 结构画像（阶段二）
+        portrait, hasPortrait, systemCommonTags,
         // 动作
         openQualityCheck, closeQualityCheck: () => { showQualityCheckModal.value = false; }, run, cancel, locate, buildReport,
         // 常量透出（UI 用）

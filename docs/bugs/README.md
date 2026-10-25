@@ -23,7 +23,7 @@
 | `RL` | 发布 / 打包 / 更新 / OTA | [BUG-发布更新与打包.md](BUG-发布更新与打包.md) |
 | `CT` | 测卡工作区（对话测试） | [BUG-测卡工作区.md](BUG-测卡工作区.md)（27 条） |
 
-> **合计 191 条**（**AR 69** ｜ **DF 29** ｜ **AI 20** ｜ **PK 34** ｜ RL 13 ｜ **CT 27**）
+> **合计 195 条**（**AR 73** ｜ **DF 29** ｜ **AI 20** ｜ **PK 34** ｜ RL 13 ｜ **CT 27**）
 
 **等级**：🔴 严重（崩溃/数据丢失/功能不可用） ｜ 🟡 中（功能异常但有绕法） ｜ 🟢 轻（体验/精度/日志）
 **状态**：✅ 已修复 ｜ ⚠️ 已缓解未根除 ｜ ⬜ 未处理 ｜ 📌 设计如此 ｜ 🧩 非 BUG（缺口/取舍）
@@ -32,7 +32,7 @@
 
 ## 二、总表
 
-### AR · 架构 / 渲染 / 测试调试（69 条）
+### AR · 架构 / 渲染 / 测试调试（73 条）
 
 | ID | 等级 | 缺陷 | 版本 | 状态 |
 | --- | --- | --- | --- | --- |
@@ -105,6 +105,11 @@
 | AR-67 | 🔴 | **「隐藏工具栏」后恢复按钮点不到 → 卡死无法还原**（用户实测：「隐藏后就不能恢复了怎么滴」）。根因：重型卡是 **WebContentsView 原生图层**，它盖在 DOM 之上 —— CSS `z-index: 30` 对它无效，**鼠标点击也进不到 DOM**，恢复按钮虽可见却永远点不中。修：给 `setBounds` 增加 **`inset` 让位参数**（`{top,right,bottom,left}`），主进程 `applyLayout` 从视图矩形里扣掉让位区；渲染层按恢复按钮**实测矩形**动态算 inset（不写死像素），去重键也带上 inset（否则 rect 不变、inset 变了会被误判无变化而不上报）。实测：真实 `Input.dispatchMouseEvent` 点击恢复按钮 → 工具栏成功还原。⚠️ 纪律：**只要原生视图会盖住 DOM 浮层，就必须让位，不能靠 z-index** | v2.4.1 | ✅ |
 | AR-68 | 🟠 | **工具栏按钮过多 → `flex-nowrap` 向右溢出被裁**（用户截图「出现的遮挡问题」：「离线 / 浏览器」整块消失）。上一轮为修「换行压住缩放条」加了 `flex-nowrap`，但按钮总宽超过可用宽度时它只会让内容**溢出容器并被裁掉**，比换行更糟。修：改为**两行折叠结构** —— 第 1 行常驻高频操作（重新加载/备份/历史/全屏/窗口化/隐藏/▾更多），第 2 行折叠区（目录/清缓存/离线/浏览器/缩放，`v-show` 控制 + `flex-wrap` 兜底）；折叠切换后重新 `scheduleRect` 通知原生视图重排。实测 CDP：**900 / 1000 / 1100 / 1266px 四档宽度全部零溢出**。⚠️ 纪律：`flex-nowrap` 只能防换行，**不能防溢出**；按钮多就必须分组折叠 | v2.4.1 | ✅ |
 | AR-69 | 🔴 | **重型卡视图以 0×0 创建 → 渲染视口被永久钉死为 0（「角色卡渲染不到位」）**（用户实测）。现象：页面已加载（`document.title` 正确、`innerText` 有完整文字、无任何 JS 报错），但 `window.innerWidth/innerHeight === 0`、`scrollWidth/Height === 0`，整页**完全看不见**。根因：从侧栏点卡时 `<heavy-card-workspace>` 尚未渲染出占位框 ⇒ `openHeavyCard(card, null)` ⇒ rect 全 0 ⇒ `WebContentsView` 以 0×0 创建；**Chromium 会把渲染视口钉死，之后 `setBounds(920,593)` 也救不回来**（实测重发后 innerWidth 仍为 0）。修双保险：① 渲染层新增 `waitForHostRect()`，矩形无效时先 rAF 轮询等占位框量出尺寸（≤1.5s，超时兜底保证非 0）再 `open`；② 主进程 `entry.everSized` 标记 + `setBounds` 自愈：检测「从未拿到有效尺寸 + 本次有效」⇒ `destroy` 后用有效矩形重建视图（`cardForRebuild` 深拷贝留存）。实测：视口由 **0×0 → 920×594**，页面正常渲染。⚠️ 纪律：**`WebContentsView` / `BrowserView` 绝不能以 0 尺寸创建**，必须先有尺寸 | v2.4.1 | ✅ |
+| AR-70 | 🔴 | **Toast 层级 9999 盖住弹窗头部 →「✕ 关闭」点不到**：`ToastContainer` 容器 `z-index:9999` 远高于弹窗（项目内弹窗为 `z-100/110/120`），Toast 固定右上角正好压住关闭按钮 ⇒ 弹窗关不掉、无任何报错。实测 `elementFromPoint(关闭按钮中心)` 返回 `SPAN|✅`（Toast 图标）而非按钮。✅ 修：Toast 降至 `z-index:90`（高于普通内容、低于全部弹窗），并把**非交互 Toast** 改为 `pointer-events-none`（可点击的才 `auto`）。验证：命中测试返回 `BUTTON|✕ 关闭`（`isBtn:true`），点击后弹窗数 1→0。⚠️ 纪律：浮层一律 `pointer-events:none`，除非确实需交互且不覆盖任何按钮 |
+| AR-71 | 🔴 | **本地 HTML 卡全部加载失败**（用户实测「已经确认无法加载」）。现象：`loadURL` 直接 `ERR_FAILED (-2)`，卡页面停在 `about:blank`、`body.length === 0`、零网络事件，主进程**完全没有任何协议处理器日志**。根因：`protocol.handle('heavycard-local', ...)` 只注册在 **`session.defaultSession`**，而重型卡每张卡都用**独立 partition**（`persist:heavycard-<id>_g<N>`）⇒ 该 session 上没有处理器。修：抽出 `heavyLocalHandler` + `bindHeavyLocalProtocol(ses)`（幂等，`WeakSet` 记录已绑），`defaultSession` 绑一份、**每个新建 view 的 session 各绑一份**（manager 通过 `bindProtocol` 回调调用）。⚠️ 纪律：**自定义协议必须绑到实际承载页面的那个 session**，独立 partition 场景要逐 session 绑 |
+| AR-72 | 🔴 | **加载失败被误报成「已就绪」→ 用户看到一片空白**（用户实测「加载成功为什么没有任何反应」）。现象：徽标显示「已就绪」，但卡区域全白；`readyState: complete`、视口尺寸正常（920×548），而 `document.body.innerHTML.length === 0`、`document.title === ''`、`documentElement.outerHTML` 仅剩 `<html><head></head><body></body></html>`。根因：Chromium 在**主文档加载失败**时（`ERR_CONNECTION_TIMED_OUT` / `ERR_SSL_PROTOCOL_ERROR` 等）**仍会触发 `did-stop-loading`**，而旧代码在该事件里无条件上报 `ready`。修：`did-stop-loading` 内做**三项实证检查**再判 ready —— ① `wc.getURL()` 不是 `chrome-error://chromewebdata/`；② `executeJavaScript` 能正常执行（渲染进程没崩）；③ `document.body.innerHTML.length > 0`；任一不满足即上报 `error` + 中文原因。同时新增 `describeLoadError()` 把 17 个常见 Chromium 错误码翻译成可读中文（SSL 证书问题、域名解析失败、连接超时等）。⚠️ 纪律：**`did-stop-loading` ≠ 加载成功**，必须验内容 |
+| AR-73 | 🟠 | **加载超时兜底被自身重置 → 「加载中」永不结束**（用户实测「加载速度很慢有时候完全无反应」）。根因：某些站点 TLS 握手失败后 Chromium 会**反复触发 `did-start-loading`**（内部重试），而 `armLoadTimeout()` 每次都先 `clearLoadTimeout()` 再重设 ⇒ 计时器永远差一点到期，25 秒兜底形同虚设（实测连续 30s+ 仍显示「加载中」）。修：`armLoadTimeout()` 改为**「已在计时就不重置」**（`if (loadTimer) return;`），只有 `did-stop-loading` / 视图销毁才清空。实测：故障卡 **6 秒内**正确转为「加载失败 + 可读原因」，随后 Chromium 自行重试成功时又能自愈为「已就绪」。⚠️ 纪律：**重试型失败场景下，超时计时器绝不能随每次 start 重置** |
+| AR-74 | 🟠 | **失败后再点同一张卡无反应**（视图复用分支不重载）。根因：`open()` 对已存在的视图只做「更新布局 + 恢复可见」，不会重新 `loadURL` ⇒ 上次失败的状态与空页面被原样保留，用户点卡看不到任何变化。修：`entry.failedOnce` 标记（`did-fail-load` / 超时 / 空内容时置位，`did-start-loading` 时清除），`open()` 的复用分支检测到该标记就 `reloadIgnoringCache()`。⚠️ 纪律：**复用视图前必须先判断它上次是否失败** |
 
 ### DF · 数据 / 文件 / 字段口径（29 条）
 
@@ -164,6 +169,8 @@
 | AI-18 | 🟡 | 打标弹窗**深色主题浅底贴深底 / 深字压深底**（主题覆盖漏了 `slate-*` / `teal-*` 等 family，含存量块；用户实测反馈） | 未发布（本轮） | ✅ |
 | AI-19 | 🔴 | **思维链再次进标签**（用户实测「把我一大堆思维链提取出来了」）—— 病灶在**第③层兜底**：`sanitizeTagList` 只按「空 / 纯数字 / > 40 字」过滤，**无标记的纯文本推理**（顿号/逗号/换行切成 ≤40 字的句子片）被整段当标签 `ok=true` 返回（实测 7/7 条全是推理）；AI-09 修的是**带标记**的思维链、AI-10 修的是预填充拼接，都拦不住这一类。修：剥 ```` ```think ```` 围栏类无标记推理块 + 层③改**逐行取候选**（推理段落不以 `、，,` 结尾 ⇒ 整行丢弃）+ `sanitizeTagList` 新增**推理特征判据**（换行 / 句末标点 / ≥2 个同类标点 / 推理特征开头且剩余 ≥4 字 / 句特征）+ **残留占比 ≥30% 直接判失败**（宁缺毋滥，绝不写盘）+ 非 llmOnly 链路与 llmOnly 收口同一解析出口 | 未发布（本轮） | ✅ |
 | AI-20 | 🔴 | **`{{世界书}}` 占位符取不到正文**（用户实测「无法引用世界书的内容，是空的」）：`buildVarsFromParts` 的 `wb` 只认材料段 `key='wb'`，而该段**只在世界书打标链路产生** —— 卡片打标链路（`buildCardPromptParts`）只有 `card` 段、`buildCardMaterial` 只取描述/首句/性格 ⇒ **卡内嵌世界书（`character_book`）从未被纳入任何材料来源**，卡片视图下 `{{世界书}}` 恒替换成空串。真库取证：**93 张可解析卡里 78 张带内嵌世界书**（4755 条 / 798 万字）⇒ 不是边角场景，是**能力缺口**（方案落地时只做了「世界书库」侧，卡内嵌被列进封存件）。⚠️ 修的过程被真机打回两次：**① 卡的数据层有两层，`character_book` 在 `item.data.data.character_book`**（只探一层会命中卡片外层 data ⇒ 拿到「书名 + 词条数：0」，还是空）；**② `isWbBodyLoaded` 是库口径、判卡恒判「未载入」**。修：`resolveWbBook()`/`resolveWbEntries()`/`hasEmbeddedBook()`/`isEmbeddedBodyLoaded()`（三层形态 + 内嵌口径正文判据）+ 逻辑键 `embeddedWb`（`{{世界书}}` 在卡片视图回退到卡内嵌书）+ `splitPartsByVars` 支持 `optional` 段（**点名才发送**，不给普通打标白灌几十万字）+ 预览 `🌍 未引用 · 不发送` 角标 + 教程/图例同步。验证：真实卡《珠矶》`{{世界书}}` 展开 **42367 字**、`used=['wb']`、预览段字数为 42367 | 未发布（本轮） | ✅ |
+| AI-21 | 🔴 | **拉取模型列表静默覆盖用户已填模型名**（`#hot-bug-1`）：`useChat.js:93-94` 无条件 `apiModel.value = modelList[0]` 且零校验（`"当前无可用模型"` 这类垃圾串能通过 `.filter(Boolean)`）⇒ 用户填好的模型名被改写并经 `syncConfigToDisk()` **落盘**，此后打标/测卡全失败且看不出原因。修：新增 `js/utils/modelId.js::isLikelyModelId`（长度 2~128、允许 `@+`、排除提示语/纯数字）+ **原值非空绝不覆盖**（仅空值时自动填首项）+ 过滤后为空则保留原值并如实提示 | 未发布（本轮） | ✅ |
+| AI-22 | 🟡 | **手填模型名在拉取后「从界面消失」**：`ApiSettingsModal.vue:36-39` 用 `v-if="availableModels.length>0"` 把 input 换成 select，而 select 的 option 只来自服务端返回 ⇒ `apiModel` 不在列表时**当前值渲染不出来**（底层值仍保留，探针实测状态文案回显正确）。用户易误判「配置被清空」。建议：select 里额外插入当前值项（`{{ apiModel }}（自定义）`）或上方常显「当前：X」 | 未发布（本轮） | ✅ |
 
 ### PK · 性能 / 大库 / 内存 / 索引（34 条）
 
