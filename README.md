@@ -1,6 +1,7 @@
-# 🎴 SillyTavern 角色卡管理器
+# 🎴 SillyTavern 资源管理器
 
-> 本地桌面版 SillyTavern 角色卡高级解析与管理中心 —— 让几千张角色卡井井有条。
+> 本地桌面版 SillyTavern 资源管理工具 —— 角色卡 / 世界书 / 预设 / 插件，
+> 以及**酒馆本身的安装、升级、启停、卸载**，都在这里管。
 > 完全离线可用（前端依赖已本地化），支持 OTA 静默自动更新。
 
 ---
@@ -42,8 +43,9 @@
 
 ## 🚀 项目简介
 
-本项目是一个面向 **SillyTavern（酒馆）** 玩家的本地角色卡管理工具，用于解决「卡片一多就乱」的核心痛点：
+本项目是一个面向 **SillyTavern（酒馆）** 玩家的本地管理工具，用于解决「卡片一多就乱」的核心痛点：
 
+- 🛠️ **酒馆本体管理**：一键安装 / 自动查找已装位置 / 升级 / 启停 / 环境体检 / 两档卸载
 - 批量导入 / 解析 **PNG / JSON / WebP / JPEG** 格式的角色卡（兼容 `chara_card_v1 / v2 / v3` 规范）
 - 深度检索：名称、作者、简介、世界书条目、触发词、标签、**物理文件名/路径**全维度全文搜索
 - 在线编辑卡片：基础设定、世界书（增删改 / 折叠 / 排序）、正则脚本、聊天测卡
@@ -78,7 +80,8 @@
 
 | 模块 | 说明 |
 |------|------|
-| 📂 卡片库 | 文件夹导入、自动分类、多选勾选、Ctrl/Shift 连选、右键快捷菜单、**列表/网格双视图 + 常规/紧凑双密度**、**9 种排序方式**（导入最新/本地文件最新/A-Z 正序·倒序/修改时间/创建时间/大小正·倒序/Token，中文拼音+数字自然排序，稳定键链防乱飘） |
+| �️ 酒馆安装与维护 | 一键安装桌面版酒馆（codeload 下载 + 系统自带 `bsdtar` 解压 + `npm install`，缺 Node 走 winget 自动补）、🔍 自动查找本机已装位置、🩺 环境体检 10 项、🎯 检查更新（远程版本对比，已最新则置灰）、升级（自动备份并保留本地改动）、启动/停止、两档卸载（含注册表按 Publisher 校验，自动跳过浏览器 PWA） |
+| �📂 卡片库 | 文件夹导入、自动分类、多选勾选、Ctrl/Shift 连选、右键快捷菜单、**列表/网格双视图 + 常规/紧凑双密度**、**9 种排序方式**（导入最新/本地文件最新/A-Z 正序·倒序/修改时间/创建时间/大小正·倒序/Token，中文拼音+数字自然排序，稳定键链防乱飘） |
 | ⚙️ 预设管理 | **全新预设引擎**：加载酒馆预设目录、搜索、批量导出；脚本/正则分区在线编辑、沙箱 iframe 渲染预览；重命名/复制/回收站 |
 | 🔍 超级搜索 | 全字段穿透检索（含备选开场白、深度提示词、正则脚本、**世界书全部词条**、**物理文件名/路径**）、多关键词 AND、`tag:`/`author:`/`file:`/`wb:` 高级前缀语法、`-排除`、300ms 防抖 |
 | 🔎 全库词条搜索 | 一次性检索**全部独立世界书 + 全部角色卡内嵌词条**（触发词/次级词/备注/正文），点击直达并高亮 |
@@ -102,8 +105,18 @@
 | 🛡️ 安全机制 | 主进程路径白名单、`app://` 协议 + CSP、DOMPurify XSS 清洗、符号链接环路防护、原子写入、崩溃兜底日志 |
 | 🌐 离线可用 | 前端依赖经 Vite 构建全部打包进产物，无网络也能完整运行 |
 
-### 📌 近期版本要点（v2.2.x）
+### 📌 近期版本要点
 
+- **v2.5.0** —— 🛠️ **新增「酒馆安装与维护」**（工具菜单进入）：
+  一键安装桌面版酒馆（自动补齐 Node、自选安装位置、装完可直接启动）、
+  🔍 自动查找本机已装酒馆（多盘分层扫描，只认 `server.js`+`public` 等硬指纹）、
+  🩺 环境体检（程序文件/Node/依赖/配置/数据/端口/磁盘/git/运行 共 10 项，每项给具体数值与修法）、
+  🎯 检查更新（对比远程版本，**已是最新版时按钮直接置灰**，不再出现「点完还能再点一次升级」）、
+  升级时会自动备份并保留本地改动（扩展注入的 `index.html` 改动不会再让升级失败）、
+  卸载分两档（只删酒馆 / 彻底删除，均需手输 `DELETE`，且自动跳过浏览器装的 PWA）。
+  另：**插件预览改为真实 ESM 加载**（宿主桩由真实酒馆源码自动生成），白屏/报错大幅减少；
+  插件支持从 GitHub 链接直接安装。**产品更名为「SillyTavern 资源管理器」**
+  （`appId` 与 `package name` 均未变，老用户可原地升级、数据不丢）。
 - **v2.4.2** —— 新增「🎬 独立前端角色卡」：把自带网页界面的卡直接装进软件里展示与游玩，支持一键备份/定时自动备份、存档打包带走、全屏与窗口化、离线模式、本地文件夹；另修复卡内界面被误判成文字、显示成空白框、排版标记原样露出等问题。
 - **v2.4.1** —— 修复打标教程里「照抄这一整行」内容框**空白**（点复制也是空）的问题；现在 6 处复制框全部正常显示与复制。
 - **v2.4.0** —— 主要修「打标」这条线 + 教程重写：①**`{{世界书}}` 在卡片视图能取到「这张卡自带的世界书」**（以前只有世界书库那边的书能引用，卡片自带设定读不到，占位符换出来是空的）；②**打标不再把 AI 的「思考过程」当标签写进卡**（这类内容会被判为失败并给出可操作提示）；③**右键菜单支持 `Esc` 关闭**；④顶部导入框恢复只认角色卡格式；⑤AI 打标窗口「API 兼容」下拉修复；⑥未选卡点「AI 打标」会弹提示指路；⑦「自定义模式」教程从头重写（零基础照做 + 填好的示例 + 改一处看结果的对照 + 排错清单）。
@@ -203,11 +216,11 @@ npm run build
 > npx electron-builder --win nsis --config.electronDist="$(Resolve-Path node_modules\electron\dist)"
 > ```
 
-产物输出到 `dist/`：
+产物输出到 `dist_new/`：
 
-- `dist/win-unpacked/` —— 免安装绿色版（可压缩为 zip 分发）
-- `dist/sillytavern-card-manager-2.4.6.exe` —— NSIS 安装包
-- `dist/latest.yml` —— **OTA 更新必需**（与 exe 一起上传 GitHub Release）
+- `dist_new/win-unpacked/` —— 免安装绿色版（可压缩为 zip 分发）
+- `dist_new/sillytavern-card-manager-2.5.0.exe` —— NSIS 安装包
+- `dist_new/latest.yml` —— **OTA 更新必需**（与 exe 一起上传 GitHub Release）
 
 ---
 
@@ -240,10 +253,10 @@ npm run build
 │       ├── cardLoader.js   # 卡片读取、数据规范化（V1/V2/V3 兼容）、extractBookEntries 安全提取
 │       ├── pngParser.js    # PNG/WebP tEXt/iTXt 块解析、深度扫描提取 JSON
 │       └── tokenEstimate.js# Token 估算工具（App 与 TextModal 共享）
-├── test/                   # node:test 单元测试（1026 用例 / 71  个文件）
+├── test/                   # node:test 单元测试（1476 用例）
 ├── build/                  # 打包资源（icon.ico、generate-icon.ps1）
 ├── web/                    # Vite 构建产物（gitignore）
-└── dist/                   # electron-builder 打包产物（gitignore）
+└── dist_new/               # electron-builder 打包产物（gitignore）
 ```
 
 ---
@@ -393,6 +406,42 @@ npm install <包名>
 
 ⚠️ 依赖安装到 `node_modules` 会自动参与 Vite 打包；若需在渲染进程直接 `import`，请确认其可被 Vite 正确处理（或配置 `resolve.alias`）。
 
+### 13. `build.files` 是白名单 —— 主进程新增 `require` 必须同步
+
+`package.json` 的 `build.files` 只有**列进去的文件**才会进 `app.asar`。
+主进程（`main.js` / `main/**/*`）新增一个 `require('./js/utils/xxx.js')` 时，
+如果白名单没覆盖到，**源码版一切正常**（磁盘上文件都在），
+但装完包一启动就 `Cannot find module`，主进程直接崩、软件打不开。
+
+✅ **纪律**：主进程依赖一律**按目录通配**收录（如 `js/utils/**/*`），
+**禁止逐个文件列** —— 漏一个就是启动崩溃（v2.5.0 真实踩过）。
+
+✅ **发版前必跑**：
+
+```powershell
+node scripts/check-asar-completeness.mjs
+# 解析主进程全部相对 require，逐条核对 app.asar 条目；
+# 缺失即列出「哪个文件 require 什么」并以退出码 1 阻断发版
+```
+
+### 14. `<transition>` 离场卡死会留下「隐形遮罩」
+
+`<transition name="fade">` 包裹的弹窗，如果离场过渡的 `transitionend`
+没触发（如起始态与终态 opacity 相同），Vue 会**永远停在 `*-leave-*` 阶段**，
+节点不卸载。此时元素 `opacity: 0`（肉眼看不见）却 `pointer-events: auto`，
+把整个界面的点击全吞掉 —— 用户感知是「点什么都没反应」，且看不出任何异常。
+
+✅ 全局过渡改用 **CSS `animation`**（`animationend` 由时间驱动，必定触发），
+并给所有 `*-leave-active` 加 **`pointer-events: none`** 兜底。
+
+✅ 排查手法：数一下 `div.fixed.inset-0` 的残留数量，看有没有 `-leave-` class：
+
+```js
+[...document.querySelectorAll('div')]
+  .filter(d => /fixed/.test(d.className) && /inset-0/.test(d.className))
+  .map(d => ({ cls: d.className, pe: getComputedStyle(d).pointerEvents }));
+```
+
 ---
 
 ## 🛡️ 数据与安全机制
@@ -473,7 +522,7 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File "build\generate-icon.ps1"
    ```
 6. **上传资产（exe + latest.yml 必须同传）**：
    ```powershell
-   gh release upload vX.Y.Z "dist\sillytavern-card-manager-X.Y.Z.exe" "dist\latest.yml" "dist\sillytavern-card-manager-X.Y.Z.exe.blockmap" "dist\SillyTavern.zip" --repo tian2418671-sys/JSKZX
+   gh release upload vX.Y.Z "dist_new\sillytavern-card-manager-X.Y.Z.exe" "dist_new\latest.yml" "dist_new\sillytavern-card-manager-X.Y.Z.exe.blockmap" "dist_new\sillytavern-card-manager-X.Y.Z.zip" --repo tian2418671-sys/JSKZX
    ```
 7. 覆盖发布同版本时：先 `gh release delete-asset` 删同名旧资产，再 `gh release upload ... --clobber` 上传
 8. 验证 OTA 链路：
@@ -548,7 +597,7 @@ nativeAlert('保存成功', 'info');                   // type 仅支持 none/in
 ### 提交前自查清单
 
 - [ ] `node --check` / `get_errors` 无语法错误
-- [ ] `npm test` 单测全绿（965 用例）
+- [ ] `npm test` 单测全绿（1476 用例）
 - [ ] 新增成员已加入 `setup()` 的 `return` 与 `ctx`
 - [ ] IPC 传参已 `JSON.parse(JSON.stringify(...))` 剥离 Proxy
 - [ ] 未引入外部 CDN / 未使用 `prompt`/`confirm`/`alert` / 未对 `cardData` 深层响应式
