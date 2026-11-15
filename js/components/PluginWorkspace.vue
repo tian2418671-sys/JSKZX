@@ -132,7 +132,10 @@
 <script>
 import { inject, ref, computed, watch } from 'vue';
 import { resolvePreviewAssets } from '../utils/pluginScanner.js';
-import { buildPluginPreviewHtml } from '../plugins/hostStub.js';
+import { buildPluginPreviewHtml, rewritePluginResourcePaths } from '../plugins/hostStub.js';
+import { classifyPlugin, PLUGIN_KIND, pluginKindLabel } from '../plugins/pluginClassify.js';
+import { buildThemePreviewHtml } from '../plugins/themePreview.js';
+import { renderCapabilityCard, capabilityCardCss } from '../plugins/capabilityCard.js';
 import CodeEditor from './CodeEditor.vue'; // 🧩 轻量代码编辑器（CodeMirror 封装：语法高亮+行号）
 import AiCodeModal from './AiCodeModal.vue'; // 🤖 AI 代码定位/修改对话窗
 
@@ -152,6 +155,12 @@ export default {
         const pluginDirty = ctx.pluginDirty;          // 代码页未保存脏标记（App.vue 共享，防误切换丢改动）
         const savingPlugin = ctx.savingPlugin;        // 保存中状态（防重复点击）
         const previewState = ref({ url: null, error: null, loading: false });
+// 🧭 插件分类结果（主题 / 后台逻辑 / 界面脚本 / 扩展工程）——「效果」页顶栏展示
+const pluginKindInfo = ref(null);
+const pluginKindText = computed(() => {
+    const k = pluginKindInfo.value && pluginKindInfo.value.kind;
+    return k ? pluginKindLabel(k) : '';
+});
         const showAiModal = ref(false);              // 🤖 AI 对话窗开关
 
         // 🤖 让 AiCodeModal 能读到当前代码（扩展工程=选中文件源码；脚本类=脚本 content）
@@ -183,6 +192,7 @@ export default {
         const pluginKindLabel = (p) => {
             if (!p) return '';
             if (p.kind === 'extension') return '扩展工程';
+            if (p.kind === 'theme') return '主题';
             if (p.kind === 'slash') return '命令';
             if (p.kind === 'userscript') return '用户脚本';
             return '酒馆助手';
@@ -191,11 +201,12 @@ export default {
         const pluginKindHint = (p) => {
             if (!p) return '';
             if (p.kind === 'extension') return '扩展工程 · bundle 整包加载';
+            if (p.kind === 'theme') return 'UI 主题 · 纯配色配置';
             if (p.scriptKind === 'B') return 'userscript 头 · jQuery 注入';
             if (p.scriptKind === 'C') return 'SlashRunner 命令 · 依赖 JS-Slash-Runner';
             return 'jQuery 注入脚本';
         };
-        const scriptKindLabel = (k) => ({ A: 'jQuery 注入', B: 'userscript', C: '命令', bundle: 'bundle' })[k] || k;
+        const scriptKindLabel = (k) => ({ A: 'jQuery 注入', B: 'userscript', C: '命令', bundle: 'bundle', theme: '主题' })[k] || k;
 
         // 扩展工程文件树：绝对路径 → 相对路径 + 图标
         const relativeFiles = computed(() => {
@@ -272,22 +283,79 @@ export default {
             previewState.value = { url: null, error: null, loading: true };
             try {
                 let html = '';
-                if (p.kind === 'extension') {
-                    const assets = resolvePreviewAssets(p);
-                    const bundleJs = [];
-                    const bundleCss = [];
-                    // 🧩 扩展模板收集：工程内所有 .html 按相对 manifest 根的 POSIX 路径注入 __jskTemplates，
-                    //    宿主 renderExtensionTemplate/Async 据此做 Handlebars 渲染（对齐酒馆 scripts/extensions/<ext>/<id>.html）。
-                    const templates = {};
-                    const root = (p.source && p.source.origin) || '';
-                    for (const abs of (p.files || [])) {
-                        const low = String(abs).toLowerCase();
-                        if (!low.endsWith('.html') && !low.endsWith('.htm')) continue;
-                        let rel = abs;
+                // 🗂️ 先算插件根目录：真实 ESM 加载时，浏览器会向
+                //    app://…/__jsk_plugin_res__/<id>/<相对路径> 请求模块文件，
+                //    主进程必须**此时**就知道 rootDir，否则一律 404。
+                //    （旧实现是最后才登记 rootDir，导致「分配 id 后立即 fetch 模块」必然失败。）
+                const pluginRootRawEarly = (p.kind === 'extension')
+                    ? ((p.source && p.source.origin) || '')
+                    : String((p.source && (p.source.dir || p.source.origin)) || '');
+                // 🗂️ 先让主进程分配预览 id：插件内的相对资源路径要改写成「带 id 的代理 URL」，
+                //    否则图片/字体/样式会被解析到应用根目录 ⇒ 404（用户实测「资源加载不出来」）。
+                    const idRes = await window.electronAPI.setPluginPreview('', { reserveId: true, rootDir: pluginRootRawEarly });
+                if (!idRes || !idRes.success || !idRes.id) throw new Error('预览 id 分配失败');
+                const previewId = idRes.id;
+
+                    // 🧭 先分类：主题类 / 纯逻辑类不走脚本沙箱（走各自的专用视图）
+                    const cls = classifyPlugin(p);
+                    pluginKindInfo.value = cls;
+                    console.log('[plugin-preview] 分类=', cls.kind, '|', cls.reason);
+
+                    // ① UI 主题：把配色 JSON 映射成 CSS 变量，渲染静态示意页（不跑任何脚本）
+                    if (cls.kind === PLUGIN_KIND.THEME) {
+                        // 扫描阶段已把原始配色挂在 themeData 上；兜底才去解析 content
+                        let themeObj = (p.themeData && typeof p.themeData === 'object') ? p.themeData : null;
+                        if (!themeObj) {
+                            try {
+                                themeObj = typeof p.content === 'string' ? JSON.parse(p.content) : null;
+                            } catch (e) { themeObj = null; }
+                        }
+                        if (!themeObj) {
+                            const s0 = (p.scripts || [])[0];
+                            if (s0 && s0.content) {
+                                try { themeObj = JSON.parse(s0.content); } catch (e) { themeObj = null; }
+                            }
+                        }
+                        html = buildThemePreviewHtml(themeObj || {}, { name: p.name });
+                        const res = await window.electronAPI.setPluginPreview(html, { reuseId: previewId });
+                        if (!res || !res.success) throw new Error((res && res.error) || '预览登记失败');
+                        previewState.value = { url: res.url, error: null, loading: false };
+                        return;
+                    }
+
+                    // ② 纯逻辑插件：**仍然先跑沙箱**（上游 Q5 拍板：透视卡绝不阻止渲染）。
+                    //    只是把「能力说明书」预先算好挂在分类结果上，由 hostStub 在
+                    //    2 秒空白自检时展示 —— 避免「本来有界面但没跑出来」的插件被误杀。
+                    if (cls.kind === PLUGIN_KIND.LOGIC) {
+                        try {
+                            pluginKindInfo.value = {
+                                ...cls,
+                                capHtml: renderCapabilityCard(p),
+                                capCss: capabilityCardCss(),
+                            };
+                        } catch (e) {
+                            console.warn('[plugin-preview] 能力卡生成失败', e);
+                        }
+                    }
+
+                    if (p.kind === 'extension') {
+                        const assets = resolvePreviewAssets(p);
+                        const bundleJs = [];
+                        const bundleCss = [];
+                        // 🧩 扩展模板收集：工程内所有 .html 按相对 manifest 根的 POSIX 路径注入 __jskTemplates，
+                        //    宿主 renderExtensionTemplate/Async 据此做 Handlebars 渲染。
+                        const templates = {};
+                        const root = (p.source && p.source.origin) || '';
+                        for (const abs of (p.files || [])) {
+                            const low = String(abs).toLowerCase();
+                            if (!low.endsWith('.html') && !low.endsWith('.htm')) continue;
+                            let rel = abs;
                         if (root && abs.startsWith(root)) rel = abs.slice(root.length).replace(/^[/\\]+/, '');
                         rel = String(rel).replace(/\\/g, '/');
                         const res = await window.electronAPI.readPluginFile(abs);
-                        if (res && res.success && typeof res.data === 'string' && res.data) templates[rel] = res.data;
+                        if (res && res.success && typeof res.data === 'string' && res.data) {
+                            templates[rel] = rewritePluginResourcePaths(res.data, previewId);
+                        }
                     }
                     for (const f of assets.js) {
                         const res = await window.electronAPI.readPluginFile(f);
@@ -297,17 +365,45 @@ export default {
                         const res = await window.electronAPI.readPluginFile(f);
                         if (res && res.success && res.data) bundleCss.push(res.data);
                     }
-                    if (bundleJs.length === 0 && bundleCss.length === 0) {
-                        throw new Error('未找到可运行的 bundle 资源（js/css）。');
+                    // 🧩 不再收集/改写源码模块表。
+                    //    改用**真实 ESM**：由 manifest 声明入口，浏览器自己解析整棵依赖树。
+                    //    这样 test/、dev/、src/(TS)、vite.config 等永远不会被加载，
+                    //    也不需要为「源码工程 vs 构建工程」写任何判定规则。
+                    //    —— 这正是之前反复打补丁（顶层 await / NOOP / 误收 dev）的根治办法。
+                    const entryRel = (() => {
+                        const first = (assets.js || [])[0];
+                        if (!first) return '';
+                        let r = first;
+                        if (root && first.startsWith(root)) r = first.slice(root.length).replace(/^[/\\]+/, '');
+                        return String(r).replace(/\\/g, '/');
+                    })();
+                    console.log('[plugin-preview] 扩展资源:',
+                        'assets.js=' + JSON.stringify(assets.js),
+                        'assets.css=' + JSON.stringify(assets.css),
+                        'bundleJs=' + bundleJs.length,
+                        'bundleCss=' + bundleCss.length,
+                        'entry=' + (entryRel || '(空)'));
+                    // 真实 ESM 模式下，只要 manifest 声明了入口就不算「无脚本」——
+                    // 入口文件由浏览器自行下载，不依赖我们预读的内容。
+                    if (!entryRel && bundleJs.length === 0 && bundleCss.length === 0) {
+                        throw new Error(`无法定位可运行脚本：manifest 未声明 js/style 入口，也未读到 bundle（assets.js=${JSON.stringify(assets.js)}）。`);
                     }
-                    html = buildPluginPreviewHtml(p, { bundleJs, bundleCss, templates });
+                        html = buildPluginPreviewHtml(p, { bundleJs, bundleCss, entry: entryRel, templates, previewId, capability: pluginKindInfo.value && pluginKindInfo.value.capHtml ? pluginKindInfo.value : null });
                 } else {
                     const hasContent = (p.scripts || []).some(s => s.content && s.content.trim());
-                    if (!hasContent) throw new Error('插件没有可运行的脚本内容。');
-                    html = buildPluginPreviewHtml(p);
+                    if (!hasContent) throw new Error('插件没有可运行的脚本 内容。');
+                    html = buildPluginPreviewHtml(p, { previewId, capability: pluginKindInfo.value && pluginKindInfo.value.capHtml ? pluginKindInfo.value : null });
                 }
                 // 🧩 预览 HTML 存主进程内存，取独立 app:// URL（内联脚本不再被父页 CSP 拦截）
-                const res = await window.electronAPI.setPluginPreview(html);
+                //    rootDir：插件根目录，供资源代理读取插件内图片/字体/样式
+                const pluginRootRaw = (p.kind === 'extension')
+                    ? ((p.source && p.source.origin) || '')
+                    : String((p.source && (p.source.dir || p.source.origin)) || '');
+                const pluginRoot = pluginRootRaw
+                    ? (p.kind === 'extension' ? String(pluginRootRaw) : String(pluginRootRaw).replace(/[\\/][^\\/]*$/, ''))
+                    : '';
+                console.log('[plugin-preview] rootDir=', pluginRoot || '(空)', '| previewId=', previewId);
+                const res = await window.electronAPI.setPluginPreview(html, { rootDir: pluginRoot, reuseId: previewId });
                 if (!res || !res.success) throw new Error((res && res.error) || '预览登记失败');
                 previewState.value = { url: res.url, error: null, loading: false };
             } catch (e) {
@@ -315,12 +411,17 @@ export default {
             }
         };
 
-        // 切换插件时重置选项卡与预览（选中文件由侧边栏子条目/代码页文件树显式管理，
+        // 切换插件时重置预览缓存；选中文件由侧边栏子条目/代码页文件树显式管理，
         // 不在此重置，避免覆盖「侧边栏子条目点击 → 定位到代码页对应文件」的选中状态）
-        watch(activePlugin, () => {
-            pluginTab.value = 'code';
+        // ⚠️ 关键：重置后若用户**正停在「效果」页**，必须立即重建，否则 previewState
+        //    停在 {url:null, error:null} 的空状态，模板会显示默认文案
+        //    「无法预览：插件无可运行脚本。」—— 看起来像构建失败，其实根本没开始构建。
+        //    （用户实测反馈的正是这一条。）
+        watch(activePlugin, (next) => {
+            const wasOnEffect = pluginTab.value === 'effect';
             pluginDirty.value = false;
             previewState.value = { url: null, error: null, loading: false };
+            if (next && wasOnEffect) buildPreview();
         });
 
         return {

@@ -20,8 +20,15 @@ function chatHostBundle() {
   let outDir = 'web';
   let isServe = false;
 
-  async function bundle(outFile) {
-    const entry = path.resolve(root, 'js/chatHost/iframeGlobals.js');
+  /**
+   * 打一个 IIFE 全局环境包
+   * @param {string} entryRel 入口文件（相对 root）
+   * @param {string} fileName 产物文件名（vendor/ 下）
+   * @param {string} tag 日志前缀
+   * @param {object} [define] 编译期常量（打 Vue 时必须给，否则落到 dev 版）
+   */
+  async function bundleOne(outFile, entryRel, tag, define) {
+    const entry = path.resolve(root, entryRel);
     try {
       const b = await rolldown({
         input: entry,
@@ -29,23 +36,43 @@ function chatHostBundle() {
         // ⚠️ Vue 的 esm-bundler 构建依赖这几个编译期开关（浏览器里没有 process）：
         //    必须写在 `transform.define` 下 —— 顶层 `define` 会被 rolldown 判为无效键直接忽略，
         //    结果是 NODE_ENV 落到 "development"（打进 dev 版 Vue、体积大、还带告警）。
-        transform: {
-          define: {
-            'process.env.NODE_ENV': '"production"',
-            __VUE_OPTIONS_API__: 'true',
-            __VUE_PROD_DEVTOOLS__: 'false',
-            __VUE_PROD_HYDRATION_MISMATCH_DETAILS__: 'false'
-          }
-        }
+        transform: define ? { define } : undefined
       });
       fs.mkdirSync(path.dirname(outFile), { recursive: true });
       await b.write({ format: 'iife', file: outFile, minify: true });
       await b.close();
       const kb = Math.round(fs.statSync(outFile).size / 1024);
-      console.log(`[chat-host] 界面段全局环境已生成: ${path.relative(root, outFile)} (${kb} KB)`);
+      console.log(`${tag} 已生成: ${path.relative(root, outFile)} (${kb} KB)`);
     } catch (e) {
-      // 失败不阻断整个构建：界面段会退化为「没有这些全局」（模板自己会在控制台报缺哪个）
-      console.warn('[chat-host] 打包失败（界面段将缺少 Vue/zod 等全局）:', e && e.message);
+      // 失败不阻断整个构建：消费方会退化为「没有这些全局」（自己会在控制台报缺哪个）
+      console.warn(`${tag} 打包失败:`, e && e.message);
+    }
+  }
+
+  const targets = [
+    {
+      rel: 'vendor/chat-host.js',
+      entry: 'js/chatHost/iframeGlobals.js',
+      tag: '[chat-host] 界面段全局环境',
+      define: {
+        'process.env.NODE_ENV': '"production"',
+        __VUE_OPTIONS_API__: 'true',
+        __VUE_PROD_DEVTOOLS__: 'false',
+        __VUE_PROD_HYDRATION_MISMATCH_DETAILS__: 'false'
+      }
+    },
+    {
+      // 🧩 插件「效果」预览页专用：只含 jQuery + lodash，不挂 Vue / zod（避免覆盖插件期望的全局）
+      rel: 'vendor/plugin-host.js',
+      entry: 'js/chatHost/pluginHostGlobals.js',
+      tag: '[plugin-host] 插件预览全局环境',
+      define: { 'process.env.NODE_ENV': '"production"' }
+    }
+  ];
+
+  async function bundleAll(baseDir) {
+    for (const t of targets) {
+      await bundleOne(path.resolve(baseDir, t.rel), t.entry, t.tag, t.define);
     }
   }
 
@@ -58,11 +85,11 @@ function chatHostBundle() {
     },
     async buildStart() {
       if (!isServe) return; // 构建走 closeBundle（此时 outDir 刚被清空，稍后写入才留得住）
-      await bundle(path.resolve(root, 'vendor/chat-host.js'));
+      await bundleAll(root);
     },
     async closeBundle() {
       if (isServe) return;
-      await bundle(path.resolve(root, outDir, 'vendor/chat-host.js'));
+      await bundleAll(path.resolve(root, outDir));
     }
   };
 }

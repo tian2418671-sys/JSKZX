@@ -66,18 +66,59 @@ textarea, input {
     animation: fade-in 0.4s ease-out;
 }
 
-/* 悬浮批量操作栏滑入/滑出动画 */
-.slide-up-enter-active, .slide-up-leave-active { transition: all 0.3s ease; }
-.slide-up-enter-from, .slide-up-leave-to { opacity: 0; transform: translate(-50%, 20px); }
+/*
+ * 弹窗淡入淡出（全项目 29 处 <transition name="fade"> 共用）
+ *
+ * ⚠️ AR-78：这里**必须用 animation，不能用 transition**。
+ *   原来写的是 `.fade-leave-active { transition: opacity .4s }`，
+ *    实测会偶发「元素 opacity 已归 0，但 transitionend 迟迟不触发」——
+ *    Vue 的离场钩子等不到结束回调，节点就**永久残留**在 DOM 里：
+ *    opacity:0（用户看不见）+ pointer-events:auto（照样吞点击）
+ *    ⇒ 整个界面「点什么都没反应」，且完全看不出异常。
+ *    （实测连续开关命令面板 / 整库冷备 / 一键质检后，能叠出 3 个隐形遮罩。）
+ *
+ *    animation 由时间驱动，`animationend` 必定触发，不依赖「属性是否真的变化」。
+ *   `pointer-events: none` 是**兜底**：就算将来又以别的方式残留，也绝不吞掉点击。
+ */
+@keyframes jsk-fade-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+@keyframes jsk-fade-out {
+    from { opacity: 1; }
+    to { opacity: 0; }
+}
 
-/* 关系图谱弹窗淡入淡出动画 */
-.fade-enter-active, .fade-leave-active { transition: opacity 0.4s ease; }
+.fade-enter-active { animation: jsk-fade-in 0.35s ease; }
+.fade-leave-active { animation: jsk-fade-out 0.35s ease forwards; pointer-events: none; }
 .fade-enter-from, .fade-leave-to { opacity: 0; }
 
+/* 同理：滑出/滑入也用 animation，并让离场期间不吃点击 */
+.slide-up-enter-active { animation: jsk-slide-up-in 0.3s ease; }
+.slide-up-leave-active { animation: jsk-slide-up-out 0.3s ease forwards; pointer-events: none; }
+@keyframes jsk-slide-up-in {
+    from { opacity: 0; transform: translate(-50%, 20px); }
+    to { opacity: 1; transform: translate(-50%, 0); }
+}
+@keyframes jsk-slide-up-out {
+    from { opacity: 1; transform: translate(-50%, 0); }
+    to { opacity: 0; transform: translate(-50%, 20px); }
+}
+
 /* ============ Toast 消息通知过渡动画（右上角滑入/滑出） ============ */
-.toast-enter-active, .toast-leave-active { transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275); }
-.toast-enter-from { opacity: 0; transform: translateX(50px); }
-.toast-leave-to { opacity: 0; transform: translateY(-20px) scale(0.9); }
+/* ⚠️ AR-78：与 fade 同理，用 animation 保证 animationend 必定触发，离场期间不吃点击 */
+@keyframes jsk-toast-in {
+    from { opacity: 0; transform: translateX(50px); }
+    to { opacity: 1; transform: translateX(0); }
+}
+@keyframes jsk-toast-out {
+    from { opacity: 1; transform: translateX(0); }
+    to { opacity: 0; transform: translateY(-20px) scale(0.9); }
+}
+.toast-enter-active { animation: jsk-toast-in 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275); }
+.toast-leave-active { animation: jsk-toast-out 0.4s ease forwards; pointer-events: none; }
+.toast-enter-from { opacity: 0; }
+.toast-leave-to { opacity: 0; }
 
 /* ============ 紧凑版 IDE 风格 ============ */
 html, body, #app { height: 100%; }

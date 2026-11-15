@@ -405,6 +405,21 @@
                            class="w-full h-8 bg-zinc-800/80 border border-zinc-700/60 rounded-lg pl-8 pr-2 text-xs text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-amber-500/80 transition">
                 </div>
 
+                <!-- 🆕 行2：排序（2026-10-25 用户需求：与角色卡库口径一致） -->
+                <div class="flex items-center gap-1">
+                    <select v-model="wbSortBy" title="世界书排序方式"
+                            class="flex-1 min-w-0 h-7 bg-zinc-800/80 border border-zinc-700/60 rounded-lg px-1.5 text-[11px] text-zinc-400 focus:outline-none focus:border-amber-500/80 truncate">
+                        <option value="name">▾ 名称 A-Z</option>
+                        <option value="nameDesc">▾ 名称 Z-A</option>
+                        <option value="mtime">▾ 修改时间（新→旧）</option>
+                        <option value="mtimeAsc">▾ 修改时间（旧→新）</option>
+                        <option value="sizeDesc">▾ 大小（大→小）</option>
+                        <option value="sizeAsc">▾ 大小（小→大）</option>
+                        <option value="entries">▾ 词条数（多→少）</option>
+                        <option value="manual">▾ 原始顺序</option>
+                    </select>
+                </div>
+
                 <!-- 🩹 G4：剔除原因提示（只在本轮确实剔除了文件时出现；默认收起，避免占高度） -->
                 <div v-if="wbSkippedFiles && wbSkippedFiles.length"
                      class="text-[10px] rounded-md border border-amber-500/40 bg-amber-500/10 text-amber-300 overflow-hidden">
@@ -668,6 +683,18 @@
                     <input v-model="presetSearchQuery" type="text" placeholder="搜索预设名称..."
                            class="w-full h-8 bg-zinc-800/80 border border-zinc-700/60 rounded-lg pl-8 pr-2 text-xs text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-sky-500/80 transition">
                 </div>
+                <!-- 🆕 预设排序（2026-10-25 用户需求：与角色卡库口径一致） -->
+                <select v-model="presetSortBy" title="预设排序方式"
+                        class="w-full h-7 bg-zinc-800/80 border border-zinc-700/60 rounded-lg px-1.5 text-[11px] text-zinc-400 focus:outline-none focus:border-sky-500/80 truncate">
+                    <option value="name">▾ 名称 A-Z</option>
+                    <option value="nameDesc">▾ 名称 Z-A</option>
+                    <option value="mtime">▾ 修改时间（新→旧）</option>
+                    <option value="mtimeAsc">▾ 修改时间（旧→新）</option>
+                    <option value="sizeDesc">▾ 大小（大→小）</option>
+                    <option value="sizeAsc">▾ 大小（小→大）</option>
+                    <option value="prompts">▾ 提示词条数（多→少）</option>
+                    <option value="manual">▾ 原始顺序</option>
+                </select>
                 <div class="flex items-center gap-1.5">
                     <button @click="loadPresets" class="flex-1 h-7 flex items-center justify-center gap-1.5 px-2.5 bg-zinc-800 hover:bg-sky-600 text-zinc-200 text-[11px] rounded-lg border border-zinc-700/60 transition">
                         📂 打开预设目录
@@ -733,7 +760,20 @@
                     <button @click="loadPlugins" class="flex-1 h-7 flex items-center justify-center gap-1.5 px-2.5 bg-zinc-800 hover:bg-violet-600 text-zinc-200 text-[11px] rounded-lg border border-zinc-700/60 transition">
                         📂 打开插件目录
                     </button>
+                    <!-- 🔗 链接安装（对齐酒馆「扩展 → 安装扩展」填仓库地址的做法） -->
+                    <button @click="installPluginFromUrlFlow"
+                            :disabled="pluginInstalling"
+                            class="h-7 shrink-0 flex items-center justify-center gap-1 px-2.5 text-[11px] rounded-lg border transition"
+                            :class="pluginInstalling ? 'bg-zinc-800 text-zinc-500 border-zinc-700 cursor-not-allowed' : 'bg-zinc-800 hover:bg-emerald-600 text-zinc-200 border-zinc-700/60'"
+                            :title="pluginInstalling ? '正在安装…' : '粘贴 GitHub 仓库 / zip / 插件文件链接安装'">
+                        {{ pluginInstalling ? '⏳' : '🔗 链接安装' }}
+                    </button>
                 </div>
+                <!-- 📌 能力说明：避免用户拿普通网页链接来试 -->
+                <p class="text-[10px] leading-relaxed text-zinc-500 rounded-md px-2 py-1.5 bg-emerald-500/5 border border-emerald-500/20">
+                    支持 <span class="text-emerald-400 font-bold">GitHub 仓库地址</span>（会整包下载，与酒馆安装扩展一致）<br>
+                    <span class="text-zinc-400">也支持 .zip 直链、单个 .json / .js 插件文件。</span>
+                </p>
             </div>
 
             <div class="flex-1 overflow-y-auto custom-scrollbar p-2 space-y-1.5">
@@ -1284,6 +1324,7 @@ export default {
             presets: ctx.presets,
             activePreset: ctx.activePreset,
             presetSearchQuery: ctx.presetSearchQuery,
+            presetSortBy: ctx.presetSortBy,
             filteredPresets: ctx.filteredPresets,
             loadPresets: ctx.loadPresets,
             exportPresetsBatch: ctx.exportPresetsBatch,
@@ -1298,6 +1339,8 @@ export default {
             pluginSearchQuery: ctx.pluginSearchQuery,
             filteredPlugins: ctx.filteredPlugins,
             loadPlugins: ctx.loadPlugins,
+            pluginInstalling: ctx.pluginInstalling,
+            installPluginFromUrlFlow: ctx.installPluginFromUrlFlow,
             deletePlugin: ctx.deletePlugin,
             openPluginContextMenu: ctx.openPluginContextMenu,
             openPluginInFolder: ctx.openPluginInFolder,
@@ -1405,6 +1448,7 @@ export default {
             renameWbGroup: ctx.renameWbGroup,
             deleteWbGroup: ctx.deleteWbGroup,
             wbSearchQuery: ctx.wbSearchQuery,
+            wbSortBy: ctx.wbSortBy,
             // 📄 每页显示数量（全库共享选择器）+ 世界书/预设/插件三库分页
             itemsPerPage: ctx.itemsPerPage,
             pageSizeOptions: ctx.pageSizeOptions,

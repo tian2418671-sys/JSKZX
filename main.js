@@ -1,5 +1,5 @@
 /**
- * SillyTavern 角色卡高级解析中心 - Electron 主进程
+ * SillyTavern 资源管理器 - Electron 主进程
  *
  * 架构说明：
  * - 渲染进程（Vue）通过 preload 暴露的 window.electronAPI 与主进程通信（IPC）；
@@ -14,12 +14,15 @@ const fs = require('fs');
 const fsp = require('fs/promises'); // 🚀 v1.8.5 异步文件 IO（库目录扫描异步化，消除主进程阻塞）
 const os = require('os');
 const { pathToFileURL } = require('url');
+const { spawn } = require('child_process'); // 🔗 插件链接安装：调用系统 bsdtar 解压 zip（Windows 10+ 自带）
 const crypto = require('crypto'); // 📸 快照内容去重（SHA-256）
 const { StringDecoder } = require('string_decoder'); // 🌊 P1-2 流式解析：防 UTF-8 多字节被 chunk 边界切断
 const { createMemoryStore } = require('./main/memoryStore.js'); // 🧠 长期记忆存储（测卡二期）
 // 📇 DF-22：角色卡**文件格式能力表**（唯一权威定义）—— 扫描白名单 / 导入 accept / 保存支持
 //    都从它派生，根除「同一件事三处各写一份」导致的口径漂移。
 const { isScannable, isSavable, isImageExt, IMPORT_ACCEPT, SCANNABLE_EXTS } = require('./main/cardFormats.js');
+// 🔗 插件「链接安装」URL 解析（纯函数，可与渲染层 / 单测共用同一份规则）
+const { parseInstallUrl, gitHubZipUrl, pickPluginRoot } = require('./js/utils/pluginInstallUrl.js');
 
 // 🎬 重型卡（独立前端角色卡）：WebContentsView 宿主管理器
 //    规格见 docs/规格与计划/功能规格/独立前端角色卡-承载方案-v3.md
@@ -133,6 +136,9 @@ const { stripInternalFields, restoreEntriesDict } = require('./main/cardFieldSan
 const { checkBodyDegrade } = require('./main/cardBodyGuard.js');
 // 📦 v2.3.6：整库冷备（一键全量快照）—— 主进程实现见 main/fullBackup.js
 const { createFullBackupService } = require('./main/fullBackup.js');
+// 🛠️ 酒馆「安装与维护」：一键装桌面版酒馆 / 升级 / 两档卸载
+//    规格见 资料库/一键安装桌面版酒馆-方案-v1.md
+const { createStManager } = require('./main/stManager.js');
 
 
 // ================= [ 📸 历史快照配置与节流阀（可在设置面板动态更新） ] =================
@@ -838,14 +844,25 @@ let heavyCardProtocolBinder = null;
 // 原因：预览依赖大量内联 <script>（jquery/lodash/handlebars/showdown/dompurify + 用户脚本），
 // 而生产模式 CSP `script-src 'self' app:` 不含 unsafe-inline，srcdoc/data:/blob: iframe 会继承父页
 // CSP 导致内联脚本被全部拦截；独立 app:// 文档拥有自己的响应头（跳过 CSP 注入）即可正常运行。
-const previewStore = new Map(); // id -> { html, ts }
+const previewStore = new Map(); // id -> { html, ts, rootDir }
 let previewSeq = 0;
 const PREVIEW_PATH_PREFIX = '/__jsk_preview__/';
+// 🗂️ 插件资源代理前缀（2026-10-25 方案 A）：
+//    预览页以 app:// 加载，插件里的相对资源（./img/x.png、./style.css、logo.svg…）
+//    会被解析成 `app://index.html/img/x.png` ⇒ 落到应用根目录 ⇒ 404（用户实测「资源加载不出来」）。
+//    约定：预览 HTML 内部把相对路径改写成 `app://index.html/__jsk_plugin_res__/<相对路径>`，
+//    由下面的协议分支按「本次预览登记的插件根目录」读盘，做到一插件一沙箱。
+const PLUGIN_RES_PATH_PREFIX = '/__jsk_plugin_res__/';
 
-/** 存入预览 HTML，返回唯一 id */
-function setPluginPreview(html) {
-  const id = String(++previewSeq) + '-' + crypto.randomBytes(4).toString('hex');
-  previewStore.set(id, { html, ts: Date.now() });
+/** 存入预览 HTML，返回唯一 id
+ * @param {string} html 完整预览 HTML
+ * @param {string} [rootDir] 插件根目录（用于相对资源代理；扩展工程传目录，散装脚本传所在目录）
+ * @param {string} [reuseId] 复用已分配的 id（渲染层需要「先拿 id 再生成 HTML」，以便把相对路径
+ *        改写成带 id 的代理 URL）；传入时覆盖同 id 内容，不新建条目。
+ */
+function setPluginPreview(html, rootDir, reuseId) {
+  const id = reuseId || (String(++previewSeq) + '-' + crypto.randomBytes(4).toString('hex'));
+  previewStore.set(id, { html, ts: Date.now(), rootDir: (typeof rootDir === 'string' && rootDir) ? path.resolve(rootDir) : '' });
   // 最多保留 32 份，超限清最旧（防内存泄漏）
   if (previewStore.size > 32) {
     const oldest = [...previewStore.entries()].sort((a, b) => a[1].ts - b[1].ts)[0];
@@ -873,6 +890,135 @@ function setChatHtmlSegment(html) {
 }
 
 /**
+ * 🧩 生成「未知 JS 资源」的兜底桩模块。
+ *
+ * 场景：插件 bundle 里写了 `import {...} from '../../../../../script.js'` 这类
+ *      **向上跨出插件目录**的相对路径（指向酒馆 public/）。预览环境里没有这些文件，
+ *      若返回 404，浏览器会让整个模块图加载失败，且报错只指向入口文件，
+ *      完全看不出真正缺的是哪个子依赖（真实案例：Cosmos Vision）。
+ *
+ * 做法：返回一个 ESM 模块，导出一批「万能占位」：
+ *   · default 是一个 Proxy，任意属性访问都返回可调用占位
+ *   · 常见酒馆 API 的具名导出（script.js / utils.js / openai.js / tokenizers.js）
+ * 这样模块图能完整解析，插件得以继续初始化到「渲染界面」这一步。
+ *
+ * @param {string} pathname 请求路径（仅用于注释，便于排查）
+ * @returns {string} ESM 源码
+ */
+function buildUnknownJsStub(pathname) {
+  return `// [jsk] 未知宿主资源兜底桩: ${String(pathname || '').replace(/[\r\n*]/g, '')}
+const noop = function(){ return undefined; };
+const asyncNoop = function(){ return Promise.resolve(); };
+function makeAny(){
+  return new Proxy(function(){ return undefined; }, {
+    get: function(t, p){
+      if (p === Symbol.toStringTag) return 'Module';
+      if (p === 'then') return undefined;            // 避免被当作 thenable
+      if (p === 'default') return t;
+      if (p === 'prototype') return {};
+      if (p === 'name' || p === 'length') return undefined;
+      if (!(p in t)) t[p] = makeAny();
+      return t[p];
+    },
+    apply: function(){ return undefined; },
+    construct: function(){ return makeAny(); },
+  });
+}
+const any = makeAny();
+const $ = (typeof window !== 'undefined' && window.$) || any;
+const jQuery = (typeof window !== 'undefined' && (window.jQuery || window.$)) || any;
+const extension_settings = (typeof window !== 'undefined' && window.extension_settings) || {};
+const eventSource = (typeof window !== 'undefined' && window.eventSource) || { on: noop, off: noop, once: noop, emit: asyncNoop, emitAndWait: asyncNoop, removeListener: noop, makeLast: noop, makeFirst: noop };
+const event_types = (typeof window !== 'undefined' && (window.tavern_events || window.event_types)) || {};
+const eventTypes = event_types;
+const chat = (typeof window !== 'undefined' && window.chat) || [];
+const characters = (typeof window !== 'undefined' && window.characters) || [];
+const chat_metadata = (typeof window !== 'undefined' && window.chat_metadata) || {};
+const this_chid = (typeof window !== 'undefined' && window.this_chid) || 0;
+const name1 = 'User';
+const name2 = '角色';
+const online_status = 'auto';
+const max_context = 8192;
+const main_api = 'openai';
+const SlashCommandParser = (typeof window !== 'undefined' && window.SlashCommandParser) || any;
+const SlashCommand = (typeof window !== 'undefined' && window.SlashCommand) || any;
+const SlashCommandArgument = (typeof window !== 'undefined' && window.SlashCommandArgument) || any;
+const SlashCommandNamedArgument = (typeof window !== 'undefined' && window.SlashCommandNamedArgument) || any;
+const ARGUMENT_TYPE = (typeof window !== 'undefined' && window.ARGUMENT_TYPE) || {
+  STRING: 'string', NUMBER: 'number', BOOLEAN: 'boolean', VARIABLE_NAME: 'variable', RANGE: 'range',
+  LIST: 'list', CLOSURE: 'closure', SUBCOMMAND: 'subcommand',
+};
+const slash_commands = (typeof window !== 'undefined' && window.slash_commands) || [];
+const getContext = (typeof window !== 'undefined' && window.getContext) || function(){ return any; };
+const getRequestHeaders = function(){ return { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': '' }; };
+const saveSettingsDebounced = (typeof window !== 'undefined' && window.saveSettingsDebounced) || noop;
+const saveMetadataDebounced = noop;
+const getCurrentChatId = function(){ return 'demo'; };
+const uuidv4 = function(){
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c){
+    const r = (Math.random() * 16) | 0;
+    return (c === 'x' ? r : (r & 0x3) | 0x8).toString(16);
+  });
+};
+const getTokenCountAsync = asyncNoop;
+const getTextTokens = function(){ return []; };
+const tokenizers = {};
+const proxies = {};
+const updateMessageBlock = noop;
+const messageFormatting = function(x){ return x; };
+const substituteParams = function(x){ return x; };
+const substituteParamsExtended = asyncNoop;
+const addOneMessage = noop;
+const setExtensionPrompt = noop;
+const extension_prompts = {};
+const executeSlashCommandsWithOptions = asyncNoop;
+const registerSlashCommand = noop;
+const isMobile = function(){ return false; };
+const shouldSendOnEnter = function(){ return true; };
+const callPopup = asyncNoop;
+const toastr = (typeof window !== 'undefined' && window.toastr) || { info: noop, success: noop, warning: noop, error: noop };
+const DOMPurify = (typeof window !== 'undefined' && window.DOMPurify) || { sanitize: function(s){ return s; } };
+const lodash = (typeof window !== 'undefined' && window._) || any;
+const _ = lodash;
+const moment = (typeof window !== 'undefined' && window.moment) || (function(){ return { format: function(){ return ''; } }; });
+const Handlebars = (typeof window !== 'undefined' && window.Handlebars) || { compile: function(){ return function(){ return ''; }; }, registerHelper: noop };
+const showdown = (typeof window !== 'undefined' && window.showdown) || { Converter: function(){ this.makeHtml = function(s){ return s; }; } };
+const yaml = (typeof window !== 'undefined' && window.yaml) || { parse: function(){ return {}; }, stringify: function(){ return ''; } };
+const zod = (typeof window !== 'undefined' && window.zod) || any;
+// jszip 之类的库：给一个最小可用实现（打包/解包在预览里用不到）
+const JSZip = (typeof window !== 'undefined' && window.JSZip) || function(){ return { file: noop, folder: noop, generateAsync: asyncNoop, loadAsync: asyncNoop }; };
+
+const __all = {
+  $, jQuery: $, extension_settings, eventSource, event_types, eventTypes, chat, characters,
+  chat_metadata, this_chid, name1, name2, online_status, max_context, main_api,
+  SlashCommandParser, SlashCommand, SlashCommandArgument, SlashCommandNamedArgument,
+  ARGUMENT_TYPE, slash_commands, getContext, getRequestHeaders, saveSettingsDebounced,
+  saveMetadataDebounced, getCurrentChatId, uuidv4, getTokenCountAsync, getTextTokens,
+  tokenizers, proxies, updateMessageBlock, messageFormatting, substituteParams,
+  substituteParamsExtended, addOneMessage, setExtensionPrompt, extension_prompts,
+  executeSlashCommandsWithOptions, registerSlashCommand, isMobile, shouldSendOnEnter,
+  callPopup, toastr, DOMPurify, lodash, _, moment, Handlebars, showdown, yaml, zod, JSZip,
+};
+
+export default (typeof window !== 'undefined' && window.__jskModuleExports) || any;
+
+export {
+  $, jQuery, extension_settings, eventSource, event_types, eventTypes, chat, characters,
+  chat_metadata, this_chid, name1, name2, online_status, max_context, main_api,
+  SlashCommandParser, SlashCommand, SlashCommandArgument, SlashCommandNamedArgument,
+  ARGUMENT_TYPE, slash_commands, getContext, getRequestHeaders, saveSettingsDebounced,
+  saveMetadataDebounced, getCurrentChatId, uuidv4, getTokenCountAsync, getTextTokens,
+  tokenizers, proxies, updateMessageBlock, messageFormatting, substituteParams,
+  substituteParamsExtended, addOneMessage, setExtensionPrompt, extension_prompts,
+  executeSlashCommandsWithOptions, registerSlashCommand, isMobile, shouldSendOnEnter,
+  callPopup, toastr, DOMPurify, lodash, _, moment, Handlebars, showdown, yaml, zod, JSZip,
+};
+`;
+}
+
+
+
+/**
  * 注册自定义协议
  * - app://        -> 项目根目录下的文件（页面、JS、CSS） + 内存中的插件预览页
  * - local-file:// -> 磁盘上的任意本地文件（仅用于展示本地立绘图片）
@@ -893,6 +1039,109 @@ function registerAppProtocol() {
       const entry = previewStore.get(id);
       if (!entry) return new Response('Not Found', { status: 404 });
       return new Response(entry.html, { headers: { 'content-type': 'text/html; charset=utf-8' } });
+    }
+    // 🗂️ 插件资源代理（2026-10-25）：`.../__jsk_plugin_res__/<previewId>/<相对路径>`
+    //    解决「资源加载不出来」：插件 html/css 里的相对路径由预览侧改写成带 previewId 的绝对路径，
+    //    这里按该 previewId 登记的 rootDir 读盘（限定在 rootDir 内，防穿越）。
+    if (url.pathname.startsWith(PLUGIN_RES_PATH_PREFIX)) {
+      const rest = url.pathname.slice(PLUGIN_RES_PATH_PREFIX.length);
+      const slash = rest.indexOf('/');
+      if (slash <= 0) return new Response('Not Found', { status: 404 });
+      const id = rest.slice(0, slash);
+      const rel = decodeURIComponent(rest.slice(slash + 1));
+      const entry = previewStore.get(id);
+      if (!entry || !entry.rootDir) return new Response('Not Found', { status: 404 });
+
+      // 🧩 宿主桩模块（importmap 里 'jquery' / '/script.js' 等裸说明符的目标）。
+      //    importmap 必须指向真实可取的 URL，否则整个模块图加载失败。
+      //    这里返回一个 ESM 模块，把导出指向预览页里已铺好的 window.__jskModuleExports。
+      if (rel === '__jsk_host_stub__.js') {
+        const stubJs = [
+          '// 宿主 API 桩模块：把裸说明符 import 映射到预览页已注册的万能命名空间',
+          'const ns = (typeof window !== "undefined" && window.__jskModuleExports) || {};',
+          'export default ns;',
+          // 常见命名导出（按需取；不存在的返回 noop）
+          'export const getContext = (ns && ns.getContext) || (() => ({}));',
+          'export const extension_settings = (typeof window !== "undefined" && window.extension_settings) || {};',
+          'export const eventSource = (typeof window !== "undefined" && window.eventSource) || { on(){}, emit(){ return Promise.resolve(); } };',
+          'export const event_types = (typeof window !== "undefined" && window.event_types) || {};',
+          'export const eventTypes = event_types;',
+          'export const saveSettingsDebounced = (typeof window !== "undefined" && window.saveSettingsDebounced) || (() => {});',
+          'export const getRequestHeaders = (typeof window !== "undefined" && window.getRequestHeaders) || (() => ({}));',
+          'export const chat = (typeof window !== "undefined" && window.chat) || [];',
+          'export const characters = (typeof window !== "undefined" && window.characters) || [];',
+          'export const this_chid = (typeof window !== "undefined" && window.this_chid) ?? 0;',
+          'export const SlashCommand = (typeof window !== "undefined" && window.SlashCommand) || undefined;',
+          'export const SlashCommandParser = (typeof window !== "undefined" && window.SlashCommandParser) || undefined;',
+          'export const SlashCommandArgument = (typeof window !== "undefined" && window.SlashCommandArgument) || undefined;',
+          'export const SlashCommandNamedArgument = (typeof window !== "undefined" && window.SlashCommandNamedArgument) || undefined;',
+          'export const ARGUMENT_TYPE = (typeof window !== "undefined" && window.ARGUMENT_TYPE) || undefined;',
+          'export const toastr = (typeof window !== "undefined" && window.toastr) || { error(){}, success(){}, warning(){}, info(){} };',
+          'export const $ = (typeof window !== "undefined" && window.$) || function(){ return {}; };',
+          'export const jQuery = $;',
+          'export const DOMPurify = (typeof window !== "undefined" && window.DOMPurify) || { sanitize: (s) => s };',
+          'export const lodash = (typeof window !== "undefined" && window._) || {};',
+          'export const _ = lodash;',
+          'export const moment = (typeof window !== "undefined" && window.moment) || (() => ({ format: () => "" }));',
+          'export const Handlebars = (typeof window !== "undefined" && window.Handlebars) || { compile: () => () => "" };',
+          'export const showdown = (typeof window !== "undefined" && window.showdown) || { Converter: class { makeHtml(s){ return s; } } };',
+          'export const yaml = (typeof window !== "undefined" && window.yaml) || { parse: () => ({}), stringify: () => "" };',
+          'export const zod = (typeof window !== "undefined" && window.zod) || {};',
+        ].join('\n');
+        return new Response(stubJs, {
+          headers: {
+            'content-type': 'text/javascript; charset=utf-8',
+            'access-control-allow-origin': '*',
+            'cache-control': 'no-cache',
+          },
+        });
+      }
+
+      const resolvedRes = path.normalize(path.join(entry.rootDir, rel));
+      const resPrefix = entry.rootDir + path.sep;
+      if (resolvedRes !== entry.rootDir && !resolvedRes.startsWith(resPrefix)) {
+        return new Response('Forbidden', { status: 403 });
+      }
+      try {
+        const buf = fs.readFileSync(resolvedRes);
+        const rExt = path.extname(resolvedRes).toLowerCase();
+        const rMime = ({
+          '.html': 'text/html; charset=utf-8', '.htm': 'text/html; charset=utf-8',
+          '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8',
+          '.css': 'text/css; charset=utf-8', '.json': 'application/json; charset=utf-8',
+          '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+          '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml',
+          '.ico': 'image/x-icon',
+          '.woff': 'font/woff', '.woff2': 'font/woff2', '.ttf': 'font/ttf', '.otf': 'font/otf',
+          '.mp3': 'audio/mpeg', '.ogg': 'audio/ogg', '.wav': 'audio/wav',
+          '.mp4': 'video/mp4', '.webm': 'video/webm', '.txt': 'text/plain; charset=utf-8'
+        })[rExt] || 'application/octet-stream';
+        return new Response(buf, {
+          headers: { 'content-type': rMime, 'access-control-allow-origin': '*', 'cache-control': 'no-cache' }
+        });
+      } catch (e) {
+        // 🧩 插件「向上越界」import 的兜底（真实案例：Cosmos Vision）
+        //    dist/index.js 里写的是
+        //        import {...} from '../../../../../script.js'
+        //        import '../../../../../lib/jszip.min.js'
+        //    从 dist/ 向上五层指向酒馆 public/，我们这里没有这些文件 ⇒ 404
+        //    ⇒ 整个 ESM 模块图加载失败 ⇒ 浏览器只报一句
+        //       "Failed to fetch dynamically imported module: .../dist/index.js"
+        //    （真正缺的是某一个子依赖，报错却指向入口，极难定位。）
+        //    因此：任何 .js/.mjs 读不到时，返回「万能桩模块」而不是 404，
+        //    让模块图能继续解析；缺的 API 由桩提供空实现。
+        const extJs = path.extname(resolved).toLowerCase();
+        if (extJs === '.js' || extJs === '.mjs') {
+          return new Response(buildUnknownJsStub(url.pathname), {
+            headers: {
+              'content-type': 'text/javascript; charset=utf-8',
+              'access-control-allow-origin': '*',
+              'cache-control': 'no-cache',
+            },
+          });
+        }
+        return new Response('Not Found', { status: 404 });
+      }
     }
     // standard scheme 下页面 origin 为 app://index.html，其相对资源形如 app://index.html/css/style.css
     // （host 恒为 index.html，pathname 为项目根下的相对路径）；极少数跨 host 场景按 host 首段拼接
@@ -1062,6 +1311,38 @@ function createWindow() {
     }
   });
 
+  // 🛠️ 开发者工具快捷键（2026-11-08 补）
+  //
+  // 🐞 历史问题：应用从来没注册过 F12 —— 但错误提示里一直写「请按 F12 看 Console」，
+  //    用户按下去毫无反应，等于把唯一的排查入口关死了。
+  //    现在补齐：F12 / Ctrl+Shift+I 开关窗口 DevTools；Ctrl+Shift+J 直达 Console；
+  //    Ctrl+R / F5 重载（插件预览改了代码后方便刷新）。
+  win.webContents.on('before-input-event', (event, input) => {
+    if (input.type !== 'keyDown') return;
+    const key = String(input.key || '');
+    const ctrlShift = input.control && input.shift;
+    const isF12 = key === 'F12';
+    const isToggle = ctrlShift && (key.toLowerCase() === 'i' || key.toLowerCase() === 'j');
+
+    if (isF12 || isToggle) {
+      event.preventDefault();
+      const wc = win.webContents;
+      if (wc.isDevToolsOpened()) {
+        wc.closeDevTools();
+      } else {
+        // Ctrl+Shift+J 直达 Console 面板
+        wc.openDevTools({ mode: 'right', activate: true });
+      }
+      return;
+    }
+
+    // 重载（插件预览改动后不必重启整个应用）
+    if (key === 'F5' || (input.control && key.toLowerCase() === 'r')) {
+      event.preventDefault();
+      win.webContents.reload();
+    }
+  });
+
   // 通过自定义协议加载页面（生产加载 web/ 构建产物；开发加载 Vite Dev Server）
   if (isDev && process.env.VITE_DEV_SERVER_URL) {
     win.loadURL(process.env.VITE_DEV_SERVER_URL);
@@ -1142,7 +1423,8 @@ let mainWindow = null;
 const skipFolders = [
     '.git', 'node_modules', 'windows', 'program files', 'program files (x86)', 
     'appdata', 'system volume information', '$recycle.bin', 'programdata', 
-    'temp', 'cache', 'caches', 'logs', 'steamapps', 'tencent files'
+    'temp', 'cache', 'caches', 'logs', 'steamapps', 'tencent files',
+    '.jsk-install-tmp'   // 🔗 链接安装的暂存目录：安装中不应被扫描成插件
 ];
 
 // 角色卡 PNG 因内嵌设定代码（Base64 JSON），体积几乎不可能小于 40KB；
@@ -1151,6 +1433,7 @@ const MIN_CARD_FILE_SIZE = 40960;
 // 🔢 魔法数字常量化（代码审查修复 9）：集中定义散落的大小上限 / 批次 / 进度 / 缺省值
 const MAX_URL_DOWNLOAD_BYTES = 20 * 1024 * 1024; // 角色卡 URL 下载上限
 const MAX_WB_FETCH_BYTES     = 50 * 1024 * 1024; // 世界书 URL 拉取上限
+const MAX_PLUGIN_ZIP_BYTES   = 50 * 1024 * 1024; // 🔗 插件链接安装：仓库/zip 压缩包上限
 
 // ================= 世界书 / 预设 扫描闸门分级（DF-18，2026-09-21） =================
 // 旧写法是写死的 `if (st.size > 5 * 1024 * 1024) return;` —— **静默丢弃**：
@@ -2042,6 +2325,33 @@ app.whenReady().then(() => {
     }
   });
 
+  // ================= [ 🗂️ 拖拽分流：读取「白名单外」的拖入文件（只读） ] =================
+  //
+  // 🐞 2026-10-25 真 bug（拖拽分流热测抓获）：
+  //    拖入文件的路径由 `webUtils.getPathForFile` 给出，**通常不在白名单**（桌面/下载文件夹）。
+  //    而 `file:readText` 有白名单校验 ⇒ 读不到内容 ⇒ 类型判不出 ⇒ 分流形同虚设，
+  //    世界书/预设又会被当角色卡（回到 AR-75 的老问题）。
+  //
+  // 安全设计（只放"读"、不放"写"）：
+  //   · **只允许 .json**（分流只需要判断 JSON 类型；图片卡不读文本）；
+  //   · **单文件 ≤ 8MB**（世界书/预设远小于此，防被诱导读大文件耗内存）；
+  //   · **只返回文本内容**，不返回任何目录信息；
+  //   · 不做任何写入 —— 落盘仍走 `file:importJsonToDir`（目标目录必须已授权）。
+  ipcMain.handle('file:peekJsonForDrop', async (event, filePath) => {
+    try {
+      if (!filePath || typeof filePath !== 'string') return { success: false, error: '路径为空' };
+      if (!/\.json$/i.test(filePath)) return { success: false, error: '仅支持 .json' };
+      const st = await fs.promises.stat(filePath);
+      if (!st.isFile()) return { success: false, error: '不是文件' };
+      const MAX = 8 * 1024 * 1024;
+      if (st.size > MAX) return { success: false, error: `文件过大（>${MAX / 1048576}MB）` };
+      const text = await fs.promises.readFile(filePath, 'utf-8');
+      return { success: true, text };
+    } catch (e) {
+      return { success: false, error: e.message };
+    }
+  });
+
   // ================= [ ⬇️ v2.3.6 通用「保存文本文件」底座 ] =================
   // 来历：测卡会话导出（Markdown / HTML / 纯文本）需要落盘，而此前只有卡/书/预设的**专用**导出包，
   //      没有通用文本保存通道；「一键质检流水线」的报告导出也复用本通道。
@@ -2086,6 +2396,114 @@ app.whenReady().then(() => {
 
   // ================= [ 📦 v2.3.6 整库冷备（一键全量快照） ] =================
   // 定位：配置备份 / 单文件快照之上的「整库时间点」。规格见 docs/规格与计划/功能规格/整库冷备-实现规格.md
+  // ================= 🛠️ 酒馆「安装与维护」（一键装桌面版酒馆 / 升级 / 两档卸载） =================
+  //
+  //  设计要点（详见 资料库/一键安装桌面版酒馆-方案-v1.md）：
+  //   · 不内置 Node：检测系统 Node → 缺失走 winget → 再不行引导官网
+  //   · 运行时清单/日志/备份放 <安装目录>\_jsk-runtime\，不污染酒馆仓库
+  //   · 卸载仅两档，且注册表按 Publisher 校验（防止误删 Chrome 装的 PWA）
+  const stManager = createStManager({
+    // 进度统一走 'st:progress' 频道（安装日志 / 阶段 / 服务器输出）
+    sendProgress: (payload) => {
+      try {
+        for (const w of BrowserWindow.getAllWindows()) {
+          if (w && !w.isDestroyed() && w.webContents) w.webContents.send('st:progress', payload);
+        }
+      } catch (e) { /* 进度事件失败不影响主流程 */ }
+    },
+    getMainWindow: () => mainWindow,
+  });
+
+  const stGuard = (fn) => async (event, params) => {
+    try {
+      return await fn(params || {});
+    } catch (err) {
+      return { success: false, error: err && err.message ? err.message : String(err) };
+    }
+  };
+
+  ipcMain.handle('st:inspect', stGuard((p) => stManager.inspect(p.dirPath)));
+  // 扫描本机，自动找出已安装的酒馆目录（分层递进 + 时间预算，避免大硬盘扫太久）
+  ipcMain.handle('st:scan', stGuard((p) => stManager.scanForSillyTavern({ deep: !!(p && p.deep) })));
+  // 环境体检：程序文件 / Node / 依赖 / 配置 / 数据 / 端口 / 磁盘 / git / 运行状态
+  ipcMain.handle('st:diagnose', stGuard((p) => stManager.diagnose({ dirPath: p && p.dirPath })));
+  // 检查是否有新版本（本地 package.json vs 远程最新 tag / GitHub release）
+  ipcMain.handle('st:checkUpdate', stGuard((p) => stManager.checkUpdate({ dirPath: p && p.dirPath })));
+  ipcMain.handle('st:nodeStatus', stGuard(async () => ({
+    node: await stManager.detectNode(),
+    winget: await stManager.detectWinget(),
+  })));
+  ipcMain.handle('st:installNode', stGuard((p) => stManager.installNodeViaWinget(p.taskId)));
+  ipcMain.handle('st:install', stGuard((p) => stManager.install(p)));
+  ipcMain.handle('st:installDeps', stGuard((p) => stManager.installDeps(p)));
+  ipcMain.handle('st:cancel', stGuard((p) => stManager.cancelTask(p.taskId)));
+  ipcMain.handle('st:start', stGuard((p) => stManager.startServer(p)));
+  ipcMain.handle('st:stop', stGuard(() => stManager.stopServer()));
+  ipcMain.handle('st:status', stGuard(async () => ({ success: true, ...(await stManager.getServerStatus()) })));
+  ipcMain.handle('st:update', stGuard((p) => stManager.update(p)));
+  ipcMain.handle('st:backup', stGuard((p) => stManager.backupData(p.dirPath, p.tag)));
+  ipcMain.handle('st:inventory', stGuard((p) => stManager.inventory(p)));
+  ipcMain.handle('st:uninstall', stGuard((p) => stManager.uninstall(p)));
+  // 列出可随本软件一并清理的注册表卸载项。
+  // 安全：只回传 owned（归属本软件/酒馆）与被排除的 skipped（供界面说明），
+  // 绝不能把全机 entries 交给渲染层 —— 否则界面误选会卸掉系统软件。
+  ipcMain.handle('st:uninstallEntries', stGuard(async () => {
+    const r = stManager.listUninstallEntries();
+    return {
+      success: true,
+      items: r.owned || [],
+      skipped: r.skipped || [],
+      totalScanned: (r.entries || []).length,
+    };
+  }));
+  ipcMain.handle('st:checkPath', stGuard(async (p) => {
+    const dir = String(p.dirPath || '').trim();
+    if (!dir) return { success: true, valid: { ok: false, level: 'error', reason: '请选择安装目录' } };
+    // 收集判定所需事实
+    const exists = fs.existsSync(dir);
+    const empty = stManager.isEmptyDir(dir);
+    const stRoot = exists ? stManager.findStRoot(dir) : '';
+    let freeBytes = 0;
+    let existingDrives = [];
+    try {
+      const drv = path.parse(path.resolve(dir)).root.replace(/[:\\]/g, '');
+      existingDrives = [drv];
+      const { execFileSync } = require('child_process');
+      // 用 wmic 已废弃，改用 PowerShell 查剩余空间
+      const out = execFileSync('powershell', [
+        '-NoProfile', '-Command',
+        `(Get-PSDrive -Name '${drv}' -ErrorAction SilentlyContinue).Free`,
+      ], { encoding: 'utf-8', windowsHide: true, timeout: 8000 });
+      freeBytes = Number(String(out).trim()) || 0;
+    } catch (e) { /* 忽略 */ }
+
+    const valid = stManager.validateInstallPath({
+      dirPath: dir,
+      dirExists: exists,
+      dirEmpty: empty,
+      hasSillyTavern: !!stRoot,
+      freeBytes,
+      existingDrives,
+    });
+    return { success: true, valid, exists, empty, stRoot, freeBytes };
+  }));
+  // 打开酒馆站点（用系统默认浏览器）
+  ipcMain.handle('st:openUrl', stGuard(async (p) => {
+    const url = String(p.url || '');
+    if (!/^https?:\/\/(localhost|127\.0\.0\.1)/i.test(url)) {
+      return { success: false, error: '只允许打开本机地址' };
+    }
+    await shell.openExternal(url);
+    return { success: true };
+  }));
+  // 打开安装目录
+  ipcMain.handle('st:openFolder', stGuard(async (p) => {
+    const dir = String(p.dirPath || '').trim();
+    if (!dir || !fs.existsSync(dir)) return { success: false, error: '目录不存在' };
+    await shell.openPath(dir);
+    return { success: true };
+  }));
+
   //   · 逐文件复制 + 进度事件（可取消）；`_manifest.json` 是唯一权威（中断的冷备不会被 list 认可）
   //   · 防呆全部在**主进程**（目标嵌套 / 空间不足 / 同时只允许一个任务 / 备份中禁恢复）
   //   · 恢复 = 改名 + 复制（安全优先，失败不删任何备份）；删除走 shell.trashItem（回收站，不硬删）
@@ -2100,8 +2518,7 @@ app.whenReady().then(() => {
       } catch (e) { /* 进度事件失败不影响冷备本身 */ }
     }
   });
-  ipcMain.handle('backup:full:create', async (event, params) => fullBackupService.createBackup(params || {}));
-  ipcMain.handle('backup:full:list', async (event, params) => fullBackupService.listBackups(params || {}));
+  ipcMain.handle('backup:full:create', async (event, params) => fullBackupService.createBackup(params || {}));  ipcMain.handle('backup:full:list', async (event, params) => fullBackupService.listBackups(params || {}));
   ipcMain.handle('backup:full:restore', async (event, params) => fullBackupService.restoreBackup(params || {}));
   ipcMain.handle('backup:full:delete', async (event, params) => fullBackupService.deleteBackup(params || {}));
   ipcMain.handle('backup:full:cancel', async () => fullBackupService.cancel());
@@ -2484,10 +2901,16 @@ app.whenReady().then(() => {
 
   // IPC：通用选择文件夹对话框（用于绑定酒馆本地根目录）
   ipcMain.handle('dialog:selectGenericFolder', async () => {
-    const { canceled, filePaths } = await dialog.showOpenDialog({
-      properties: ['openDirectory'],
-      title: '选择 SillyTavern (酒馆) 根目录'
-    });
+    // ⚠️ AR-77：必须挂到主窗口上（第二个参数）。不传 parent 时对话框不与主窗口关联，
+    //    在窗口最大化 / 置顶场景下会跑到主窗口**后面**，用户感知就是「点了没反应」。
+    const win = (mainWindow && !mainWindow.isDestroyed()) ? mainWindow : null;
+    const opts = {
+      properties: ['openDirectory', 'createDirectory'],
+      title: '选择酒馆安装位置（可在此新建文件夹）'
+    };
+    const { canceled, filePaths } = win
+      ? await dialog.showOpenDialog(win, opts)
+      : await dialog.showOpenDialog(opts);
     if (canceled || filePaths.length === 0) return null;
     // 【安全加固】用户选定的酒馆根目录加入白名单
     addAllowedRoot(filePaths[0]);
@@ -2680,6 +3103,148 @@ app.whenReady().then(() => {
   });
 
   // ==========================================
+  // ==========================================
+  // 🗂️ 拖拽导入分流：把「世界书 / 预设」JSON 落到各自库目录
+  //
+  // 🐞 2026-10-25（用户实测「拖动导入世界书是角色卡，预设也是角色卡；导入后预设库没有、角色卡库也没有」）：
+  //    旧拖拽只走 file:copyToLibrary → 全部复制进**卡库**，而解析层会拒掉非角色卡
+  //    ⇒ 世界书/预设变成卡库里的垃圾文件，各自的库毫无变化。
+  //    本通道按"目标库目录"落盘：写入 dirPath，自动处理重名（加 (2)/(3) 后缀），绝不覆盖。
+  //
+  // ⚠️ 安全：目标目录必须已在白名单内（用户通过「选择目录」授权过）。
+  // ==========================================
+  ipcMain.handle('file:importJsonToDir', async (event, { dirPath, items }) => {
+    const out = { success: true, saved: [], skipped: [], error: '' };
+    try {
+      if (!dirPath) { out.success = false; out.error = '目标目录为空'; return out; }
+      if (!isPathAllowed(dirPath)) { out.success = false; out.error = '目标目录未授权（请先用「选择目录」打开一次该库）'; return out; }
+      if (!fs.existsSync(dirPath)) { out.success = false; out.error = '目标目录不存在'; return out; }
+      const list = Array.isArray(items) ? items : [];
+      for (const it of list) {
+        try {
+          const rawName = String((it && it.name) || '未命名.json');
+          // 只保留文件名，防路径穿越
+          const baseName = path.basename(rawName).replace(/[\\/:*?"<>|]/g, '_');
+          const finalBase = /\.json$/i.test(baseName) ? baseName : `${baseName}.json`;
+
+          // 内容：优先用原文件字节（保证一字不改），拿不到再用 data 重新序列化
+          // ⚠️ 源文件同样只允许 .json（与 peekJsonForDrop 同口径），防止被诱导复制任意文件进库
+          let content = null;
+          if (it && typeof it.path === 'string' && it.path && /\.json$/i.test(it.path) && fs.existsSync(it.path)) {
+            content = await fs.promises.readFile(it.path);
+          } else if (it && it.data && typeof it.data === 'object') {
+            content = Buffer.from(JSON.stringify(it.data, null, 4), 'utf-8');
+          } else {
+            out.skipped.push({ name: rawName, reason: '无内容' });
+            continue;
+          }
+
+          // 🐞 2026-10-25 用户实测「可以无限拖动同一个文件进库」：
+          //    旧逻辑遇到重名一律加 (2)/(3) 后缀 ⇒ 同一个文件拖 10 次就多出 10 份完全相同的副本。
+          //    修：**内容相同即为重复**，直接跳过（不改名、不写入）。
+          //    判据用字节完全相等（Buffer.equals），比文本比较更严格且不受换行/编码影响。
+          let target = path.join(dirPath, finalBase);
+          if (fs.existsSync(target)) {
+            const existing = await fs.promises.readFile(target);
+            if (existing.equals(content)) {
+              out.skipped.push({ name: rawName, reason: '文件已存在（内容相同）' });
+              continue;
+            }
+            // 同名但内容不同：仍保留加后缀的策略（用户可能真的想保留两个版本）
+            const stem = finalBase.replace(/\.json$/i, '');
+            let n = 2;
+            while (fs.existsSync(target) && n < 1000) {
+              target = path.join(dirPath, `${stem} (${n}).json`);
+              n++;
+            }
+            if (fs.existsSync(target)) { out.skipped.push({ name: rawName, reason: '同名文件过多' }); continue; }
+            // 后缀文件也可能与本次内容相同（之前拖过同样内容），再查一次
+            try {
+              const again = await fs.promises.readFile(target);
+              if (again.equals(content)) {
+                out.skipped.push({ name: rawName, reason: '文件已存在（内容相同）' });
+                continue;
+              }
+            } catch (e) { /* 读不到就当新文件 */ }
+          }
+
+          await fs.promises.writeFile(target, content);
+          out.saved.push(path.basename(target));
+        } catch (err) {
+          out.skipped.push({ name: String((it && it.name) || '?'), reason: err.message });
+        }
+      }
+    } catch (err) {
+      out.success = false;
+      out.error = err.message;
+    }
+    return out;
+  });
+
+  // ==========================================
+  // 🧩 拖拽导入插件 / 脚本：把文件复制到插件库目录
+  //
+  // 🐞 2026-10-25 用户实测「拖动功能不能识别脚本文件导入」：
+  //    旧分流只认角色卡/世界书/预设，脚本（.js、JSON 脚本、扩展 manifest、正则、QR、配置）
+  //    全被当角色卡 → 被 parseAndAddCard 拒绝 → 看起来「拖了没反应」。
+  //    用户明确说明「脚本 = 插件库，只是名字叫法不同」⇒ 这些统一落到插件库。
+  //
+  // 与 file:importJsonToDir 的区别：**不限扩展名**（插件可能是 .js/.css/.html/图片资源）。
+  // ⚠️ 安全：目标目录必须在白名单内；源文件只允许常见脚本/资源扩展名（防被诱导复制任意文件）。
+  // ⚠️ 幂等：同内容文件已存在则跳过（避免「无限拖动同一个文件」重复入库）。
+  ipcMain.handle('file:importPluginFiles', async (event, { dirPath, items }) => {
+    const out = { success: true, saved: [], skipped: [], error: '' };
+    try {
+      if (!dirPath) { out.success = false; out.error = '目标目录为空'; return out; }
+      if (!isPathAllowed(dirPath)) { out.success = false; out.error = '目标目录未授权（请先用「打开插件目录」选择一次）'; return out; }
+      if (!fs.existsSync(dirPath)) { out.success = false; out.error = '目标目录不存在'; return out; }
+
+      // 允许的插件源文件扩展名（脚本 + 常见静态资源）
+      const ALLOWED = /\.(js|mjs|cjs|json|css|html|htm|txt|md|png|jpe?g|webp|gif|svg|woff2?|ttf|otf)$/i;
+      const list = Array.isArray(items) ? items : [];
+
+      for (const it of list) {
+        try {
+          const srcPath = String((it && it.path) || '');
+          if (!srcPath || !fs.existsSync(srcPath)) { out.skipped.push({ name: (it && it.name) || '?', reason: '源文件不存在' }); continue; }
+          const st = await fs.promises.stat(srcPath);
+          if (!st.isFile()) { out.skipped.push({ name: path.basename(srcPath), reason: '不是文件' }); continue; }
+          if (!ALLOWED.test(srcPath)) { out.skipped.push({ name: path.basename(srcPath), reason: '不支持的插件文件类型' }); continue; }
+
+          const baseName = path.basename(srcPath).replace(/[\\/:*?"<>|]/g, '_');
+          const content = await fs.promises.readFile(srcPath);
+
+          let target = path.join(dirPath, baseName);
+          if (fs.existsSync(target)) {
+            // 内容相同 ⇒ 跳过（幂等，防重复拖拽产生副本）
+            try {
+              const existing = await fs.promises.readFile(target);
+              if (existing.equals(content)) { out.skipped.push({ name: baseName, reason: '文件已存在（内容相同）' }); continue; }
+            } catch (e) { /* 读不到当新文件 */ }
+            // 内容不同 ⇒ 加后缀保留两份
+            const ext = path.extname(baseName);
+            const stem = baseName.slice(0, baseName.length - ext.length);
+            let n = 2;
+            while (fs.existsSync(target) && n < 1000) {
+              target = path.join(dirPath, `${stem} (${n})${ext}`);
+              n++;
+            }
+            if (fs.existsSync(target)) { out.skipped.push({ name: baseName, reason: '同名文件过多' }); continue; }
+          }
+
+          await fs.promises.writeFile(target, content);
+          out.saved.push(path.basename(target));
+        } catch (err) {
+          out.skipped.push({ name: String((it && it.name) || '?'), reason: err.message });
+        }
+      }
+    } catch (err) {
+      out.success = false;
+      out.error = err.message;
+    }
+    return out;
+  });
+
   // 🚀 全盘检索专属：外部卡片强行收编引擎
   // 全盘扫描找到的卡片可能散布在白名单之外的任意磁盘角落，
   // 该通道只校验【目标】必须是白名单内的卡片库，源路径为检索结果不校验。
@@ -4388,6 +4953,10 @@ app.whenReady().then(() => {
   // 智能校验：是否为「酒馆助手 JSON 脚本」（content 为注入 JS 字符串 + 可选 buttons）
   function isValidPluginJson(pData) {
     if (!pData || typeof pData !== 'object') return false;
+    // 🎨 UI 主题（晦明v2.6 等）：纯配色 JSON，没有 content/name 也合法。
+    //    历史上这里只认 `content` 字符串，主题文件被直接丢弃 → 插件库根本看不到主题，
+    //    「效果」页也就永远没有主题可预览。主题判定放在最前面，优先于脚本规则。
+    if (isThemeJson(pData)) return true;
     if (typeof pData.content !== 'string') return false;
     // 排除角色卡 / 世界书 / 预设
     if (pData.spec === 'chara_card_v2' || pData.spec === 'chara_card_v3') return false;
@@ -4395,6 +4964,29 @@ app.whenReady().then(() => {
     if (['prompts', 'prompt_order', 'temperature', 'max_tokens'].some(k => k in pData)) return false;
     // 至少要有 name / id / buttons 之一，才算插件脚本
     return !!(pData.name || pData.id || Array.isArray(pData.buttons));
+  }
+
+  /**
+   * 判断是否为酒馆 UI 主题 JSON（纯配色配置，无可执行代码）
+   * 判定：顶层命中 ≥3 个酒馆配色字段，且**不是**角色卡/世界书/预设。
+   * 与 js/plugins/pluginClassify.js 的 THEME_COLOR_KEYS 保持一致（那边是前端分类，这里只做收录门禁）。
+   */
+  function isThemeJson(pData) {
+    if (!pData || typeof pData !== 'object' || Array.isArray(pData)) return false;
+    // 明确排除其它 JSON 类型（避免误收）
+    if (pData.spec === 'chara_card_v2' || pData.spec === 'chara_card_v3') return false;
+    if (pData.entries && typeof pData.entries === 'object') return false; // 世界书
+    if (['prompts', 'prompt_order'].some(k => k in pData)) return false; // 预设
+    const themeKeys = [
+      'main_text_color', 'italics_text_color', 'underline_text_color', 'quote_text_color',
+      'blur_tint_color', 'chat_tint_color', 'user_mes_blur_tint_color', 'bot_mes_blur_tint_color',
+      'shadow_color', 'border_color', 'blur_strength',
+    ];
+    let hits = 0;
+    for (const k of themeKeys) {
+      if (Object.prototype.hasOwnProperty.call(pData, k)) hits++;
+    }
+    return hits >= 3;
   }
 
   // 校验扩展工程 manifest.json。兼容三种 SillyTavern 扩展格式：
@@ -4432,6 +5024,269 @@ app.whenReady().then(() => {
     walk(rootDir);
     return files;
   }
+
+  // 🔗 插件「链接安装」—— 对齐 SillyTavern 官方 install 接口的行为
+  //    （参考 E:\AI\SillyTavern\src\endpoints\extensions.js 的 POST /install）：
+  //      · 仅接受 http / https
+  //      · 目录名 = 仓库名（去 .git / .zip 后缀）经 sanitize
+  //      · 目标已存在 ⇒ 拒绝（**绝不覆盖**已有插件，官方返回 409）
+  //      · 装完必须能解析 manifest.json，否则**回滚删除**，不留半成品
+  //    差异：官方用 `git clone --depth 1`，本机不保证有 git，故改用 codeload zip
+  //    + 系统自带 bsdtar 解压（Windows 10+ 自带，libarchive 原生支持 zip）。
+  ipcMain.handle('plugin:installFromUrl', async (event, { url, dirPath, replace } = {}) => {
+    const out = { success: false, error: '', saved: [], folder: '', name: '', version: '', author: '' };
+    let stagingDir = '';
+    let finalDir = '';
+    try {
+      // ── 1. 参数校验 ────────────────────────────────────────────
+      const rawUrl = String(url || '').trim();
+      if (!rawUrl) { out.error = '请填写插件链接'; return out; }
+      let parsed;
+      try { parsed = new URL(rawUrl); } catch (e) { out.error = '链接格式不正确'; return out; }
+      if (!['http:', 'https:'].includes(parsed.protocol)) {
+        out.error = '只支持 http / https 开头的链接（与酒馆一致）';
+        return out;
+      }
+      if (!dirPath) { out.error = '请先选择插件库目录'; return out; }
+      if (!isPathAllowed(dirPath)) { out.error = '目标目录未授权（请先用「打开插件目录」选择一次）'; return out; }
+      if (!fs.existsSync(dirPath)) { out.error = '目标目录不存在'; return out; }
+
+      // ── 2. 解析链接形态 ────────────────────────────────────────
+      const plan = parseInstallUrl(rawUrl);
+      if (plan.kind === 'unknown') { out.error = plan.reason || '无法识别的链接'; return out; }
+
+      // 目录名规则对齐官方：取 pathname basename，去掉 .git / .zip
+      const sanitizeName = (n) => String(n || '')
+        .replace(/[\\/:*?"<>|\r\n\t]/g, '_')
+        .replace(/\.(git|zip|tar|gz)$/i, '')
+        .replace(/\s+/g, ' ').trim();
+      let folderName = sanitizeName(plan.displayName || plan.repo || 'plugin');
+      if (!folderName) { out.error = '无法从链接推断插件名称'; return out; }
+
+      // ── 3. 单文件插件（.json / .js）：直接落盘 ─────────────────
+      if (plan.kind === 'single-file') {
+        const fileName = sanitizeName(plan.fileName) || 'plugin.json';
+        const destPath = path.join(dirPath, fileName);
+        if (fs.existsSync(destPath) && !replace) {
+          out.error = `已存在同名文件「${fileName}」，未覆盖`;
+          out.skipped = true;
+          return out;
+        }
+        const resp = await net.fetch(rawUrl, {
+          headers: { 'User-Agent': 'Mozilla/5.0 (JSK-Manager; compatible)' },
+          redirect: 'follow',
+        });
+        if (!resp.ok) { out.error = `下载失败（HTTP ${resp.status}）`; return out; }
+        const declared = Number(resp.headers.get('content-length') || 0);
+        if (declared > MAX_URL_DOWNLOAD_BYTES) { out.error = '文件过大（超过 20MB）'; return out; }
+        const buf = Buffer.from(await resp.arrayBuffer());
+        if (!buf.length) { out.error = '下载内容为空'; return out; }
+        if (buf.length > MAX_URL_DOWNLOAD_BYTES) { out.error = '文件过大（超过 20MB）'; return out; }
+        // JSON 插件必须先验证能解析，避免把错误页存成"插件"
+        if (/\.json$/i.test(fileName)) {
+          let obj = null;
+          try { obj = JSON.parse(buf.toString('utf-8').replace(/^\uFEFF/, '')); } catch (e) { obj = null; }
+          if (!obj) { out.error = '下载到的不是有效 JSON（可能是错误页）'; return out; }
+          if (!isValidPluginJson(obj)) { out.error = '该 JSON 不是酒馆插件（缺 content / id 等字段）'; return out; }
+        }
+        await fs.promises.writeFile(destPath, buf);
+        out.success = true;
+        out.saved = [fileName];
+        out.folder = dirPath;
+        out.name = fileName.replace(/\.(json|m?js)$/i, '');
+        return out;
+      }
+
+      // ── 4. 仓库 / zip：下载压缩包到临时目录 ────────────────────
+      let zipUrl = rawUrl;
+      if (plan.kind === 'github-repo') {
+        // 先用声明分支，失败再退默认分支（HEAD）
+        zipUrl = gitHubZipUrl(plan.owner, plan.repo, plan.branch);
+      }
+
+      const fetchZip = async (u) => {
+        const resp = await net.fetch(u, {
+          headers: { 'User-Agent': 'Mozilla/5.0 (JSK-Manager; compatible)' },
+          redirect: 'follow',
+        });
+        if (!resp.ok) return { ok: false, status: resp.status, buf: null };
+        const declared = Number(resp.headers.get('content-length') || 0);
+        if (declared > MAX_PLUGIN_ZIP_BYTES) return { ok: false, status: 'too-large', buf: null };
+        const buf = Buffer.from(await resp.arrayBuffer());
+        if (buf.length > MAX_PLUGIN_ZIP_BYTES) return { ok: false, status: 'too-large', buf: null };
+        return { ok: true, status: resp.status, buf };
+      };
+
+      let got = await fetchZip(zipUrl);
+      // 分支不存在 ⇒ 退回默认分支再试一次（官方没有这一步，但用户在 /tree/ 里写错分支很常见）
+      if (!got.ok && plan.kind === 'github-repo' && plan.branch) {
+        zipUrl = gitHubZipUrl(plan.owner, plan.repo, '');
+        got = await fetchZip(zipUrl);
+      }
+      if (!got.ok) {
+        out.error = got.status === 'too-large'
+          ? '插件压缩包过大（超过 50MB），已中止'
+          : `下载失败（HTTP ${got.status}）`;
+        return out;
+      }
+      if (!got.buf || !got.buf.length) { out.error = '下载内容为空'; return out; }
+
+      // ── 5. 解压到临时目录（bsdtar 原生支持 zip，无需第三方依赖）──
+      //    ⚠️ 暂存目录**优先建在插件库所在盘**（dirPath 下），这样最后落盘是
+      //    「同盘 rename」而不是跨盘复制；系统临时盘（通常是 C:）只在目标不可写时兜底。
+      //    即便如此，moveDir() 仍保留了 EXDEV 降级，双保险。
+      const stagingParent = (() => {
+        try {
+          const wanted = path.join(dirPath, '.jsk-install-tmp');
+          fs.mkdirSync(wanted, { recursive: true });
+          // 快速可写探测
+          const probeFile = path.join(wanted, '.w');
+          fs.writeFileSync(probeFile, '');
+          fs.unlinkSync(probeFile);
+          return wanted;
+        } catch (e) {
+          return os.tmpdir();
+        }
+      })();
+      stagingDir = path.join(
+        stagingParent,
+        `jsk-plugin-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      );
+      await fs.promises.mkdir(stagingDir, { recursive: true });
+      const zipPath = path.join(stagingDir, '_pkg.zip');
+      await fs.promises.writeFile(zipPath, got.buf);
+
+      await new Promise((resolve, reject) => {
+        const tar = spawn('tar', ['-xf', zipPath, '-C', stagingDir], { windowsHide: true });
+        let errBuf = '';
+        tar.stderr.on('data', (d) => { errBuf += String(d); });
+        tar.on('error', (e) => reject(new Error('解压失败（系统缺少 tar）：' + e.message)));
+        tar.on('close', (code) => {
+          if (code === 0) resolve();
+          else reject(new Error('解压失败：' + (errBuf.trim() || `退出码 ${code}`)));
+        });
+      });
+      try { await fs.promises.unlink(zipPath); } catch (e) { /* 忽略 */ }
+
+      // ── 6. 定位真正的插件根（zip 常有一层 <repo>-<branch> 包裹）──
+      const listDir = async (d) => {
+        const ents = await fs.promises.readdir(d, { withFileTypes: true });
+        return ents.map((e) => ({ name: e.name, type: e.isDirectory() ? 'dir' : 'file' }));
+      };
+      let pluginRoot = stagingDir;
+      for (let i = 0; i < 3; i++) {
+        const entries = await listDir(pluginRoot);
+        const sub = pickPluginRoot(entries);
+        if (!sub) {
+          // 当前层不是插件根：若只有一层目录则下沉，否则停止
+          const dirs = entries.filter((e) => e.type === 'dir');
+          if (dirs.length === 1 && entries.filter((e) => e.type === 'file').length === 0) {
+            pluginRoot = path.join(pluginRoot, dirs[0].name);
+            continue;
+          }
+          break;
+        }
+        pluginRoot = path.join(pluginRoot, sub);
+      }
+
+      // ── 7. 校验：必须是可识别的插件（对齐官方「读 manifest，失败回滚」）──
+      let manifest = null;
+      const manifestPath = path.join(pluginRoot, 'manifest.json');
+      if (fs.existsSync(manifestPath)) {
+        try {
+          manifest = JSON.parse(await fs.promises.readFile(manifestPath, 'utf-8').catch(() => '{}'));
+        } catch (e) { manifest = null; }
+      }
+      const hasIndex = ['index.js', 'index.mjs', 'index.html']
+        .some((f) => fs.existsSync(path.join(pluginRoot, f)));
+      const hasPluginJson = fs.existsSync(pluginRoot)
+        && (await listDir(pluginRoot)).some((e) => e.type === 'file' && /\.json$/i.test(e.name));
+
+      if (!manifest && !hasIndex && !hasPluginJson) {
+        out.error = '下载的内容不像插件：既没有 manifest.json，也没有 index.js / 插件 JSON';
+        return out;   // finally 会清理临时目录
+      }
+
+      // 目录名优先用 manifest.name / display_name（更贴近插件真实名字）
+      if (manifest && (manifest.display_name || manifest.name)) {
+        const fromManifest = sanitizeName(manifest.display_name || manifest.name);
+        if (fromManifest) folderName = fromManifest;
+      }
+
+      // ── 8. 落盘：目标已存在 ⇒ 拒绝（官方 409 行为，绝不覆盖）──
+      //    ⚠️ 临时目录在系统盘（通常是 C:），插件库常在别的盘 ⇒ **不能用 fs.rename**，
+      //    否则报 `EXDEV: cross-device link not permitted`（用户实测就是这个错）。
+      //    统一走 moveDir()：先试 rename（同盘最快），跨盘降级为「递归复制 + 删源」。
+      const moveDir = async (src, dest) => {
+        try {
+          await fs.promises.rename(src, dest);
+        } catch (e) {
+          if (e && e.code === 'EXDEV') {
+            await fs.promises.cp(src, dest, { recursive: true, force: true });
+            await fs.promises.rm(src, { recursive: true, force: true });
+          } else {
+            throw e;
+          }
+        }
+      };
+
+      finalDir = path.join(dirPath, folderName);
+      if (fs.existsSync(finalDir)) {
+        if (!replace) {
+          out.error = `插件目录「${folderName}」已存在，未覆盖`;
+          out.existed = true;
+          return out;
+        }
+        // 用户明确要求覆盖 ⇒ 先备份改名，失败可回滚
+        const backupDir = finalDir + '.bak-' + Date.now();
+        await fs.promises.rename(finalDir, backupDir);
+        try {
+          await moveDir(pluginRoot, finalDir);
+          await fs.promises.rm(backupDir, { recursive: true, force: true });
+        } catch (e) {
+          try {
+            await fs.promises.rm(finalDir, { recursive: true, force: true });
+            await fs.promises.rename(backupDir, finalDir);
+          } catch (e2) { /* 尽力回滚 */ }
+          throw e;
+        }
+      } else {
+        await moveDir(pluginRoot, finalDir);
+      }
+
+      out.success = true;
+      out.folder = finalDir;
+      out.name = folderName;
+      out.version = (manifest && manifest.version) || '';
+      out.author = (manifest && (manifest.author || (Array.isArray(manifest.authors) ? manifest.authors.join(', ') : ''))) || '';
+      out.saved = [folderName];
+      addAllowedRoot(dirPath);
+      return out;
+    } catch (err) {
+      out.error = err && err.message ? err.message : String(err);
+      // 失败时把可能已写出的目录清干净（不留半成品）
+      try {
+        if (finalDir && fs.existsSync(finalDir) && out.success !== true) {
+          // 只在 finalDir 是本次新建的情况下删除
+          if (!out.existed) await fs.promises.rm(finalDir, { recursive: true, force: true });
+        }
+      } catch (e) { /* 忽略清理失败 */ }
+      return out;
+    } finally {
+      try {
+        if (stagingDir && fs.existsSync(stagingDir)) {
+          await fs.promises.rm(stagingDir, { recursive: true, force: true });
+        }
+      } catch (e) { /* 忽略 */ }
+      // 暂存父目录（插件库下的 .jsk-install-tmp）若已空则一并清掉，不留垃圾
+      try {
+        const parent = path.join(dirPath || '', '.jsk-install-tmp');
+        if (dirPath && fs.existsSync(parent) && fs.readdirSync(parent).length === 0) {
+          await fs.promises.rmdir(parent);
+        }
+      } catch (e) { /* 忽略 */ }
+    }
+  });
 
   // 扫描插件目录：识别三类形态 —— 酒馆助手 JSON 脚本 / 散落 JS 脚本 / 扩展工程（含 manifest.json 的目录）
   ipcMain.handle('plugin:scan', async (event, dirPath) => {
@@ -4500,14 +5355,21 @@ app.whenReady().then(() => {
           if (!entry.isFile()) continue;
           const ext = path.extname(entry.name).toLowerCase();
 
-          // ① 酒馆助手 JSON 脚本：目录下任意 .json，含 content JS 字符串
+          // ① 酒馆助手 JSON 脚本 / 🎨 UI 主题 JSON：目录下任意 .json
           if (ext === '.json') {
             try {
               const st = await fs.promises.stat(fullPath);
               if (st.size > MAX_PLUGIN_SCRIPT_BYTES) return;
               const pData = JSON.parse(await fs.promises.readFile(fullPath, 'utf-8'));
               if (isValidPluginJson(pData)) {
-                results.push({ type: 'json', path: fullPath, name: path.basename(fullPath), data: pData });
+                results.push({
+                  type: 'json',
+                  path: fullPath,
+                  name: path.basename(fullPath),
+                  data: pData,
+                  // 🎨 主题类：前端据此走「主题预览」而不是脚本沙箱
+                  isTheme: isThemeJson(pData),
+                });
               }
             } catch (e) { /* 静默跳过非插件 JSON */ }
             continue;
@@ -4590,12 +5452,31 @@ app.whenReady().then(() => {
   });
 
   // 🧩 插件「效果」页预览：渲染进程生成预览 HTML 后存主进程内存，返回 app:// 预览 URL
-  ipcMain.handle('plugin:setPreview', async (event, html) => {
+  //    opts.rootDir：插件根目录（相对资源代理用，解决「资源加载不出来」）
+  //    opts.reserveId：只分配 id 不存内容（渲染层需「先拿 id → 据此改写相对路径 → 再存内容」）
+  //    opts.reuseId：复用上面那个 id 存内容（两阶段写入，避免出现两份预览）
+  ipcMain.handle('plugin:setPreview', async (event, html, opts) => {
     try {
+      const o = opts || {};
+      // ① 预留阶段：内容可以为空，只回 id / url
+      if (o.reserveId) {
+        const id = setPluginPreview('', o.rootDir);
+        return { success: true, id, url: 'app://index.html' + PREVIEW_PATH_PREFIX + id + '.html' };
+      }
       if (typeof html !== 'string' || html.length === 0) return { success: false, error: '预览内容为空' };
       if (html.length > 5 * 1024 * 1024) return { success: false, error: '预览内容过大' };
-      const id = setPluginPreview(html);
-      return { success: true, url: 'app://index.html' + PREVIEW_PATH_PREFIX + id + '.html' };
+      // ② 正式写入（可带 reuseId 覆盖预留那份）
+      //    ⚠️ rootDir 必须「沿用预留时登记的值」：真实 ESM 模式下浏览器会立刻
+      //    请求 app://…/__jsk_plugin_res__/<id>/<入口>，若此处用未传的 rootDir
+      //    覆盖成空串，资源代理全部 404，模块树整体加载失败。
+      let finalRootDir = o.rootDir;
+      if ((finalRootDir === undefined || finalRootDir === '') && typeof o.reuseId === 'string') {
+        const prev = previewStore.get(o.reuseId);
+        if (prev && prev.rootDir) finalRootDir = prev.rootDir;
+      }
+      const id = setPluginPreview(html, finalRootDir, typeof o.reuseId === 'string' ? o.reuseId : undefined);
+      // 🗂️ 资源代理按 previewId 定位插件根目录（见协议分支 PLUGIN_RES_PATH_PREFIX）
+      return { success: true, id, url: 'app://index.html' + PREVIEW_PATH_PREFIX + id + '.html' };
     } catch (err) {
       return { success: false, error: err.message };
     }

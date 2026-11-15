@@ -383,6 +383,14 @@ export function registerAppCommands(registry, ctx) {
 
         // ==================== 实验与工具 ====================
         {
+            // 🛠️ 一键装桌面版酒馆（安装 / 启停 / 升级 / 两档卸载）
+            //    规格：资料库/一键安装桌面版酒馆-方案-v1.md
+            id: 'tools.stInstall', title: '🛠️ 酒馆安装与维护…', category: '工具',
+            menu: 'tools', section: 1, order: 0,
+            tooltip: '一键安装桌面版 SillyTavern（自动检测/安装 Node）、启动停止、升级、卸载（两档：只删酒馆 / 彻底删除）',
+            run: () => ctx.openStInstallModal()
+        },
+        {
             id: 'app.commandPalette', titleFn: () => '⌘ 命令面板...', category: '通用',
             menu: 'tools', section: 1, order: 1, shortcut: 'Ctrl+Shift+P',
             tooltip: '搜索并执行任意命令（菜单里的命令都可在这里找到）',

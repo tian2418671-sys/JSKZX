@@ -9,6 +9,9 @@
 import { triggerRef } from 'vue';
 import { normalizeCardData, isCharacterCardData, getCardRejectReason } from '../utils/cardLoader.js';
 import { parsePNGChunk, deepScanForJSON } from '../utils/pngParser.js';
+// 🗂️ 拖拽导入分流（2026-10-25）：按 JSON 内容判定「角色卡 / 世界书 / 预设」，
+//    避免世界书与预设被当成角色卡复制进卡库却没入库（用户实测 bug）。
+import { DROP_KIND, classifyDroppedJson, planDrop, isScriptFileName } from '../utils/dropRouter.js';
 import { clearMemoryByCard } from './chat/useChatMemory.js';
 // 🛡️ PK-32（2026-09-25）：保存前把瘦身卡拉回完整态 —— 否则会把卡内世界书正文写空（数据丢失）。
 //    走 `cardSlim` 的**模块级注册表**（App.vue 启动时注册），不需要逐处注入。
@@ -186,7 +189,12 @@ export function useCardCrud({
     // —— 跨域回调（UI 域 / 分组域，注入而非搬移，斩断循环依赖） ——
     reset,                // 关闭编辑面板（删除当前打开卡片时）
     openFromLibrary,      // 打开库中卡片（切库后重绑）
-    cleanupEmptyCategories // 自动清理空分组（useCardGroups 产出；箭头包装延迟绑定）
+    cleanupEmptyCategories, // 自动清理空分组（useCardGroups 产出；箭头包装延迟绑定）
+    // —— 🗂️ 拖拽导入分流（2026-10-25）：把世界书/预设落到各自库里 ——
+    //    不注入时（旧调用方/单测）自动降级为「全部按角色卡处理」，行为与旧版一致。
+    importDroppedWorldbooks, // (items) => Promise<{ok:number, skip:number, dir:string}>
+    importDroppedPresets,    // (items) => Promise<{ok:number, skip:number, dir:string}>
+    importDroppedPlugins     // (items) => Promise<{ok:number, skip:number, dir:string}>（脚本/插件）
 }) {
     // =========================================================
     // 💾 持久化域（配置覆盖层 + 物理重写）
@@ -895,51 +903,149 @@ export function useCardCrud({
      */
     const processElectronFilesLocked = (folderData) => withLoadLock(() => processElectronFiles(folderData));
 
-    // 系统级拖拽导入：将拖入的文件复制到卡片库文件夹
+    // 系统级拖拽导入：**先按内容判类型**，再分别落到卡库 / 世界书库 / 预设库
+    //
+    // 🐞 2026-10-25 真 bug（用户实测）：
+    //    「拖动导入世界书是角色卡，拖动导入预设也是角色卡；拖动导入后预设库没有、角色卡库也没有」
+    //    旧实现拿到文件就 `copyToLibrary` 复制进卡库，再走 parseAndAddCard；
+    //    而 parseAndAddCard 内的 isCharacterCardData 会拒掉非角色卡 ⇒
+    //      世界书/预设被**复制进卡库目录却没入库**（垃圾文件），且世界书库/预设库毫无变化。
+    //    现改为：先读 JSON 内容判类型（dropRouter.classifyDroppedJson），
+    //      世界书 → importDroppedWorldbooks，预设 → importDroppedPresets，
+    //      其余（含 .png 卡、认不出的 JSON）→ 原角色卡流程。
     const handleDrop = async (e) => {
         e.preventDefault();
         isDragging.value = false;
         dragCounter.value = 0; // 重置计数器
 
-        // 检查是否已设置固定的卡片库文件夹
-        if (!currentFolderPath.value) {
-            return nativeAlert('请先在顶部【选择固定文件夹读取】，设定你的卡片库目录，然后再拖入新卡片。', 'warning');
-        }
-
         // 获取拖入文件的真实绝对路径
         // 注意：Electron 33 起 File.path 已移除，须经 webUtils.getPathForFile 获取（由 preload 暴露）
         const files = Array.from(e.dataTransfer.files);
         const filePaths = files
-            .map(f => window.electronAPI ? window.electronAPI.getPathForFile(f) : f.path)
+            .map(f => {
+                try {
+                    return window.electronAPI ? window.electronAPI.getPathForFile(f) : f.path;
+                } catch (err) {
+                    return null;
+                }
+            })
             .filter(p => p);
 
-        if (filePaths.length > 0) {
-            // 调用主进程，把拖入的文件复制到库文件夹
-            const copiedFiles = await window.electronAPI.copyToLibrary(filePaths, currentFolderPath.value);
+        // 🐞 2026-10-25 用户实测「拖拽本身完全正常，只是识别错了类型」：
+        //    旧写法 `if (!filePaths.length) return;` 保持原样（不为空即有文件），不做额外提示，
+        //    避免在正常拖拽路径上弹出多余弹窗干扰用户。
+        if (!filePaths.length) return;
 
-            if (copiedFiles.length > 0) {
-                nativeAlert(`成功将 ${copiedFiles.length} 张新卡片导入到你的卡片库中！`, 'info');
+        // 检查是否已设置固定的卡片库文件夹（角色卡落库需要；纯世界书/预设拖入不该被这条拦住）
+        const hasCardFolder = !!currentFolderPath.value;
 
-                // 【性能修复】只解析并追加新拖入的文件（O(1) 增量），
-                // 避免原实现调 processElectronFiles 清空全库后逐张重读重解析（千卡库拖 1 张也全量重载）
-                // 🚀 v2.0 修复：并发解析 + seenPaths O(1) 去重（替代旧版串行 for...await）
-                const CONCURRENCY = 8;
-                const seenPaths = new Set();
-                for (let i = 0; i < copiedFiles.length; i += CONCURRENCY) {
-                    const batch = copiedFiles.slice(i, i + CONCURRENCY);
-                    await Promise.all(batch.map(newFilePath => {
-                        const fName = newFilePath.split(/[\\/]/).pop();
-                        const isImg = /\.(png|jpe?g|webp)$/i.test(fName);
-                        return parseAndAddCard({
-                            name: fName,
-                            path: newFilePath,
-                            url: isImg ? 'local-file://img/?path=' + encodeURIComponent(newFilePath) : null
-                        }, { seenPaths });
-                    }));
-                }
-            } else {
-                nativeAlert('导入失败：卡片格式不支持，或者库中已存在同名文件。', 'warning');
+        // ── ① 逐一判类型（.json 读内容判；.js 直接归插件；图片卡归角色卡） ──────────
+        const classified = [];
+        for (const p of filePaths) {
+            const name = String(p).split(/[\\/]/).pop() || '';
+            // 🧩 .js / .mjs / .cjs 一律归插件库（用户明确：「脚本 = 插件库」）
+            if (isScriptFileName(name)) {
+                classified.push({ path: p, name, kind: DROP_KIND.PLUGIN, reason: 'JS 脚本文件' });
+                continue;
             }
+            if (!/\.json$/i.test(name)) {
+                classified.push({ path: p, name, kind: DROP_KIND.CARD, reason: '非 JSON（图片卡）' });
+                continue;
+            }
+            let parsed = null;
+            try {
+                // ⚠️ 不能用 readText：它有白名单校验，而拖入文件通常在桌面/下载目录 ⇒ 必被拒。
+                //    改走 peekJsonForDrop（只读、仅 .json、≤8MB，无白名单但只放读不放写）。
+                const res = await window.electronAPI.peekJsonForDrop(p);
+                if (res && res.success && typeof res.text === 'string') parsed = JSON.parse(res.text);
+            } catch (err) { parsed = null; }
+            const cls = parsed ? classifyDroppedJson(parsed) : { kind: DROP_KIND.UNKNOWN, reason: 'JSON 解析失败' };
+            classified.push({ path: p, name, kind: cls.kind, reason: cls.reason, data: parsed });
+        }
+
+        const plan = planDrop(classified);
+        const notes = [];
+
+        // ── ② 世界书 → 世界书库 ─────────────────────────────────
+        if (plan.worldbooks.length) {
+            try {
+                const r = typeof importDroppedWorldbooks === 'function'
+                    ? await importDroppedWorldbooks(plan.worldbooks)
+                    : null;
+                if (r && r.dir) {
+                    notes.push(`🌍 世界书 ${r.ok} 本已导入到「${r.dir}」${r.skip ? `（${r.skip} 本已存在，跳过）` : ''}`);
+                } else if (r) notes.push(`🌍 世界书 ${r.ok} 本已导入`);
+                else notes.push('⚠️ 未配置世界书库目录，世界书未导入');
+            } catch (err) {
+                notes.push(`❌ 世界书导入失败：${(err && err.message) || err}`);
+            }
+        }
+
+        // ── ③ 预设 → 预设库 ───────────────────────────────────
+        if (plan.presets.length) {
+            try {
+                const r = typeof importDroppedPresets === 'function'
+                    ? await importDroppedPresets(plan.presets)
+                    : null;
+                if (r && r.dir) {
+                    notes.push(`🎛️ 预设 ${r.ok} 个已导入到「${r.dir}」${r.skip ? `（${r.skip} 个已存在，跳过）` : ''}`);
+                } else if (r) notes.push(`🎛️ 预设 ${r.ok} 个已导入`);
+                else notes.push('⚠️ 未配置预设库目录，预设未导入');
+            } catch (err) {
+                notes.push(`❌ 预设导入失败：${(err && err.message) || err}`);
+            }
+        }
+
+        // ── ④ 插件 / 脚本 → 插件库 ─────────────────────────────
+        if (plan.plugins.length) {
+            try {
+                const r = typeof importDroppedPlugins === 'function'
+                    ? await importDroppedPlugins(plan.plugins)
+                    : null;
+                if (r && r.dir) {
+                    notes.push(`🧩 插件 ${r.ok} 个已导入到「${r.dir}」${r.skip ? `（${r.skip} 个已存在，跳过）` : ''}`);
+                } else if (r) notes.push(`🧩 插件 ${r.ok} 个已导入`);
+                else notes.push('⚠️ 未配置插件库目录，插件未导入');
+            } catch (err) {
+                notes.push(`❌ 插件导入失败：${(err && err.message) || err}`);
+            }
+        }
+
+        // ── ⑤ 其余（角色卡）→ 原流程 ───────────────────────────
+        //    ⚠️ unknown 也走这里：保持旧行为（parseAndAddCard 会自行判断收/拒并记录原因）
+        const cardPaths = [...plan.cards, ...plan.unknown].map(x => x.path);
+        if (cardPaths.length) {
+            if (!hasCardFolder) {
+                notes.push('⚠️ 请先在顶部【选择固定文件夹读取】设定卡片库目录，角色卡未导入');
+            } else {
+                const copiedFiles = await window.electronAPI.copyToLibrary(cardPaths, currentFolderPath.value);
+                if (copiedFiles.length > 0) {
+                    const CONCURRENCY = 8;
+                    const seenPaths = new Set();
+                    for (let i = 0; i < copiedFiles.length; i += CONCURRENCY) {
+                        const batch = copiedFiles.slice(i, i + CONCURRENCY);
+                        await Promise.all(batch.map(newFilePath => {
+                            const fName = newFilePath.split(/[\\/]/).pop();
+                            const isImg = /\.(png|jpe?g|webp)$/i.test(fName);
+                            return parseAndAddCard({
+                                name: fName,
+                                path: newFilePath,
+                                url: isImg ? 'local-file://img/?path=' + encodeURIComponent(newFilePath) : null
+                            }, { seenPaths });
+                        }));
+                    }
+                    notes.push(`🎴 角色卡 ${copiedFiles.length} 张已导入卡片库`);
+                } else {
+                    notes.push('⚠️ 角色卡导入失败：格式不支持，或库中已存在同名文件');
+                }
+            }
+        }
+
+        // ── ⑥ 统一反馈 ────────────────────────────────────────
+        if (notes.length) {
+            const hasErr = notes.some(n => n.startsWith('❌'));
+            const hasWarn = notes.some(n => n.startsWith('⚠️'));
+            nativeAlert(notes.join('\n'), hasErr ? 'error' : (hasWarn ? 'warning' : 'success'));
         }
     };
 

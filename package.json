@@ -1,7 +1,7 @@
 {
   "name": "sillytavern-card-manager",
-  "version": "2.4.5",
-  "description": "SillyTavern 角色卡高级解析中心 - 本地桌面版（Vue 3 + Tailwind CSS + Electron）",
+  "version": "2.5.0",
+  "description": "SillyTavern 资源管理器 - 角色卡 / 世界书 / 预设 / 插件 本地桌面管理（Vue 3 + Tailwind CSS + Electron）",
   "main": "main.js",
   "author": {
     "name": "SillyTavern Community"
@@ -35,7 +35,7 @@
   },
   "build": {
     "appId": "com.sillytavern.cardmanager",
-    "productName": "SillyTavern 角色卡管理器",
+    "productName": "SillyTavern 资源管理器",
     "directories": {
       "output": "dist"
     },

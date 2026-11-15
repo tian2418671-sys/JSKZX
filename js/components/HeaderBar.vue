@@ -11,7 +11,7 @@
         <div class="flex items-center gap-6">
             <div class="font-bold text-zinc-100 text-base tracking-wide flex items-center gap-2 cursor-pointer">
                 <span class="text-xl drop-shadow-md">🌌</span>
-                <span>角色卡管理中心</span>
+                <span>SillyTavern 资源管理器</span>
             </div>
 
             <!-- 顶部下拉菜单系统 -->

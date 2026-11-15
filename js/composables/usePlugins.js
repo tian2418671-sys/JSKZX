@@ -40,6 +40,78 @@ export function usePlugins({
         appMode.value = 'plugins';
     };
 
+    // 🔗 链接安装（对齐 SillyTavern「扩展 → 安装扩展」填仓库地址的做法）
+    //    · 没选过插件库目录 → 先让用户选一个（装到哪儿必须先确定）
+    //    · 已有同名目录 → 主进程返回 existed:true，这里二次确认是否覆盖
+    //    · 装完自动重扫 → 侧栏立刻出现新插件（否则用户会以为"没反应"）
+    const pluginInstalling = ref(false);
+    const installPluginFromUrlFlow = async () => {
+        if (pluginInstalling.value) return;
+        try {
+            // 1) 目录：没有就现选一个
+            let dir = lastPluginDirPath.value;
+            if (!dir) {
+                const picked = await window.electronAPI.selectGenericFolder();
+                if (!picked) return;
+                dir = picked;
+                lastPluginDirPath.value = dir;
+                try { localStorage.setItem('jsTavern_lastPluginDir', dir); } catch (e) { /* 忽略 */ }
+            }
+
+            // 2) 链接输入
+            const url = await appPrompt(
+                '🔗 安装插件：粘贴链接\n\n支持 GitHub 仓库地址（如 https://github.com/作者/仓库）、\n.zip 压缩包直链，或单个 .json / .js 插件文件链接。',
+                '',
+            );
+            if (!url || !String(url).trim()) return;
+
+            pluginInstalling.value = true;
+            addLog(`开始从链接安装插件: ${String(url).trim()}`);
+
+            // 3) 调用主进程安装
+            let res = await window.electronAPI.installPluginFromUrl({ url: String(url).trim(), dirPath: dir });
+
+            // 4) 目录已存在 → 询问是否覆盖（绝不静默覆盖）
+            if (!res.success && res.existed) {
+                const ok = await confirmDialog(
+                    '⚠️ 插件已存在',
+                    `${res.error}\n\n覆盖会先备份旧目录，成功后删除备份。\n\n确认覆盖安装？`,
+                );
+                if (!ok) {
+                    addLog('用户取消覆盖安装', 'info');
+                    return;
+                }
+                res = await window.electronAPI.installPluginFromUrl({
+                    url: String(url).trim(),
+                    dirPath: dir,
+                    replace: true,
+                });
+            }
+
+            if (!res.success) {
+                addLog(`插件安装失败: ${res.error}`, 'error');
+                nativeAlert(`插件安装失败\n\n${res.error}`, 'error');
+                return;
+            }
+
+            // 5) 成功：提示 + 重扫 + 切到插件视图
+            const meta = [res.name || '', res.version ? `v${res.version}` : '', res.author || '']
+                .filter(Boolean).join(' · ');
+            addLog(`插件安装成功: ${meta}`, 'success');
+            nativeAlert(
+                `✅ 插件安装成功\n\n${meta}\n\n已保存到：${res.folder}`,
+                'success',
+            );
+            await scanPluginDir(dir);
+            appMode.value = 'plugins';
+        } catch (e) {
+            addLog(`插件安装异常: ${e && e.message ? e.message : e}`, 'error');
+            nativeAlert(`插件安装异常：${e && e.message ? e.message : e}`, 'error');
+        } finally {
+            pluginInstalling.value = false;
+        }
+    };
+
     // 扫描指定插件目录（供手动选择与启动自动恢复共用；自动持久化记忆路径）
     const scanPluginDir = async (dirPath) => {
         if (!dirPath) return;
@@ -224,6 +296,9 @@ export function usePlugins({
         loadPlugins,
         scanPluginDir,
         normalizePlugins,
+        // 🔗 链接安装
+        pluginInstalling,
+        installPluginFromUrlFlow,
         // 筛选
         filteredPlugins,
         // 删除 / 右键

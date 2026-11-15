@@ -8,6 +8,8 @@ import { ref, computed } from 'vue';
 export function usePresets({
     // 共享状态
     presets, activePreset, lastPresetDirPath,
+    // 🆕 2026-10-25 用户需求：预设库补齐排序（wbSortBy 同款口径）
+    presetSortBy,
     // 工具方法
     nativeAlert, confirmDialog, addLog, appPrompt,
     contextMenu, closeContextMenu,
@@ -74,11 +76,45 @@ export function usePresets({
 
     const filteredPresets = computed(() => {
         const q = presetSearchQuery.value.trim().toLowerCase();
-        if (!q) return presets.value;
-        return presets.value.filter(p => {
+        const base = !q ? presets.value : presets.value.filter(p => {
             const name = (p.data && p.data.name) || p.name || '';
             return name.toLowerCase().includes(q);
         });
+
+        // 🆕 2026-10-25 用户需求：预设库补齐排序（与角色卡库/世界书库同款口径）
+        //   ⚠️ slice() 得到副本再 sort —— Array.sort 原地修改，不要污染 presets.value 的顺序。
+        const mode = (presetSortBy && presetSortBy.value) || 'name';
+        const arr = base.slice();
+        const nameOf = (p) => String((p.data && p.data.name) || p.name || '');
+        const sizeOf = (p) => {
+            if (typeof p.fileSize === 'number') return p.fileSize;
+            try { return p.data ? JSON.stringify(p.data).length : 0; } catch (e) { return 0; }
+        };
+        const mtimeOf = (p) => Number(p.mtime || p._mtime || 0);
+        // 预设专有：提示词条数（prompts 数组长度），一眼看出哪套最复杂
+        const promptsOf = (p) => {
+            const arr2 = p && p.data && Array.isArray(p.data.prompts) ? p.data.prompts : [];
+            return arr2.length;
+        };
+
+        if (mode === 'name') {
+            arr.sort((a, b) => nameOf(a).localeCompare(nameOf(b), 'zh-Hans-CN'));
+        } else if (mode === 'nameDesc') {
+            arr.sort((a, b) => nameOf(b).localeCompare(nameOf(a), 'zh-Hans-CN'));
+        } else if (mode === 'mtime') {
+            arr.sort((a, b) => mtimeOf(b) - mtimeOf(a));
+        } else if (mode === 'mtimeAsc') {
+            arr.sort((a, b) => mtimeOf(a) - mtimeOf(b));
+        } else if (mode === 'sizeDesc') {
+            arr.sort((a, b) => sizeOf(b) - sizeOf(a));
+        } else if (mode === 'sizeAsc') {
+            arr.sort((a, b) => sizeOf(a) - sizeOf(b));
+        } else if (mode === 'prompts') {
+            arr.sort((a, b) => promptsOf(b) - promptsOf(a));
+        }
+        // 'manual' 或未知值：保持原顺序（不排序）
+
+        return arr;
     });
 
     // =========================================================

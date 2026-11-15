@@ -1,9 +1,340 @@
-# SillyTavern 角色卡管理器 · v1.0 → v2.4.2 更新汇总
+# SillyTavern 资源管理器 · v1.0 → v2.5.0 更新汇总
 
-> 更新周期：2026-08-09 ~ 2026-10-18
+> 更新周期：2026-08-09 ~ 2026-10-26
 > 技术栈：Electron + Vue3 + Tailwind + ECharts
 
 ---
+
+## 🛠️ v2.5.0 · 桌面版酒馆一键安装 / 升级 / 启停 / 两档卸载（新功能 + 改名）（2026-10-26）
+
+> 需求来源：「软件功能已超越『角色卡高级管理中心』这个名字」，且「要能一键装酒馆，才算管理器」。
+
+### ✨ 新增：桌面版酒馆安装器
+
+**入口**：工具菜单 `tools.stInstall` → `StInstallModal.vue`。
+
+- **目录检测** — `stManager.inspect()`
+  - 依据 `server.js` / `public/` / `data/` / `config.yaml` / `package.json`
+  - 判定 `ready` / `incomplete` / `notFound`
+  - 同时读版本、git 状态、`node_modules`、数据规模
+- **一键安装** — `stManager.install()`
+  - codeload 下载 `release` 分支 zip
+  - 镜像回退：`ghfast.top` → `gh-proxy.com`
+  - **系统自带 `bsdtar` 解压**（零新依赖）
+  - `npm install --omit=dev` → 写 `_jsk-runtime/runtime.json`
+- **配套 Node** — 三层兜底
+  - L1 `node --version` 检测
+  - L2 `winget install OpenJS.NodeJS.LTS`
+  - L3 官网引导按钮
+- **启停**
+  - `startServer()` spawn 绝对路径 node，**TCP 探活**判定就绪
+  - `stopServer()` 走 `taskkill /T /F`
+- **升级**
+  - 有 `.git` → `git pull --ff-only`
+  - 否则先 `backupData()` 再 zip 覆盖
+  - 两种情况都**保留 `data/` 与 `config.yaml`**
+- **两档卸载**
+  - mode 1：只删程序（保数据）
+  - mode 2：连注册表 + userData + `_jsk-runtime` 一并清
+
+### 🔴 本版修复的关键缺陷
+
+#### 1. 世界书 / 会话统计恒为 0（DF-76）
+
+- **现象**：真实酒馆 `inspect()` 返回 `worldbooks: 0, chats: 0`，而实际有 108 本世界书、170 个会话。
+- **根因**：`inspect` 里自写的目录遍历只按 `characters` 求和，`worlds` / `chats` 根本没实现；
+  `inventory` 里的另一份实现又只取 `chats` **目录第一层**文件，而真实结构是 `chats/<角色名>/*.jsonl`（隔了一层）。
+- **修复**：抽出统一 `countStData(dataDir)`（`main/stManager.js:109`），
+  递归按目录名宽松匹配 `characters` / `worlds` / `chats` / `group chats`，两处调用点共用。
+- **验证**：真实库 `E:\AI\SillyTavern` → `cards: 40, worldbooks: 108, chats: 170`。
+
+#### 2. 服务明明已启动，却报「30 秒内未监听端口」（DF-77）
+
+- **现象**：点「启动酒馆」等 30 秒后提示失败；但浏览器打开 `localhost:8000` 一切正常，进程也还活着。
+- **根因**：`isPortBusy(port)` 用 `net.createServer().listen(port, '127.0.0.1')` 判断，
+  而 Node/酒馆绑定的是 **IPv6 通配 `::`** —— 二者**不冲突**，`EADDRINUSE` 永不触发 ⇒ 恒返回「不忙」⇒ 永远等不到就绪。
+- **修复**：新增 `isPortListening(port)` 做**主动 TCP 连接**探测（`net.connect` + 1.2s 超时），
+  启动等待与会话状态查询都改用它；等待上限同时放宽到 180 秒并每 10 秒回报进度（大库首启确实慢）。
+- **验证**：修复前 180s 超时失败 → 修复后 **6725ms 返回成功**；`stop()` 后端口立即关闭，
+  `status()` 正确返回 `running:false`。
+
+#### 3. 注册表清单可能误删系统软件（高危）
+
+- **现象**：新增的 `st:uninstallEntries` 初版把
+  `listUninstallEntries()` 的 **`entries`（全机 318 项）** 整包返回给渲染层，
+  包含 Intel、.NET SDK、Python 等系统软件。
+- **根因**：`listUninstallEntries()` 返回的是 `{ entries, owned, skipped }`，
+  `entries` 是**全量扫描结果**，只有 `owned` 才是白名单命中的归属项；IPC 层取错了字段。
+- **修复**：IPC 只回传 `owned`（可清理项）与 `skipped`（被排除项，供界面说明），并附 `totalScanned`；
+  **绝不**把全量交给渲染层。
+- **验证**：真实环境扫描 318 项 → `items: []`、`skipped` 精确命中
+  Chrome 安装的 PWA（`DisplayName=SillyTavern, Publisher=Google\Chrome`），
+  `reason: 属于浏览器安装的网页应用（PWA），非本软件创建` ⇒ **不删**。
+
+#### 4. `getServerStatus()` 回到「未运行」（DF-78）
+
+- **现象**：应用重启后，即使用户自己用 `start.bat` 起了酒馆，界面仍显示未运行。
+- **根因**：`getServerStatus()` 只读内存里的 `serverProc`，进程外启动或应用重启后该引用为 `null`。
+- **修复**：改为 `async`，除 `serverProc` 外**再探一次端口**，任一成立即 `running: true`；
+  新增 `tracked` 字段区分「本软件托管」与「外部已在跑」。
+  `main.js` 调用处同步 `await`。
+
+#### 5. 全局 `fade` 过渡不收敛 → 隐形遮罩吞点击（AR-78）
+
+- **现象**：连续开关若干弹窗后，界面**看不出任何异常**，但点哪都没反应。
+- **取证**：CDP 抓 DOM 发现多个 `div.fixed.inset-0` 残留 ——
+  `opacity: 0`（看不见）却 `pointer-events: auto`（照样吃点击）；
+  `elementFromPoint(100,700)` 命中的正是其中一个 `z-[110]` 遮罩。
+  实测连续开关「命令面板 → 整库冷备 → 一键质检」可叠出 **3 层隐形遮罩**。
+- **根因**：`css/style.css` 用 `transition: opacity .4s` 做淡出，**`transitionend` 在部分场景下不触发**
+  （元素 opacity 已归 0、视觉上动画跑完了，但 Vue 的离场钩子等不到结束回调），节点永久留在 DOM。
+  触发与节奏/并发相关 —— 慢速单个操作往往正常，快速连续开关命中率高，故长期未被发现。
+- **修复**：① `fade` / `slide-up` / `toast` 三组过渡**全部改用 CSS `animation`**
+  （animation 由时间驱动，`animationend` 必定触发，不依赖属性是否真的变化）；
+  ② 所有 `*-leave-active` 统一加 **`pointer-events: none`** 兜底 —— 将来若以别的方式残留也绝不吞点击。
+- **验证**：修复前 6 个弹窗只有 2 个能干净关闭 → 修复后 **6/6 全绿**；
+  另注入 `fade-leave-active` 探针层，实测 `pointer-events: none` + `elementFromPoint` 穿透。
+- **覆盖面**：29 处 `<transition name="fade">` 共用同一套全局样式，改一处 CSS 即可全覆盖。
+
+#### 6. 弹窗内「选择目录…」点了没反应（AR-77）
+
+- **根因**：`App.vue` 的 `setup()` 末尾是 `return ctx;` —— **模板能访问的一切必须先放进 `ctx`**。
+  `selectGenericFolderForSt` / `stNotify` 定义了却漏进 `ctx` ⇒ 模板解析为 `undefined`
+  ⇒ `StInstallModal.pickDir()` 首行 `if (!props.selectFolder) return;` **静默返回**。
+  同一遗漏还让 `:notify` 失效，弹窗内所有 toast 一起失声。
+- **修复**：① 两个回调补进 `ctx`；② `pickDir` 不再静默 `return`（缺 props 时 toast + 写日志）；
+  ③ `dialog:selectGenericFolder` 补**父窗口**（避免对话框跑到主窗口背后）并加 `createDirectory`；
+  ④ 新增 `test/appCtxExposure.test.mjs`（4 例）扫「模板引用的标识符是否都在 ctx 里」，
+  227 个绑定零误报，并反向验证过（撤掉修复能精确报出两个缺失名）。
+- **为何原防线没拦住**：`ctx_exposure.py` 只扫 `ref/computed/reactive`，**扫不到箭头函数**。
+
+### 🔌 插件预览：真实 ESM 重构 + 宿主桩自动生成 + 链接安装
+
+> 本版之前，插件预览是「桩模拟」：用一把万能 Proxy 假装宿主环境。
+> 结果是大量插件点开即白屏或报一堆莫名其妙的错，逐个人肉修根本修不完。
+
+#### 1. 改为真实 ES Module 加载
+
+- **删掉 `js/plugins/esmModules.js` 等桩模拟代码（约 700 行）**，改为真正的模块加载：
+  - 生成 `<script type="importmap">` 把裸说明符（`jquery` / `lodash` / `handlebars` 等）
+    与酒馆根路径（`personas.js` / `script.js` 等 27 项）映射到宿主桩；
+  - 用 `<script type="module">import('app://…/__jsk_plugin_res__/<previewId>/<entry>')`
+    加载真正入口；
+  - 入口由插件的 manifest 决定，不再是「猜哪个文件像入口」。
+- 副作用收益：`test/preview.js`、`dev/ui-lint.js` 里那种顶层 `await` 报
+  `Uncaught SyntaxError: Unexpected reserved word` 的问题自动消失（真实 ESM 自然支持）。
+
+#### 2. 宿主桩改为自动生成（不再手写、不再漏）
+
+- 新增 `scripts/gen-host-stubs.mjs`：从真实酒馆源码
+  （`public/scripts/st-context.js` + `public/scripts/**/*.js` 的全部 export + `events.js`）
+  提取宿主 API 清单，产出 `js/plugins/hostStubs.generated.js`
+  （**4443 行 / 约 271 KB**）：
+  - `CONTEXT_MEMBERS` **155** 个上下文成员
+  - `EVENT_TYPES` **104** 个事件类型
+  - `HOST_MODULE_EXPORTS` 去重后 **2044** 个模块导出
+- 升级酒馆后重跑一次脚本即可同步新接口，不必等有人踩坑才补。
+
+#### 3. 逐条修掉的加载失败（都是实测撞出来的）
+- **`fetch(new URL('./x', import.meta.url))` → `Failed to fetch`**
+  - 根因：`__jskMeta.url` 硬编码成 `file:///plugin/dist/bundle.js`
+  - 修法：改为资源代理 URL `app://…/__jsk_plugin_res__/<previewId>/index.js`
+- **`Cannot read properties of undefined`（指向一段奇怪的匿名函数）**
+  - 根因：万能 Proxy 污染了 `$.fn` 的原型链
+  - 修法：删除 `obj.__proto__ = getPrototypeOf($.fn)`，显式镜像 `NATIVE_EL_METHODS`
+- **RedBird 报 `Cannot read properties of undefined (reading 'redbird_tools')`**
+  - 根因：`extensionSettings` / `extension_settings` 缺失
+  - 修法：`getContext()` 补齐并**做成 getter**（防止定义时就把 `undefined` 捕获进去）
+- **随机指令 → `Maximum call stack size exceeded`**
+  - 根因：`chatMetadata: {}` 每次返回新对象，触发 `render ↔ refresh` 互相递归
+  - 修法：绑定到稳定的 `window.chat_metadata` 引用
+- **ST-iPhonie 误判「需要 1.13.2+」**
+  - 根因：`generateRaw` 缺失
+  - 修法：补桩，另补 `generateQuietPrompt` / `messageFormatter` /
+    `getExtensionPrompt` / `eventSourceFull`
+- **`Failed to fetch dynamically imported module`（报错指向入口，真凶不明）**
+  - 根因：插件向上越界 import（`../../../../../script.js`）读不到
+  - 修法：`app://` 对读不到的 `.js/.mjs` 返回 `buildUnknownJsStub()` 万能桩
+    （导出 `$` / `getContext` / `eventSource` / `chat` /
+    `SlashCommandParser` / `DOMPurify` 等）
+- **预览显示「无法预览：插件无可运行脚本。」**
+  - 根因：`watch(activePlugin)` 切走再切回时不重建
+  - 修法：记住 `wasOnEffect` 并在效果页自动 `buildPreview()`
+
+> ⚠️ **反复踩了 5 次的坑**：`hostStub.js` 的模板字符串里，注释中出现**裸反引号**会截断整个桩块，
+> 报错位置指向完全无关的代码。已加 `test/hostStubTemplateSafety.test.mjs` 兜底。
+
+#### 4. 插件链接安装
+
+- `js/utils/pluginInstallUrl.js`（25 例单测）：`parseInstallUrl()` 识别
+  `github-repo` / `zip` / `single-file` / `unknown`，解析 owner/repo/branch/subdir；
+  `gitHubZipUrl()` 拼 codeload 地址；`pickPluginRoot()` 从解压结果里找真正的插件根。
+- 主进程 `plugin:installFromUrl`：下载 → 解压（系统自带 `bsdtar`）→ `pickPluginRoot` → 移入插件库。
+- 🔴 **跨盘修复**：目标盘与暂存目录不同盘时 `rename` 抛
+  `EXDEV: cross-device link not permitted`；改为 `moveDir()`（rename 失败降级 `cp` + `rm`），
+  并优先把暂存目录建在**目标盘**的 `.jsk-install-tmp`。
+
+### ✨ 新增：自动查找本机已安装的酒馆
+
+**入口**：`StInstallModal` 里「① 安装位置」→ **🔍 自动查找**；弹窗打开时若没记过目录也会自动跑一次。
+
+- **分层扫描**（`stManager.scanForSillyTavern`）：
+  1. 枚举所有存在的盘符 → 盘根 + 一级子目录 + 二级子目录（覆盖 `D:\SillyTavern`、`D:\AI\SillyTavern`）
+  2. 用户目录（桌面 / 下载 / 文档，含中文名）+ 其下一到两层
+  3. 常规扫描**一个都没找到**时，自动再跑一次 `deep` 模式（多一层）
+- **性能**：时间预算 20s / 60s，每目录子项上限 500；
+  跳过 `node_modules` / `.git` / `Windows` / `$Recycle.Bin` 等。
+  本机实测：扫描 8 个盘共 **1026 个目录，0.5 秒**完成并找到 `E:\AI\SillyTavern`。
+- **严格判定**（`stInstallCore.isStRootStrict`）：只认 ① `package.json` name === `sillytavern`
+  或 ② `server.js` + `public/` 同时存在。
+  ⚠️ **不能用宽松的 `detectSillyTavern` 扫全盘** —— 它对「命中 3 个特征」也放行，
+  而普通 Node 工程同样常备 `package.json` + `src` + `data`，会报出一堆假酒馆（已用单测钉住这个对比）。
+- **结果处理**：找到 1 个 → 自动选中并检测；多个 → 列表让用户挑；0 个 → 明确提示可手动选或直接安装。
+- **新增 IPC**：`st:scan`（`preload` 暴露 `st.scan()`）。
+
+### 🔴 本轮顺带修掉的 3 个隐患
+
+1. **升级按钮误触会真的拉代码**
+   - **现象**：实测中「⬆️ 升级」与「⬇️ 一键安装」处在同一位置，DOM 重渲染后极易被误点，
+     且一点就真的执行 `git pull`，用户毫无确认机会。
+   - **修复**：`doUpdate()` 前加 `confirm`，弹窗里明确列出目录与「角色卡/世界书/聊天记录不会被删除」。
+2. **`git pull` 可无限挂起**
+   - **根因**：`runStreamed()` 没有超时；`git pull` 遇到需要认证时会静默等待输入，
+     于是「正在 git pull…」永不结束、`busy=true` 连带弹窗都关不掉。
+   - **修复**：`runStreamed()` 支持 `opts.timeoutMs`（超时进程树强杀，返回 `-2` 以区分普通失败）；
+     `git pull` 传 180s 超时并设 `GIT_TERMINAL_PROMPT=0` 禁止交互式凭据提示。
+3. **已安装的酒馆被提示「请换一个目录」**
+   - **现象**：自动查找到的已装酒馆，状态行下面还挂着
+     「⚠️ 该目录已安装酒馆，请改用『升级』或换一个目录」。
+   - **根因**：`checkPath` 的这句 reason 是给**准备新装**场景写的，检测路径时无差别显示。
+   - **修复**：`recheck()` 先 `inspect` 再 `checkPath`；当目录本身就是已装酒馆（`ready`/`running`/`incomplete`）
+     且 `stRoot` 一致时，不再显示这类警告。
+
+### � 新增：环境体检（检查酒馆环境）
+
+**入口**：`StInstallModal` 里「① 安装位置」→ **🩺 检查环境**（选中目录后出现）。
+
+把「装完之后跑不起来」的常见成因一次性摆出来，而不是等点「启动」失败后只丢一句含糊错误。
+**10 项检查**（每项带 `ok` / `warn` / `error` + 详情 + 修复建议）：
+
+| 项 | 检查内容 | 判失败/告警的依据 |
+| --- | --- | --- |
+| 程序文件 | `server.js` / `public/` / `package.json` | 缺任意一个 → error（装不完整） |
+| 酒馆版本 | `package.json` 的 version 与 `engines.node` | 无 version → warn |
+| Node.js | 版本是否 ≥ 20 | 未装 / 过低 → error |
+| 依赖包 | 是否有 `node_modules`，抽查 `express`/`yaml` | 缺核心包 → error；条目 < 50 → warn |
+| 配置文件 | `config.yaml` | 不存在 → warn（首次启动会自动生成） |
+| 数据目录 | `data/` 及卡/书/会话计数 | 不存在 → warn（全新安装属正常） |
+| 端口 | 8000 是否被占 | 被**非本软件**进程占用 → warn |
+| 磁盘空间 | 所在盘剩余 | < 2GB → error；< 5GB → warn |
+| git 状态 | 是否 git 仓库、是否有本地改动 | 有未提交改动 → warn（升级会冲突） |
+| 运行状态 | 当前是否在跑 | —— |
+
+- **结论一句话**（`summarizeChecks`）：有 error → 「发现 N 个必须修复的问题」；
+  只有 warn → 「可以正常运行，但有 N 项建议留意」；全绿 → 「一切正常」。
+- **新增 IPC**：`st:diagnose`（`preload` 暴露 `st.diagnose()`）。
+- **配套改造**：`runOnce()` 支持 `{ timeoutMs, cwd }`（原先只接受数字超时）；
+  新增 `getFreeBytes()` 与 `safeReaddir()` 供体检复用。
+- **本机实测**：真实酒馆 **2.9 秒**完成 10 项检查，准确报出 `node_modules 454 个条目`、
+  `40 卡 / 108 书 / 170 会话`、`剩余 118.7 GB`，并抓到 `git 有 4 处本地改动`（升级会冲突）。
+
+### 🎯 新增：检查更新（解决「已是最新版还让我升级」）
+
+**用户反馈（原话）**：「本地已经是最新版本了点击升级后怎么还要升升级」
+
+- **根因**：UI 原本 `v-if="!isInstalled"` 显示「安装」，`v-else` 一律显示「⬆️ 升级」——
+  **完全没有「比较远程版本」的逻辑**。于是只要装了酒馆，按钮永远是「升级」；
+  升级成功、关掉再打开，按钮还是「升级」，用户无从判断到底升没升到最新。
+- **修复**：新增 `stManager.checkUpdate()`（IPC `st:checkUpdate` / `preload` 的 `st.checkUpdate()`）：
+  - 远程版本两条来源：① git 仓库用 `git ls-remote --tags --refs origin`（只取引用、不下载代码）；
+    ② 非 git 仓库或上面失败时回退 GitHub API `releases/latest`。
+  - 返回 `{ currentVersion, latestVersion, hasUpdate, source }`。
+- **UI 三态**：
+  | 情况 | 按钮表现 |
+  | --- | --- |
+  | 有新版本 | `⬆️ 升级到 v1.19.0`（点后升级，升完自动复查） |
+  | 已是最新 | `✅ 已是最新版 v1.19.0`（**灰掉不可点**） |
+  | 查不到（网络失败） | 保持 `⬆️ 升级` 可点，不阻断用户 |
+  - 另加 `🔄 检查更新` 小按钮，可随时手动复查。
+- **版本比较必须按数字**：新增 `compareSemver()` / `pickLatestVersion()`（`stInstallCore.js`）。
+  ⚠️ 不能用字符串排序 —— `'1.9.7' > '1.19.0'` 在字典序下成立，但语义上 1.19.0 才是新版（已用单测钉住）。
+
+### 🧪 测试
+
+- 新增 `test/stScan.test.mjs` **13 例**：
+  - `isStRootStrict` 5 例：`server.js + public` 判定、`package.json` name 判定、
+    普通 Node 工程**不得误判**、单一特征不够、名字相似但不同不得放行；
+  - `summarizeChecks` 4 例：全绿 / 只有 warn / 有 error 时结论优先级 / 空与非法输入不崩；
+  - `compareSemver` 3 例 + `pickLatestVersion` 1 例：逐段数字比较、`v` 前缀与缺段容忍、
+    `1.19.10 > 1.19.9` 回归、非法 tag 过滤。
+- 全量 `npm test`：**1476/1476 通过**；`guard:scope` 0 违规。
+
+### 🎨 改名：SillyTavern 角色卡管理器 → **SillyTavern 资源管理器**
+
+- 改动面：`package.json` 的 `productName` / `description`、
+  `HeaderBar.vue` 标题、`index.html` 的 `<title>`。
+- **`package.json` 的 `name` 保持 `sillytavern-card-manager` 不变** ——
+  它决定 `app.getPath('userData')`（`%APPDATA%\sillytavern-card-manager`），改动会**丢掉所有用户配置与记忆库**。
+- 版本号 `2.4.6` → `2.5.0`。
+
+### 🧪 测试
+
+- 新增 `test/stInstallCore.test.mjs` **29 例**（目录识别、Node 版本判定、路径校验、卸载归属过滤、清单构建、字节格式化）。
+- 全量 `npm test`：**1459/1459 通过**；`npm run guard:scope` 0 违规。
+
+---
+
+## 🗂️ v2.4.6 · 拖拽导入按内容分流：世界书进世界书库、预设进预设库（AR-75 / P0）（2026-10-25）
+
+> 用户实测：「拖动导入世界书是角色卡，拖动导入预设也是角色卡；拖动导入后预设库没有、角色卡库也没有」。
+
+### 🔴 缺陷（AR-75）
+
+- **拖拽导入完全不区分文件类型**。`useCardCrud.handleDrop` 拿到文件后直接
+  `file:copyToLibrary` 把**所有**文件复制进卡库目录，再走 `parseAndAddCard`；
+  而后者内部的 `isCharacterCardData` 会拒绝非角色卡 ⇒
+  - 世界书 / 预设：**已复制进卡库但没入库** ⇒ 卡库目录里多出解析不了的垃圾文件（用户感知："是角色卡"）；
+  - 世界书库 / 预设库：**完全没有变化**（用户感知："没有"）。
+
+### ✅ 修复
+
+1. **新增 `js/utils/dropRouter.js`（纯函数，15 条单测）**
+   - `isCardLike(data)` —— 相判角色卡（供排除用；严格校验仍在 `parseAndAddCard`）
+   - `looksLikeWorldbook(data)` —— 顶层 `entries`（字典/数组）/ `data.entries`
+   - `looksLikePreset(data)` —— `prompts` / `prompt_order` / `wrap_in_quotes` / `temperature`+`max_context`
+   - `classifyDroppedJson(data)` → `{kind, reason}`；`planDrop(items)` 分组
+2. **`useCardCrud.handleDrop` 重写**：先读 JSON 内容判类型 → `planDrop` →
+   世界书走 `importDroppedWorldbooks`、预设走 `importDroppedPresets`、
+   其余（含 `.png` 卡与认不出的 JSON）走原角色卡流程；结束统一一条提示汇总。
+3. **新增主进程 `file:importJsonToDir`**（+ `preload.js` 桥接）：
+   - 目标目录必须在白名单内（用户先「选择目录」授权过）；
+   - **重名自动加 `(2)`/`(3)`，绝不覆盖**；
+   - 优先复制**原文件字节**（保证一字不改），拿不到再用 `data` 重新序列化。
+4. **App.vue 注入两个回调**（在 `useCardCrud` 之前定义，避开 TDZ）：
+   - `importDroppedWorldbooks` → 落 `lastWorldbookDirPath` → `scanWorldbookDir()` 重扫；
+   - `importDroppedPresets` → 落 `lastPresetDirPath` → `scanPresetDir()` 重扫；
+   - 目录未设置时弹一次选目录，并 `syncConfigToDiskDebounced()` 记住。
+
+### ⚠️ 判定陷阱（均有单测钉住）
+
+- 角色卡内嵌 `character_book.entries` **不得**被判为独立世界书（否则卡会被当书）。
+- V2 卡即便带 `data.temperature` + `max_context` **不得**被判为预设。
+- `{entries: []}` / `{entries: {}}` 空壳 **不算**世界书。
+- 只有 `temperature` 无 `max_context` **不算**预设（防误判）。
+- 酒馆 `config.json`（含 `api_keys`/`system_settings`）**不算**角色卡。
+
+### 🧪 验证
+
+- 新增单测 `test/dropRouter.test.mjs` **15 条全绿**（V2/V1 卡、三种世界书形态、内嵌世界书、空壳、
+  完整/最小预设、单字段不误判、卡带采样参数不误判、配置不算卡、unknown、planDrop 分组与容错）。
+- 全量：`npm test` **1276 / 1276**（原 1261 + 15）；`guard:scope` 106 文件 **0 违规**；`build:web` 成功。
+- 源码版启动无 `[Vue 错误]`。
+- **真机落盘验证**（用已授权世界书目录的临时子目录）：
+  - 单次写入 → `{"success":true,"saved":["测试世界书A.json"]}`，磁盘实际 268B 文件 ✓
+  - 连续两次同名 → `(2).json` / `(3).json`，**原文件未被覆盖** ✓
+  - 未授权目录（`C:\Windows`）→ `目标目录未授权` 被拦截 ✓
+  - 清理后真实世界书库仍为 **36 本**，零污染 ✓
+- 未提交、未推送（待用户指令）。
 
 ## 🩹 v2.4.5 · 阶段零：拉取模型列表不再静默覆盖已保存的模型名（AI-21 / P0）（2026-10-25）
 

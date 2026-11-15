@@ -51,6 +51,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
     readBuffer: (filePath) => ipcRenderer.invoke('file:readBuffer', filePath),
     // 读取文本（用于 JSON 卡片）
     readText: (filePath) => ipcRenderer.invoke('file:readText', filePath),
+    // 🗂️ 拖拽导入分流：把世界书/预设 JSON 写到各自库目录（重名自动加后缀，不覆盖）
+    // 用法：importJsonToDir({ dirPath, items: [{ path, name, data? }] })
+    //   → { success, saved: [文件名], skipped: [{name,reason}], error }
+    importJsonToDir: (params) => ipcRenderer.invoke('file:importJsonToDir', params || {}),
+    // 🗂️ 拖拽分流专用：读取白名单外的拖入 .json（只读、仅 .json、≤8MB）
+    //    ⚠️ 与 readText 的区别：readText 有白名单校验，拖入文件通常在桌面/下载目录，读不到。
+    peekJsonForDrop: (filePath) => ipcRenderer.invoke('file:peekJsonForDrop', filePath),
+    // 🧩 拖拽插件/脚本：把文件复制到插件库目录（不限扩展名，仅白名单目录 + 内容去重）
+    importPluginFiles: (params) => ipcRenderer.invoke('file:importPluginFiles', params || {}),
     // 🚀 v2.0 批量读取：单条 IPC 携带至多 64 张卡，万张导入从「万次往返」降到「百次」
     // readTextBatch(paths[]) → [{path,text,ok}]；readEmbeddedBatch([{path,size}]) → [{path,data,ok}]
     readTextBatch: (paths) => ipcRenderer.invoke('files:readTextBatch', paths),
@@ -211,12 +220,46 @@ contextBridge.exposeInMainWorld('electronAPI', {
     exportPresetsBatch: (filePaths) => ipcRenderer.invoke('preset:exportBatch', filePaths),
     // 🧩 插件专属通道：扫描目录下的插件（酒馆助手 JSON 脚本 / 散落脚本 / 扩展工程）
     scanPlugins: (dirPath) => ipcRenderer.invoke('plugin:scan', dirPath),
+    // 🔗 插件链接安装：下载 GitHub 仓库 / zip / 单文件插件并落到插件库
+    //    行为对齐 SillyTavern 官方 install 接口（http(s) only / 目录已存在则拒绝 / 失败回滚）
+    installPluginFromUrl: (params) => ipcRenderer.invoke('plugin:installFromUrl', params || {}),
+    // 🛠️ 酒馆「安装与维护」：一键装桌面版酒馆 / 启停 / 升级 / 两档卸载
+    //    进度统一走 'st:progress' 事件（见 onStProgress）
+    st: {
+        inspect: (dirPath) => ipcRenderer.invoke('st:inspect', { dirPath }),
+  scan: (params) => ipcRenderer.invoke('st:scan', params || {}),
+  diagnose: (params) => ipcRenderer.invoke('st:diagnose', params || {}),
+  checkUpdate: (params) => ipcRenderer.invoke('st:checkUpdate', params || {}),
+        nodeStatus: () => ipcRenderer.invoke('st:nodeStatus', {}),
+        installNode: (taskId) => ipcRenderer.invoke('st:installNode', { taskId }),
+        checkPath: (dirPath) => ipcRenderer.invoke('st:checkPath', { dirPath }),
+        install: (params) => ipcRenderer.invoke('st:install', params || {}),
+        installDeps: (params) => ipcRenderer.invoke('st:installDeps', params || {}),
+        cancel: (taskId) => ipcRenderer.invoke('st:cancel', { taskId }),
+        start: (params) => ipcRenderer.invoke('st:start', params || {}),
+        stop: () => ipcRenderer.invoke('st:stop', {}),
+        status: () => ipcRenderer.invoke('st:status', {}),
+        update: (params) => ipcRenderer.invoke('st:update', params || {}),
+        backup: (params) => ipcRenderer.invoke('st:backup', params || {}),
+        inventory: (params) => ipcRenderer.invoke('st:inventory', params || {}),
+        uninstall: (params) => ipcRenderer.invoke('st:uninstall', params || {}),
+  uninstallEntries: () => ipcRenderer.invoke('st:uninstallEntries', {}),
+        openUrl: (url) => ipcRenderer.invoke('st:openUrl', { url }),
+        openFolder: (dirPath) => ipcRenderer.invoke('st:openFolder', { dirPath }),
+        /** 订阅安装/运行进度；返回取消订阅函数 */
+        onProgress: (cb) => {
+            if (typeof cb !== 'function') return () => {};
+            const handler = (_e, payload) => { try { cb(payload); } catch (err) { /* 忽略 */ } };
+            ipcRenderer.on('st:progress', handler);
+            return () => ipcRenderer.removeListener('st:progress', handler);
+        },
+    },
     // 🧩 插件专属通道：读取扩展工程文本资源源码
     readPluginFile: (filePath) => ipcRenderer.invoke('plugin:readFile', filePath),
     // 🧩 插件专属通道：物理覆写插件文本资源（工作区「代码」页编辑保存；原子写 + 白名单/类型/体积校验）
     writePluginFile: (params) => ipcRenderer.invoke('plugin:writeFile', params),
     // 🧩 插件「效果」预览：预览 HTML 存主进程内存，返回独立 app:// 预览 URL（绕过父页 CSP 对内联脚本的拦截）
-    setPluginPreview: (html) => ipcRenderer.invoke('plugin:setPreview', html),
+    setPluginPreview: (html, opts) => ipcRenderer.invoke('plugin:setPreview', html, opts || {}),
     // 🧩 聊天界面段（状态栏界面）：生成 HTML → 主进程 app:// 独立路由 → 内联脚本可执行
     setChatHtmlSegment: (html) => ipcRenderer.invoke('chat:setHtmlSegment', html),
     // 🎬 重型卡（独立前端角色卡）：WebContentsView 只能由主进程创建，此处仅转发生命周期与布局

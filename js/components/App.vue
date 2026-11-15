@@ -407,7 +407,17 @@
             @open-folder="openSnapshotFolder"
         />
 
-        <!-- ================= [ 弹窗：📦 整库冷备（一键全量快照 · v2.3.6 五功能之一） ] ================= -->
+        <!-- ================= [ 弹窗：�️ 酒馆安装与维护（一键装桌面版酒馆 / 启停 / 升级 / 两档卸载） ] ================= -->
+        <!-- ⚠️ 必须顶层挂载（项目历史坑：fixed 定位在子组件里会被裁切） -->
+        <!-- 规格：资料库/一键安装桌面版酒馆-方案-v1.md -->
+        <st-install-modal
+            :show="showStInstallModal"
+            :select-folder="selectGenericFolderForSt"
+            :notify="stNotify"
+            @st-close="showStInstallModal = false"
+        />
+
+        <!-- ================= [ 弹窗：�📦 整库冷备（一键全量快照 · v2.3.6 五功能之一） ] ================= -->
         <!-- ⚠️ 必须顶层挂载（项目历史坑：fixed 定位在子组件里会被裁切） -->
         <full-backup-modal
             :show="showFullBackupModal"
@@ -794,6 +804,7 @@ import WbContextMenu from './WbContextMenu.vue'; // 世界书右键快捷菜单
 import AiTagModal from './AITagModal.vue'; // AI 智能批量打标弹窗（⚠️ 注册名须用 AiTagModal，kebab 标签 ai-tag-modal 解析为 AiTagModal 而非 AITagModal）
 import AiTagLogModal from './AiTagLogModal.vue'; // 🏷️ 打标过程实时日志窗口（启动打标自动打开；替代系统弹框汇报）
 import FullBackupModal from './FullBackupModal.vue'; // 📦 v2.3.6 整库冷备（一键全量快照；弹窗必须顶层挂载）
+import StInstallModal from './StInstallModal.vue';   // 🛠️ 酒馆安装与维护（一键装桌面版酒馆/启停/升级/两档卸载）
 import QualityCheckModal from './QualityCheckModal.vue'; // 🧪 v2.3.6 一键质检流水线（只读检查 + 综合报告）
 import StartupTasksModal from './StartupTasksModal.vue'; // 🚀 v2.3.6 启动自动任务设置
 import AutoTagRulesModal from './AutoTagRulesModal.vue'; // 📝 自动打标规则表编辑弹窗（v2.1 可配置）
@@ -893,7 +904,7 @@ document.addEventListener('dragover', (e) => e.preventDefault());
 document.addEventListener('drop', (e) => e.preventDefault());
 
 export default {
-    components: { Section, DragOverlay, AppLoadingOverlay, ToastContainer, BatchTagModal, PromptModal, OptionSelectModal, SingleTagModal, DiskScanModal, UpdateModal, TextModal, ImageModal, ApiSettingsModal, /* ⛔ GlobalAssetModal 已下线（2026-09-20） */ CommandPaletteModal, GraphModal, WbGraphModal, DedupeModal, WbDedupeModal, PresetDedupeModal, PresetStitchModal, ContentDedupeModal, DiffModal, WbMergeModal, WbMergePreviewModal, WbImportModal, GlobalEntrySearchModal, WbSnapshotModal, ContextMenu, WbContextMenu, AiTagModal, FullBackupModal, QualityCheckModal, StartupTasksModal, AiTagLogModal, AutoTagRulesModal, AutoGroupModal, WbAutoGroupModal, WbTagEditModal, HeaderBar, SidebarPanel, EditorPanel, PluginWorkspace, HeavyCardWorkspace, CardPluginModal, SnapshotModal, PushModal },
+    components: { Section, DragOverlay, AppLoadingOverlay, ToastContainer, BatchTagModal, PromptModal, OptionSelectModal, SingleTagModal, DiskScanModal, UpdateModal, TextModal, ImageModal, ApiSettingsModal, /* ⛔ GlobalAssetModal 已下线（2026-09-20） */ CommandPaletteModal, GraphModal, WbGraphModal, DedupeModal, WbDedupeModal, PresetDedupeModal, PresetStitchModal, ContentDedupeModal, DiffModal, WbMergeModal, WbMergePreviewModal, WbImportModal, GlobalEntrySearchModal, WbSnapshotModal, ContextMenu, WbContextMenu, AiTagModal, FullBackupModal, StInstallModal, QualityCheckModal, StartupTasksModal, AiTagLogModal, AutoTagRulesModal, AutoGroupModal, WbAutoGroupModal, WbTagEditModal, HeaderBar, SidebarPanel, EditorPanel, PluginWorkspace, HeavyCardWorkspace, CardPluginModal, SnapshotModal, PushModal },
     setup() {
         // 主题状态（localStorage 在自定义协议下可能不可用，做防御性读取；默认暗夜极客）
         let savedTheme = 'dark';
@@ -2682,6 +2693,12 @@ export default {
                                 }
                                 if (typeof cfg.ui.lastWorldbookDirPath === 'string') lastWorldbookDirPath.value = cfg.ui.lastWorldbookDirPath;
                                 if (typeof cfg.ui.lastPresetDirPath === 'string') lastPresetDirPath.value = cfg.ui.lastPresetDirPath;
+                                // 🐞 2026-10-25 用户实测「插件库明明有插件，为什么还要选路径」：
+                                //    根因 —— 世界书/预设目录都持久化在 app_config.json 的 ui 里，
+                                //    而插件目录 `lastPluginDirPath` **只写了 localStorage、从没进配置**，
+                                //    重启后拿不到 ⇒ 每次都当成「首次使用」重新问路径。
+                                //    修：与另外两个库同口径，从 cfg.ui 恢复。
+                                if (typeof cfg.ui.lastPluginDirPath === 'string') lastPluginDirPath.value = cfg.ui.lastPluginDirPath;
                                 if (cfg.ui.wbCategoryMap && typeof cfg.ui.wbCategoryMap === 'object') {
                                     wbCategoryMap.value = { ...wbCategoryMap.value, ...cfg.ui.wbCategoryMap };
                                 }
@@ -3952,7 +3969,27 @@ export default {
         // 视图切换模式：'characters' (角色卡) | 'worldbooks' (世界书) | 'presets' (预设) | 'plugins' (插件) | 'heavycards' (重型卡)
         const appMode = ref('characters');
 
-        // ================= [ 📦 v2.3.6 整库冷备（一键全量快照） ] =================
+        // ================= [ �️ 酒馆安装与维护（一键装桌面版酒馆） ] =================
+        //   · 规格：资料库/一键安装桌面版酒馆-方案-v1.md
+        //   · 主进程：main/stManager.js（检测/安装/启停/升级/两档卸载）
+        //   · 本软件不内置 Node：检测系统 Node → 缺失走 winget → 再不行引导官网
+        const showStInstallModal = ref(false);
+        const openStInstallModal = () => { showStInstallModal.value = true; };
+        // 弹窗内「选择目录」：沿用已有的通用目录选择器
+        const selectGenericFolderForSt = async () => {
+            try { return await window.electronAPI.selectGenericFolder(); }
+            catch (e) { console.error('[st-install] 目录选择失败：', e); return ''; }
+        };
+        // 弹窗内提示：复用全局 toast
+        const stNotify = (msg, level) => {
+            try {
+                if (level === 'error') nativeAlert(String(msg), 'error');
+                else if (typeof showToast === 'function') showToast(String(msg), level || 'success');
+                else addLog(String(msg), level || 'success');
+            } catch (e) { console.warn('[st-install]', msg); }
+        };
+
+        // ================= [ �📦 v2.3.6 整库冷备（一键全量快照） ] =================
         //   · 设置（目录 / 保留份数）随 ui 段落盘；恢复后重新扫描库；防呆全在主进程（main/fullBackup.js）
         const showFullBackupModal = ref(false);
         const fullBackupDir = ref('');
@@ -4745,6 +4782,11 @@ export default {
         // =========================================================
         const wbSearchQuery = ref('');         // 世界书侧边栏搜索框
         const wbFilterType = ref('all');        // 词条数筛选: 'all' | 'empty' | 'small' | 'large'
+        // 🆕 2026-10-25 用户需求：世界书库 / 预设库补齐与角色卡库一致的排序
+        //   取值：'name'（默认，文件名 A-Z）| 'nameDesc' | 'mtime'（修改时间最新）| 'mtimeAsc'
+        //        | 'sizeDesc' | 'sizeAsc' | 'entries'（词条数倒序，世界书专有）| 'manual'
+        const wbSortBy = ref('name');
+        const presetSortBy = ref('name');
         // 🔍 世界书查重弹窗状态与方法已拆分为组合式函数 useDedupe（见下文 setup 尾部调用）
 
         // =========================================================
@@ -4781,7 +4823,7 @@ export default {
         // 与此处建立集中 watch：所有相关 ref 已声明完毕（最后一个为 wbCategoryMap），
         // 回调里的 syncConfigToDisk 已内置 isRestoringConfig guard，恢复期触发的写盘会被自动拦截，无需 immediate。
         watch(
-            [theme, appSettings, sanitizeImportedTags, autoTagOnImport, snapshotConfig, sidebarWidth, viewMode, isCompactMode, sortBy, llmRolePrompts, tagCustomSegments, tagPromptMode, tagMaterialOverrides, tagPackSize, tagSkipTagged, tagWbSegmentMax, tagAutoMaterial, tagResume, lastWorldbookDirPath, lastPresetDirPath, wbCategoryMap, wbTagMap, cardImportTimes],
+            [theme, appSettings, sanitizeImportedTags, autoTagOnImport, snapshotConfig, sidebarWidth, viewMode, isCompactMode, sortBy, llmRolePrompts, tagCustomSegments, tagPromptMode, tagMaterialOverrides, tagPackSize, tagSkipTagged, tagWbSegmentMax, tagAutoMaterial, tagResume, lastWorldbookDirPath, lastPresetDirPath, lastPluginDirPath, wbCategoryMap, wbTagMap, cardImportTimes],
             // 🚀 v1.8.5 性能修复：改走 500ms 防抖落盘。旧版直接调 syncConfigToDisk（全量
             //    序列化 appSettings/cardOverlays/wbCategoryMap + 加密 IPC + 同步写盘），
             //    连续 UI 微调（拖侧栏宽度/切主题等）每次都全量写盘，千卡库 overlays 体积
@@ -5532,7 +5574,7 @@ export default {
             //    —— 整个 setup 抛错 ⇒ App 渲染函数拿不到任何绑定（启动即白屏级崩溃）。
             //    它只是个展示用 computed，**不需要**持久化收集；模板用它靠 setup 尾部的 return。
             sidebarWidth, viewMode, isCompactMode, sortBy,
-            llmRolePrompts, tagCustomSegments, tagPromptMode, tagMaterialOverrides, tagPackSize, tagSkipTagged, tagWbSegmentMax, tagAutoMaterial, tagResume, lastWorldbookDirPath, lastPresetDirPath, wbCategoryMap, wbTagMap,
+            llmRolePrompts, tagCustomSegments, tagPromptMode, tagMaterialOverrides, tagPackSize, tagSkipTagged, tagWbSegmentMax, tagAutoMaterial, tagResume, lastWorldbookDirPath, lastPresetDirPath, lastPluginDirPath, wbCategoryMap, wbTagMap,
             // 🏷️ S2（2026-09-25）：候选池三状态（开关 / 自由提取 / 池本体）随 ui 段落盘
             useCandidatePool, enableAIExtraction, aiCandidateTags,
             cardImportTimes,
@@ -5593,6 +5635,72 @@ export default {
         //     processElectronFiles / persistCardUpdate / persistCardCategory 等）；
         //   - cleanupEmptyCategories 来自 useCardGroups（后调用），经箭头包装延迟绑定 ——
         //     箭头函数体运行时才求值（deleteCardItem 仅在用户交互时执行），无 TDZ。
+
+        // 🗂️ 拖拽导入分流（2026-10-25 用户实测 bug）：
+        //   拖入世界书 / 预设时，必须落到**各自的库目录**，而不是复制进卡库当角色卡。
+        //   · 世界书 → lastWorldbookDirPath（未设置则让用户选一次）→ 写盘 → 重扫该目录
+        //   · 预设   → lastPresetDirPath（未设置则让用户选一次）→ 写盘 → 重扫该目录
+        //   ⚠️ 写盘走 file:importJsonToDir（目标目录必须已授权）；重名自动加 (2)(3)，绝不覆盖。
+        const importDroppedWorldbooks = async (items) => {
+            let dir = lastWorldbookDirPath.value;
+            if (!dir) {
+                dir = await window.electronAPI.selectGenericFolder();
+                if (!dir) return { ok: 0, skip: 0, dir: '' };
+                lastWorldbookDirPath.value = dir;
+                syncConfigToDiskDebounced();
+            }
+            const res = await window.electronAPI.importJsonToDir({ dirPath: dir, items });
+            // 重扫目录让新书立刻出现在世界书库里（失败不影响已落盘的文件）
+            try { await scanWorldbookDir(dir); } catch (e) { /* 忽略 */ }
+            return { ok: (res && res.saved && res.saved.length) || 0, skip: (res && res.skipped && res.skipped.length) || 0, dir };
+        };
+
+        const importDroppedPresets = async (items) => {
+            let dir = lastPresetDirPath.value;
+            if (!dir) {
+                dir = await window.electronAPI.selectGenericFolder();
+                if (!dir) return { ok: 0, skip: 0, dir: '' };
+                lastPresetDirPath.value = dir;
+                syncConfigToDiskDebounced();
+            }
+            const res = await window.electronAPI.importJsonToDir({ dirPath: dir, items });
+            try { await scanPresetDir(dir); } catch (e) { /* 忽略 */ }
+            return { ok: (res && res.saved && res.saved.length) || 0, skip: (res && res.skipped && res.skipped.length) || 0, dir };
+        };
+
+        // 🧩 拖拽插件 / 脚本 → 插件库（用户明确：「脚本 = 插件库，只是名字叫法不同」）
+        //    ⚠️ 与上面两个不同：插件可能是 **.js 文件**，不能走 importJsonToDir（它只收 .json）。
+        //       这里用 file:importPluginFiles（复制任意扩展名的文件，重名比对内容后跳过）。
+        //    ⚠️ scanPluginDir 定义在 usePlugins 里（比本处晚），走**闭包延迟引用**避免 TDZ ——
+        //       调用发生在用户拖拽时，那时 scanPluginDir 早已赋值。
+        const importDroppedPlugins = async (items) => {
+            let dir = lastPluginDirPath.value;
+            if (!dir) {
+                // 📢 首次拖入插件时插件库目录未知：明确告知用户要选一个「插件存放文件夹」，
+                //    而不是弹一个没有上下文的系统选目录框（用户实测反馈「弹出窗口是什么意思」）。
+                const ok = await confirmDialog(
+                    '🧩 首次导入插件，需要先指定插件库文件夹',
+                    `检测到你拖入的是 ${items.length} 个插件/脚本文件。\n\n插件会统一存放在「插件库」里，方便日后查看与编辑。\n请先选择一个用来存放插件的文件夹（选你 SillyTavern 的 plugins 目录也可以）。\n\n现在就选择吗？`
+                );
+                if (!ok) return { ok: 0, skip: items.length, dir: '' };
+                dir = await window.electronAPI.selectGenericFolder();
+                if (!dir) return { ok: 0, skip: items.length, dir: '' };
+                lastPluginDirPath.value = dir;
+                syncConfigToDiskDebounced();
+            }
+            const res = await window.electronAPI.importPluginFiles({ dirPath: dir, items });
+            // 重扫插件目录，让新插件立刻出现在插件库
+            try {
+                if (typeof scanPluginDirRef === 'function') await scanPluginDirRef(dir);
+                // 切到插件模式，让用户立刻看到导入结果（否则侧栏还停在角色卡库，看起来"没反应"）
+                if (appMode.value !== 'plugins') appMode.value = 'plugins';
+            } catch (e) { /* 忽略 */ }
+            return { ok: (res && res.saved && res.saved.length) || 0, skip: (res && res.skipped && res.skipped.length) || 0, dir };
+        };
+        // 延迟引用容器：usePlugins 之后填值
+        // eslint-disable-next-line prefer-const
+        let scanPluginDirRef = null;
+
         const {
             persistCardCategory, persistCardUpdate, deleteCardOverlays,
             parseAndAddCard, processElectronFiles, withLoadLock, flushDeferredAutoTagSaves,
@@ -5619,7 +5727,11 @@ export default {
             cardImportTimes,
             // 跨域回调（UI 域 / 分组域）
             reset, openFromLibrary,
-            cleanupEmptyCategories: (...args) => cleanupEmptyCategories(...args)
+            cleanupEmptyCategories: (...args) => cleanupEmptyCategories(...args),
+            // 🗂️ 拖拽导入分流：世界书 / 预设 / 插件落到各自库（不注入则降级为旧行为）
+            importDroppedWorldbooks,
+            importDroppedPresets,
+            importDroppedPlugins
         });
 
         // 💽 磁盘卡片扫描：组合式函数注入（共享创库基础设施 parseAndAddCard/processElectronFiles 与共享状态保留在 App.vue）
@@ -5829,7 +5941,7 @@ export default {
             renameWbGroup, deleteWbGroup,
             // 📁 S4（2026-09-25）：物理分组（Q6 甲）
             getWbCategory, moveWbToFolder, wbFolderGroupOf, sanitizeWbFolderName, migrateVirtualGroupsToFolders,
-        } = useWorldbooks({ worldbooks, activeWorldbook, lastWorldbookDirPath, wbSearchQuery, wbFilterType, currentWbCategory, wbCategoryMap, wbTagMap, currentWbTags, saveWbCategoriesMap, syncWorldbooksToDisk, appMode, appPrompt, nativeAlert, confirmDialog, addLog, contextMenu, closeContextMenu });
+        } = useWorldbooks({ worldbooks, activeWorldbook, lastWorldbookDirPath, wbSearchQuery, wbFilterType, wbSortBy, currentWbCategory, wbCategoryMap, wbTagMap, currentWbTags, saveWbCategoriesMap, syncWorldbooksToDisk, appMode, appPrompt, nativeAlert, confirmDialog, addLog, contextMenu, closeContextMenu });
 
         // 🗂️ S4（2026-09-25）：世界书自动分组：组合式函数注入
         //    判定纯函数见 utils/wbAutoGroup.js；落地复用 moveWbToFolder（含键迁移——铁律 6）。
@@ -6062,6 +6174,8 @@ export default {
             listPresetSnapshots, restorePresetSnapshot, deletePresetSnapshot
         } = usePresets({
             presets, activePreset, lastPresetDirPath,
+            // 🆕 2026-10-25 用户需求：预设库排序
+            presetSortBy,
             nativeAlert, confirmDialog, addLog, appPrompt,
             contextMenu, closeContextMenu, appMode
         });
@@ -6096,6 +6210,7 @@ export default {
         const {
             pluginSearchQuery,
             loadPlugins, scanPluginDir, filteredPlugins,
+            pluginInstalling, installPluginFromUrlFlow,   // 🔗 链接安装（对齐酒馆「安装扩展」）
             deletePlugin,
             openPluginContextMenu, openPluginInFolder, readPluginSource,
             savingPlugin, savePluginSource, rescanPluginDir
@@ -6104,6 +6219,9 @@ export default {
             nativeAlert, confirmDialog, addLog, appPrompt,
             contextMenu, closeContextMenu, appMode
         });
+        // 🧩 拖拽插件分流需要重扫目录：此处把 scanPluginDir 填进延迟引用容器
+        //    （importDroppedPlugins 定义在 useCardCrud 之前，不能直接用，靠这个容器在运行时取值）
+        scanPluginDirRef = scanPluginDir;
 
         // 🎬 重型卡（独立前端角色卡）：展示与游玩 + 一卡一存档的备份管理
         //    容器由主进程 WebContentsView 创建（见 main/heavyCards/manager.js），渲染层无创建能力。
@@ -6877,6 +6995,11 @@ export default {
             // 📇 DF-22：导入 accept（供 HeaderBar 的隐藏 file input 绑定）
             importAccept: IMPORT_ACCEPT,
             openBakFolder, openTrashFolder, openGlobalTrash, openChatTab, openFullBackupModal, showFullBackupModal, fullBackupDir, fullBackupKeep,
+            showStInstallModal, openStInstallModal,
+            // ⚠️ AR-77：本文件 setup() 末尾是 `return ctx` —— **模板能访问的一切都必须在这里**。
+            //     这两个回调一旦漏掉，StInstallModal 的 props 就是 undefined，
+            //     「选择目录…」会在 pickDir() 首行静默 return（用户感知：点了完全没反应）。
+            selectGenericFolderForSt, stNotify,
             // ⚠️ 冷备弹窗的三个回调也必须在这里（模板 @update:backup-dir / @update:keep / @restored 绑的就是它们）
             onFullBackupDirChange, onFullBackupKeepChange, onFullBackupRestored,
             isScanningDisk, diskScanProgress, useSizeFilter, runDiskScan, showDiskScanModal,
@@ -7078,7 +7201,7 @@ export default {
             wbSkippedFiles,
             // ⚙️ 预设管理
             presets, activePreset, lastPresetDirPath,
-            presetSearchQuery, isImportingPreset, importPresetUrl,
+            presetSearchQuery, presetSortBy, isImportingPreset, importPresetUrl,
             loadPresets, scanPresetDir, filteredPresets,
             saveActivePreset, renamePreset, deletePreset, duplicatePreset,
             openPresetContextMenu, openPresetInFolder, importPresetFromUrl, exportPresetsBatch,
@@ -7099,6 +7222,7 @@ export default {
             plugins, activePlugin, lastPluginDirPath,
             pluginSearchQuery,
             loadPlugins, scanPluginDir, filteredPlugins,
+            pluginInstalling, installPluginFromUrlFlow,
             deletePlugin,
             openPluginContextMenu, openPluginInFolder, readPluginSource,
             pluginTab, pluginSelectedFile, pluginSelectedSource, pluginDirty,
@@ -7197,7 +7321,7 @@ export default {
             // 🧹🔍 智能查重与版本清洗
             showDedupeModal, duplicateGroups, startDedupeScan, resolveDedupeGroup,
             // 🌍 世界书库筛选与对比查重
-            wbSearchQuery, wbFilterType, filteredWorldbooks,
+            wbSearchQuery, wbFilterType, wbSortBy, filteredWorldbooks,
             // 📊🔍 查重/版本对比的扫描进度（供查重弹窗消费；**不回流侧栏**）
             //    ⚠️ `dedupeScanProgressForModal` 必须一起暴露（模板走 setup return，不是 ctx）
             //    🛑 AR-45 二次修复：`dedupeScanDone`/`dedupeScanTotal` 同时暴露

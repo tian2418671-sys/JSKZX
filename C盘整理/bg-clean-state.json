@@ -1,0 +1,141 @@
+{
+  "time": "2026-11-13T22:21:06",
+  "tasks": [
+    {
+      "Name": "360ZipUpdaterLoop",
+      "Path": "\\",
+      "State": "Ready"
+    },
+    {
+      "Name": "Driver Booster Scheduler",
+      "Path": "\\",
+      "State": "Ready"
+    },
+    {
+      "Name": "Driver Booster SkipUAC (Tk)",
+      "Path": "\\",
+      "State": "Ready"
+    },
+    {
+      "Name": "Driver Booster Update",
+      "Path": "\\",
+      "State": "Ready"
+    },
+    {
+      "Name": "IObit BF2026Sale (One-time)",
+      "Path": "\\",
+      "State": "Ready"
+    },
+    {
+      "Name": "iTop BF2026 Task (One-Time)",
+      "Path": "\\",
+      "State": "Ready"
+    },
+    {
+      "Name": "iTop Screen Recorder SkipUAC (Tk)",
+      "Path": "\\",
+      "State": "Ready"
+    },
+    {
+      "Name": "iTop Screen Recorder Startup",
+      "Path": "\\",
+      "State": "Ready"
+    },
+    {
+      "Name": "iTop Screen Recorder Update",
+      "Path": "\\",
+      "State": "Ready"
+    },
+    {
+      "Name": "Smart Game Booster Auto Drivers",
+      "Path": "\\",
+      "State": "Ready"
+    },
+    {
+      "Name": "Smart Game Booster Auto SWScan",
+      "Path": "\\",
+      "State": "Ready"
+    },
+    {
+      "Name": "Software Updater Scheduler",
+      "Path": "\\",
+      "State": "Ready"
+    },
+    {
+      "Name": "Software Updater SkipUAC(Tk)",
+      "Path": "\\",
+      "State": "Ready"
+    },
+    {
+      "Name": "QuarkUpdaterTaskUser1.0.0.12{C1A6657F-FFE9-4B3D-BD16-483DE04BF566}",
+      "Path": "\\QuarkUpdaterUser\\QuarkUpdater\\",
+      "State": "Ready"
+    },
+    {
+      "Name": "Ubisoft Connect Background Update",
+      "Path": "\\Ubisoft\\",
+      "State": "Ready"
+    }
+  ],
+  "deleted": [
+    "\\copy_dlc_unlocker",
+    "\\dllrepair_win",
+    "\\Readertray",
+    "\\SoftLanding\\S-1-5-21-2302385114-1392227560-1472448455-1002\\SoftLandingCreativeManagementTask",
+    "\\SoftLanding\\S-1-5-21-2302385114-1392227560-1472448455-1010\\SoftLandingCreativeManagementTask"
+  ],
+  "services": [
+    {
+      "Name": "AlibabaProtect",
+      "StartType": "Automatic",
+      "Status": "Running"
+    },
+    {
+      "Name": "XboxService",
+      "StartType": "Automatic",
+      "Status": "Running"
+    },
+    {
+      "Name": "GameInputRedistService",
+      "StartType": "Automatic",
+      "Status": "Running"
+    },
+    {
+      "Name": "GamingServices",
+      "StartType": "Automatic",
+      "Status": "Running"
+    },
+    {
+      "Name": "GamingServicesNet",
+      "StartType": "Automatic",
+      "Status": "Running"
+    },
+    {
+      "Name": "GameViewerService",
+      "StartType": "Automatic",
+      "Status": "Running"
+    }
+  ],
+  "runkeys": [
+    {
+      "Key": "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+      "Name": "Docker Desktop",
+      "Value": "C:\\Program Files\\Docker\\Docker\\Docker Desktop.exe"
+    },
+    {
+      "Key": "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+      "Name": "Gemini",
+      "Value": "\"C:\\Users\\Tk\\AppData\\Local\\Google\\Gemini\\GeminiAppLauncher.exe\""
+    }
+  ],
+  "renamed": [
+    {
+      "From": "D:\\CYRJAZWZ\\SogouInput\\16.10.0.5813\\SogouCloud.exe",
+      "To": "D:\\CYRJAZWZ\\SogouInput\\16.10.0.5813\\SogouCloud.exe.off"
+    },
+    {
+      "From": "C:\\Users\\Tk\\AppData\\Roaming\\360Safe\\SMLGetWord\\GetWordSearch.exe",
+      "To": "C:\\Users\\Tk\\AppData\\Roaming\\360Safe\\SMLGetWord\\GetWordSearch.exe.off"
+    }
+  ]
+}

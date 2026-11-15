@@ -19,7 +19,7 @@ import {
 export function useWorldbooks({
     // 共享状态
     worldbooks, activeWorldbook, lastWorldbookDirPath,
-    wbSearchQuery, wbFilterType, currentWbCategory, wbCategoryMap,
+    wbSearchQuery, wbFilterType, wbSortBy, currentWbCategory, wbCategoryMap,
     // 🏷️ A2：世界书**标签**映射（key = path||name → string[]），与 wbCategoryMap 同为配置层
     wbTagMap, currentWbTags,
     // 工具方法
@@ -1373,7 +1373,7 @@ export function useWorldbooks({
     // 计算属性：世界书列表筛选（搜索 + 词条数过滤 + 📁 分组过滤 + 🏷️ 标签过滤）
     // 🏷️ A2：复合过滤判定抽到纯函数 `matchWbFilter`（可单测；语义见规格 TC-WB-05）
     const filteredWorldbooks = computed(() => {
-        return worldbooks.value.filter(wb => {
+        const list = worldbooks.value.filter(wb => {
             const name = wbDisplayName(wb).toLowerCase();
             const matchesSearch = !wbSearchQuery.value || name.includes(wbSearchQuery.value.toLowerCase());
 
@@ -1394,6 +1394,39 @@ export function useWorldbooks({
                 matchesCount
             });
         });
+
+        // 🆕 2026-10-25 用户需求：世界书库补齐排序（与角色卡库口径一致）
+        //   ⚠️ 必须 slice() 得到副本再排 —— Array.sort 会**原地修改**，直接改 filter 结果虽不影响源数组，
+        //      但保持「纯计算」习惯更安全（也避免未来有人复用 list 时被暗改）。
+        const mode = (wbSortBy && wbSortBy.value) || 'name';
+        const arr = list.slice();
+        const nameOf = (wb) => String(wbDisplayName(wb) || '');
+        const sizeOf = (wb) => {
+            // 优先用物理文件大小；内存态（未落盘）退化为 JSON 序列化长度
+            if (typeof wb.fileSize === 'number') return wb.fileSize;
+            try { return wb.data ? JSON.stringify(wb.data).length : 0; } catch (e) { return 0; }
+        };
+        const mtimeOf = (wb) => Number(wb.mtime || wb._mtime || 0);
+
+        if (mode === 'name') {
+            arr.sort((a, b) => nameOf(a).localeCompare(nameOf(b), 'zh-Hans-CN'));
+        } else if (mode === 'nameDesc') {
+            arr.sort((a, b) => nameOf(b).localeCompare(nameOf(a), 'zh-Hans-CN'));
+        } else if (mode === 'mtime') {
+            arr.sort((a, b) => mtimeOf(b) - mtimeOf(a));
+        } else if (mode === 'mtimeAsc') {
+            arr.sort((a, b) => mtimeOf(a) - mtimeOf(b));
+        } else if (mode === 'sizeDesc') {
+            arr.sort((a, b) => sizeOf(b) - sizeOf(a));
+        } else if (mode === 'sizeAsc') {
+            arr.sort((a, b) => sizeOf(a) - sizeOf(b));
+        } else if (mode === 'entries') {
+            // 词条数倒序（世界书专有：一眼看出哪本最厚）
+            arr.sort((a, b) => wbEntryCount(b) - wbEntryCount(a));
+        }
+        // 'manual' 或未知值：保持原顺序（不排序）
+
+        return arr;
     });
 
     return {

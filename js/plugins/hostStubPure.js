@@ -1,5 +1,5 @@
 /**
- * 🧩 插件效果宿主桩——纯逻辑部分（host stub pure）
+ * [PLUGIN] 插件效果宿主桩——纯逻辑部分（host stub pure）
  * 从 hostStub.js 抽离出的无 DOM / 无浏览器依赖的纯函数，供 node --test 单测直接 import。
  * 这些函数只做字符串处理，不含 import.meta / 浏览器全局引用，可在 Node 环境运行。
  * 注意：保持与 hostStub.js 内联版本行为一致，修改任一处需同步另一处。

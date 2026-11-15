@@ -1,12 +1,12 @@
 /**
- * 🧩 插件效果宿主桩（host stub）
+ * [PLUGIN] 插件效果宿主桩（host stub）
  * 在沙箱 iframe（data: URL + sandbox="allow-scripts"）内模拟 SillyTavern 酒馆的运行环境，
  * 让插件脚本（酒馆助手 / userscript / SlashRunner 命令 / 原生扩展 bundle）能渲染出
  * 悬浮球 / 按钮 / 面板等 UI，达到「所见即所得」的效果预览基线。
  *
- * ⚠️ 安全边界：本模块只返回 HTML 字符串，由工作区组件以 data: URL 注入 iframe；
+ * [!] 安全边界：本模块只返回 HTML 字符串，由工作区组件以 data: URL 注入 iframe；
  *    iframe 无 allow-same-origin，脚本运行于隔离 origin，无法触碰应用本身。
- * ⚠️ 本文件是纯 .js 模块（非 Vue SFC），HTML 字符串可直接使用尖括号，无需 \x3C 转义。
+ * [!] 本文件是纯 .js 模块（非 Vue SFC），HTML 字符串可直接使用尖括号，无需 \x3C 转义。
  */
 
 // 真实 jQuery 源码（jquery/dist/jquery.min.js，生产构建内联为字符串）。
@@ -24,22 +24,57 @@ import showdownSource from 'showdown/dist/showdown.min.js?raw';
 // 真实 DOMPurify（purify.min.js）——酒馆消息 / 扩展模板的 HTML 净化器（对齐官方 chats.js / templates.js 的
 // DOMPurify.sanitize 管线，防 `<script>` / `<style>` / 事件属性等污染穿透沙箱 iframe）。
 import dompurifySource from 'dompurify/dist/purify.min.js?raw';
+// [PATH] 插件预览资源路径改写（相对路径 → 插件资源代理 URL）。
+//    实现放在 `utils/pluginResPath.js` 纯函数模块里，便于 Node 直接单测（本文件依赖 ?raw，Node 跑不了）。
+//    这里 re-export，保持既有 `from '../plugins/hostStub.js'` 的调用方零改动。
+import { rewritePluginResourcePaths } from '../utils/pluginResPath.js';
+export { rewritePluginResourcePaths };
 // 纯逻辑函数（rewriteEsmModule / stripEsmSyntax / parseSlashCommand / escapeHtml）——
 // 抽离到 hostStubPure.js 供 node --test 单测 import，此处复用避免重复维护。
 import { rewriteEsmModule as rewriteEsmModulePure, stripEsmSyntax as stripEsmSyntaxPure, parseSlashCommand as parseSlashCommandPure, escapeHtml as escapeHtmlPure, encodeStyleTags as encodeStyleTagsPure, decodeStyleTags as decodeStyleTagsPure } from './hostStubPure.js';
+// [PROBE] 插件静态透视（跑完没内容时解释原因用；**绝不阻止渲染** —— 见 hostStubProbe.js 顶部说明）
+import { probePluginSource, renderProbeHtml } from './hostStubProbe.js';
+// 🏭 自动生成的宿主 API 清单（来自真实酒馆源码 st-context.js 的 155 个成员 +
+//    events.js 的 104 个事件常量）。由 `node scripts/gen-host-stubs.mjs` 生成。
+//    这是「不再手工补 API」的基础：任何 getContext() 成员都会自动被补齐。
+import { CONTEXT_MEMBERS, EVENT_TYPES, CONTEXT_DEFAULTS_SOURCE } from './hostStubs.generated.js';
+export { CONTEXT_MEMBERS, EVENT_TYPES };
+// 🧩 扩展工程改用**真实 ESM**（浏览器原生解析依赖树），不再需要任何源码改写器。
+//    历史：曾用 esmModules.js 正则改写 import/export，但插件千变万化
+//    （顶层 await、test/dev 目录、TS 构建产物…）导致补丁无穷无尽，已整体废弃。
+// 🏗️ 宿主 DOM 骨架 + 主题 CSS（纯字符串，不依赖 ?raw，供 Node 单测直接断言输出）
+import { buildHostDom, buildTavernThemeCss } from './hostStubDom.js';
+export { buildHostDom, buildTavernThemeCss };
+/**
+ * 内存版 localStorage 的**内联源码**（注入到预览页 <script> 里执行）。
+ *
+ * [!] 历史上这里用 `buildMemoryStorage.toString()` 把函数转成字符串再拼接。
+ *    那种写法有两个隐患：① 函数内一旦引用外部变量，转字符串后就变成未定义（改一行就炸）；
+ *    ② 压缩/混淆后 toString() 结果不稳定。
+ *    现在改为**显式字符串常量**，谁改了函数体都不会影响注入结果。
+ *    注意：这里必须保持纯 ES5 语法，因为它会被原样塞进旧环境的脚本里。
+ */
+/**
+ * 🏭 自动生成的 getContext 默认值源码（内联进注入脚本用）。
+ *
+ * 源数据是真实酒馆的 st-context.js / events.js，由 `node scripts/gen-host-stubs.mjs` 生成。
+ * 换成源码字符串而非 JSON：默认值里大量是函数，JSON 无法表达。
+ * **不需要手工维护**：换酒馆版本后重新跑一次生成器即可。
+ */
+const CTX_DEFAULTS_SRC = CONTEXT_DEFAULTS_SOURCE;
 
-/** 生成内存版 localStorage（data: URL 下原生 localStorage 会抛 SecurityError） */
-function buildMemoryStorage() {
-    const store = new Map();
-    return {
-        getItem: (k) => (store.has(String(k)) ? store.get(String(k)) : null),
-        setItem: (k, v) => { store.set(String(k), String(v)); },
-        removeItem: (k) => { store.delete(String(k)); },
-        clear: () => { store.clear(); },
-        key: (i) => Array.from(store.keys())[i] ?? null,
-        get length() { return store.size; }
-    };
-}
+const MEMORY_STORAGE_SRC = `(function(){
+  var store = {};
+  function norm(k){ return String(k); }
+  return {
+    getItem: function(k){ k = norm(k); return Object.prototype.hasOwnProperty.call(store, k) ? store[k] : null; },
+    setItem: function(k, v){ store[norm(k)] = String(v); },
+    removeItem: function(k){ delete store[norm(k)]; },
+    clear: function(){ store = {}; },
+    key: function(i){ var keys = Object.keys(store); return i >= 0 && i < keys.length ? keys[i] : null; },
+    get length(){ return Object.keys(store).length; }
+  };
+})()`;
 
 /**
  * 迷你事件发射器（模拟酒馆 eventSource）。
@@ -167,7 +202,45 @@ function buildMiniJquery() {
       trigger(ev){ els.forEach(el=>{ try { el.dispatchEvent(new Event(ev, { bubbles: true })); } catch(e) {} }); return obj; },
       scrollTop(){ return els[0] ? els[0].scrollTop : 0; }
     };
-    obj.__proto__ = $ ? Object.getPrototypeOf($.fn || {}) : Object.prototype;
+    // ⚠️ 不要再动 obj.__proto__：
+    //    历史上这里写过 obj.__proto__ = Object.getPrototypeOf($.fn || {})，
+    //    而 $.fn 本身正是由 makeObj([]) 创建 ⇒ 循环依赖，首次执行时 $.fn 为
+    //    undefined，getPrototypeOf({}) 把原型设成普通对象，导致整条原型链被污染。
+    //    后果：插件调用 $('x').addEventListener(...) 这类**原生 DOM 方法**时，
+    //    属性查找落到被污染的原型上，报
+    //    Cannot read properties of undefined (reading 'function(){ return undefined; }')
+    //    （函数被字符串化后当成属性名去取）。真实案例：AutoRandomInput 随机指令。
+    //    现在统一镜像**原生节点**的方法：jQuery 对象也支持 addEventListener 等原生 API。
+    // 让 jQuery 对象**直接支持原生 DOM API**（不少现代插件混用两种写法，
+    // 典型：AutoRandomInput 用 $('#ari-copy-rule').addEventListener(...)）。
+    // ⚠️ for...in 只能拿到自有属性，addEventListener 在原型链上，必须显式列举。
+    const NATIVE_EL_METHODS = [
+      'addEventListener', 'removeEventListener', 'dispatchEvent',
+      'setAttribute', 'getAttribute', 'removeAttribute', 'hasAttribute', 'toggleAttribute',
+      'appendChild', 'removeChild', 'insertBefore', 'replaceChild', 'cloneNode',
+      'querySelector', 'querySelectorAll', 'getElementsByClassName', 'getElementsByTagName',
+      'contains', 'matches', 'closest', 'scrollIntoView', 'focus', 'blur', 'click',
+      'insertAdjacentHTML', 'insertAdjacentElement', 'getBoundingClientRect',
+      'animate', 'setPointerCapture', 'releasePointerCapture', 'showModal', 'close'
+    ];
+    for (const k of NATIVE_EL_METHODS) {
+      if (typeof obj[k] !== 'undefined') continue;
+      obj[k] = function () {
+        const args = Array.prototype.slice.call(arguments);
+        // 多元素集合：逐个调用，链式返回自身
+        if (els.length > 1) {
+          els.forEach(function (el) { if (el && typeof el[k] === 'function') el[k].apply(el, args); });
+          return obj;
+        }
+        const el = els[0];
+        if (!el || typeof el[k] !== 'function') {
+          // 空集合时静默返回 undefined / 自身，避免插件因节点不存在直接崩
+          return k === 'addEventListener' || k === 'removeEventListener' ? obj : undefined;
+        }
+        const r = el[k].apply(el, args);
+        return r === el ? obj : r;   // 链式：返回节点时改成 jQuery 对象
+      };
+    }
     return obj;
   }
   $.fn = makeObj([]);
@@ -183,11 +256,33 @@ function buildMiniJquery() {
 }
 
 /** SillyTavern 扩展 / userscript 常用全局 stub（避免脚本一加载就 ReferenceError） */
-function buildGlobalStubs(plugin = {}) {
+function buildGlobalStubs(plugin = {}, opts = {}) {
     // 插件声明的脚本按钮（酒馆助手 JSON 的 buttons 字段）作为初始脚本按钮列表
     const initialButtons = JSON.stringify((plugin.meta && Array.isArray(plugin.meta.buttons)) ? plugin.meta.buttons : []);
     const scriptName = JSON.stringify((plugin.name && String(plugin.name)) || 'jsk-plugin');
     return `
+// —— [BUG] errorCatched：酒馆助手 / JS-Slash-Runner 的**通用脚本包装器**。
+//
+//    几乎所有酒馆助手脚本的第一行都是：
+//        $(errorCatched(() => { ...脚本主体... }));
+//    其中 errorCatched 负责包一层错误隔离。它**不存在**时，这一行直接
+//    ReferenceError，浏览器连带报「Unexpected token ':'」并整段不执行
+//    —— 表现为「插件完全没效果」，且错误信息完全指不到真正原因。
+//
+//    语义按 JS-Slash-Runner 实现：收到函数就返回同函数（可选包 try/catch），
+//    收到别的东西原样返回。
+try {
+  if (typeof window.errorCatched !== 'function') {
+    window.errorCatched = function (fn) {
+      if (typeof fn !== 'function') return fn;
+      return function () {
+        try { return fn.apply(this, arguments); }
+        catch (e) { try { console.error('[errorCatched]', e); } catch (_) {} }
+      };
+    };
+  }
+} catch (e) {}
+
 // —— 受控的 window.parent / window.top 访问：沙箱 iframe 无 allow-same-origin，
 //    访问 window.parent 会抛 SecurityError，这里用 getter 兜底返回本地 window，
 //    使插件里的 parentWin.SillyTavern 等回落到本地 stub，不再报跨源错误。
@@ -197,14 +292,119 @@ try {
   Object.defineProperty(window, 'self', { get: function(){ return window; } });
 } catch(e) {}
 
-// —— 通用聊天消息 API（酒馆助手脚本最常调用）。
-//    消息结构对齐真实酒馆 ChatMessage：{ is_user, is_system, name, mes, send_date } ——
+// —— 通用聊天消息 API（酒馆助手脚本最常调用）
+//
+// [BUG] 字段名踩坑（2026-11-08）：原来只给 { is_user, name, mes }（原生酒馆 ChatMessage 风格），
+//    结果「更好的聊天记录管理」直接报「加载消息失败」—— 它读的是**酒馆助手 getChatMessages 的格式**：
+//      { message_id, name, role: 'user'|'assistant', message, is_hidden, ... }
+//    两套字段完全不同。现在**两套都给**，谁读谁都不炸（实测口径见
+//    js/composables/chat/useChatSandbox.js L113 的标准结构）。
 var __jskChat = [
-  { is_user: true, is_system: false, name: 'User', mes: '（沙箱演示会话，插件仅渲染 UI，不连接真实酒馆）', send_date: Date.now() },
-  { is_user: false, is_system: false, name: '角色', mes: '你好！这是一个模拟的酒馆会话环境。', send_date: Date.now() }
+  __jskMakeMsg(0, 'user', 'User', '（这是预览用的模拟会话，不会连接真实酒馆，也不会消耗模型额度）'),
+  __jskMakeMsg(1, 'assistant', '角色', '你好！这是一条模拟的角色回复，用来让依赖聊天内容渲染界面的插件有东西可读。')
 ];
+
+/** 单条消息：同时满足「酒馆助手 getChatMessages」与「原生 ChatMessage」两套字段 */
+function __jskMakeMsg(id, role, name, text) {
+  var t = String(text == null ? '' : text);
+  var isUser = role === 'user';
+  return {
+    // —— 酒馆助手 getChatMessages 格式 ——
+    message_id: id,
+    name: name,
+    role: role,
+    message: t,
+    is_hidden: false,
+    swipe_id: 0,
+    swipes: [t],
+    extra: {},
+    data: {},
+    // —— 原生酒馆 ChatMessage 格式（部分脚本直接用） ——
+    is_user: isUser,
+    is_system: false,
+    mes: t,
+    send_date: Date.now(),
+    // —— 兼容个别脚本读 send_date 字符串 ——
+    send_dateStr: new Date().toLocaleString()
+  };
+}
+window.__jskMakeMsg = __jskMakeMsg;
+
 window.getLastMessageId = function(){ return __jskChat.length - 1; };
-window.getChatMessages = function(range){ try{ var parts = String(range||'').split('-'); var a = parseInt(parts[0],10), b = parseInt(parts[1],10); if (isNaN(a)) return __jskChat.slice(); if (isNaN(b)) return __jskChat.slice(a); return __jskChat.slice(a, b+1); }catch(e){ return __jskChat.slice(); } };
+window.getChatMessages = function(range){
+  try {
+    if (range == null || range === '' || range === true) return __jskChat.slice();
+    var parts = String(range).split('-');
+    var a = parseInt(parts[0], 10), b = parseInt(parts[1], 10);
+    if (isNaN(a)) return __jskChat.slice();
+    if (isNaN(b)) return __jskChat.slice(a);
+    return __jskChat.slice(a, b + 1);
+  } catch(e) { return __jskChat.slice(); }
+};
+
+// 把 __jskChat 渲染成真实酒馆结构的 .mes 气泡，塞进 #chat。
+//
+// 这一步是「导航有内容、点下去却空白」的根因修复：
+//   #chat 之前一直是空的（只有隐藏的 #message_template 模板）。插件若按
+//   document.querySelector('.mes') 或 jQuery 的 '#chat .mes' 计数判断「有没有消息」，
+//   拿到的是 0 或那个隐藏模板 → 直接 return → 用户看到空白。
+//   而 getChatMessages() 却返回 2 条数据 —— 数据和 DOM 不一致，属于最隐蔽的一类假象。
+function __jskRenderChat(bump) {
+  try {
+    var host = document.getElementById('chat-history') || document.getElementById('chat');
+    if (!host) return 0;
+    if (bump) {
+      // 用统一构造器，保证新消息也同时具备两套字段
+      __jskChat.push(__jskMakeMsg(
+        __jskChat.length,
+        'assistant',
+        '角色',
+        '（模拟新回复 ' + new Date().toLocaleTimeString() + '）这是一条手动触发的新消息。'
+      ));
+    }
+    host.innerHTML = '';
+    __jskChat.forEach(function(m, i){
+      var wrap = document.createElement('div');
+      wrap.className = 'mes';
+      wrap.setAttribute('is_user', m.is_user ? 'true' : 'false');
+      wrap.setAttribute('is_system', m.is_system ? 'true' : 'false');
+      wrap.setAttribute('mesid', String(i));
+      wrap.style.cssText = 'display:flex;gap:12px;margin:0 0 16px;padding:10px 12px;border-radius:12px;'
+        + 'border:1px solid var(--SmartThemeBorderColor,#3f3f46);'
+        + 'background:' + (m.is_user ? 'var(--SmartThemeUserMesBlurTintColor,#26262c)' : 'var(--SmartThemeBotMesBlurTintColor,#202024)') + ';';      var avatar = document.createElement('div');
+      avatar.className = 'avatar';
+      avatar.style.cssText = 'flex-shrink:0;width:40px;height:40px;border-radius:50%;background:'
+        + (m.is_user ? '#3f3f46' : 'var(--SmartThemeEmColor,#8b5cf6)') + ';';
+      var body = document.createElement('div');
+      body.style.cssText = 'flex:1;min-width:0;';
+      var header = document.createElement('div');
+      header.className = 'mes_header';
+      header.style.cssText = 'display:flex;align-items:baseline;gap:8px;margin-bottom:4px;';
+      var nameEl = document.createElement('span');
+      nameEl.className = 'ch_name';
+      nameEl.innerHTML = '<span class="name_text" style="font-weight:700;color:var(--SmartThemeBodyColor,#e4e4e7);"></span>';
+      nameEl.querySelector('.name_text').textContent = m.name || '';
+      var idEl = document.createElement('span');
+      idEl.className = 'mesIDDisplay';
+      idEl.style.cssText = 'font-size:10px;color:#52525b;';
+      idEl.textContent = '#' + i;
+      header.appendChild(nameEl);
+      header.appendChild(idEl);
+      var textEl = document.createElement('div');
+      textEl.className = 'mes_text';
+      textEl.style.cssText = 'color:var(--SmartThemeBodyColor,#d4d4d8);font-size:14px;line-height:1.6;overflow-wrap:break-word;';
+      textEl.textContent = m.mes || '';
+      body.appendChild(header);
+      body.appendChild(textEl);
+      wrap.appendChild(avatar);
+      wrap.appendChild(body);
+      host.appendChild(wrap);
+    });
+    return __jskChat.length;
+  } catch(e) { console.error('[效果诊断] 渲染聊天气泡失败', e); return 0; }
+}
+window.__jskRenderChat = __jskRenderChat;
+
 // —— variables 用迷你作用域（对齐酒馆 getContext().variables.local/global 的 get/set/del）——
 function __jskVarScope(){
   var m = {};
@@ -241,8 +441,20 @@ window.renderExtensionTemplateAsync = function(extensionName, templateId, data, 
 // —— 完整 getContext（对齐 st-context.js 高频成员；函数体惰性求值，window 级 API 后续定义即可）——
 window.getContext = function(){
   var v = __jskVarScope;
+  // ⚠️ extensionSettings / extension_settings 必须与 window.extension_settings 同一个对象
+  //    （酒馆里两者就是同一个引用）。缺了它，插件读 ctx.extensionSettings['xxx'] 会抛
+  //    Cannot read properties of undefined。真实案例：RedBird 工具箱 st.ts:178。
+  if (!window.extension_settings) window.extension_settings = {};
+  // ⚠️ chatMetadata 必须是**稳定引用**（同一对象），不能每次返回新 {}：
+  //    插件常用「引用是否变化」判断是否需要重渲染，例如随机指令 skill-ui.js：
+  //        if (metadata !== getContext().chatMetadata) { render(); return; }
+  //    若每次都返回新对象，这个判断永远成立 ⇒ render ↔ refresh 无限递归
+  //    ⇒ RangeError: Maximum call stack size exceeded。
+  if (!window.chat_metadata) window.chat_metadata = {};
   var ctx = {
-    chat: __jskChat, chatMetadata: {}, characters: window.characters, groups: window.groups,
+    chat: __jskChat, chatMetadata: window.chat_metadata, characters: window.characters, groups: window.groups,
+    extensionSettings: window.extension_settings,
+    extension_settings: window.extension_settings,
     name1: 'User', name2: '角色', characterId: '0', groupId: null, chatId: 'demo', members: [],
     getCurrentChatId: function(){ return 'demo'; },
     getRequestHeaders: function(){ return { 'Content-Type': 'application/json' }; },
@@ -276,8 +488,47 @@ window.getContext = function(){
     t: function(s){ return Array.isArray(s) ? s.join('') : String(s == null ? '' : s); },
     translate: function(t){ return t; },
     getCharacters: function(){ return Promise.resolve([]); }, getThumbnailUrl: function(){ return ''; },
-    writeExtensionField: function(){ return Promise.resolve(); }, writeExtensionFieldBulk: function(){ return Promise.resolve(); }
+    writeExtensionField: function(){ return Promise.resolve(); }, writeExtensionFieldBulk: function(){ return Promise.resolve(); },
+    // ── 以下为扩展常用、但此前缺失的成员（插件的「版本检查」逐个探测它们）──
+    //    generateRaw: 1.13.2 起加入 context；插件常用它判断宿主版本是否够新。
+    //    真实案例：ST-iPhonie 用 !ctx.generateRaw 判定「需要 1.13.2+」直接拒绝启动。
+    generateRaw: function(){ return Promise.resolve(''); },
+    generateQuietPrompt: function(){ return Promise.resolve(''); },
+    //    messageFormatter：addHook / stage 是 1.13+ 的显示钩子体系。
+    messageFormatter: (function(){
+      var hooks = [];
+      return {
+        addHook: function(fn){ if (typeof fn === 'function') hooks.push(fn); return fn; },
+        removeHook: function(fn){ var i = hooks.indexOf(fn); if (i >= 0) hooks.splice(i, 1); },
+        // 部分插件读 stage 常量
+        stage: { BEFORE_REGEX: 0, AFTER_REGEX: 1, BEFORE_MARKDOWN: 2, AFTER_MARKDOWN: 3, DISPLAY: 4 },
+        // 让宿主自带的渲染链也能走一遍钩子（可选，不影响探测）
+        apply: function(text, meta){ var t = String(text == null ? '' : text);
+          for (var i = 0; i < hooks.length; i++) { try { var r = hooks[i](t, meta || {}); if (typeof r === 'string') t = r; } catch (e) { /* 单个钩子失败不影响其余 */ } }
+          return t; },
+      };
+    })(),
+    //    getExtensionPrompt / setExtensionPrompt 成对（部分扩展会读写）
+    getExtensionPrompt: function(){ return ''; },
+    //    eventSource 上的 removeListener 别名（EventEmitter 常被混用）
+    get eventSourceFull(){
+      var es = window.eventSource || {};
+      if (es && typeof es.removeListener !== 'function' && typeof es.off === 'function') es.removeListener = es.off;
+      if (es && typeof es.off !== 'function' && typeof es.removeListener === 'function') es.off = es.removeListener;
+      return es;
+    },
   };
+  // 🏭 自动补全：把酒馆源码里 getContext() 的**全部 155 个成员**都补上，
+  //    只在缺失时才填默认值（上面手写的实现优先级更高）。
+  //    清单由 node scripts/gen-host-stubs.mjs 从真实酒馆源码生成，无需手工维护。
+  try {
+    var __defaults = {
+${CTX_DEFAULTS_SRC}
+    };
+    for (var __k in __defaults) {
+      if (ctx[__k] === undefined) ctx[__k] = __defaults[__k];
+    }
+  } catch (e) { console.error('[hostStub] 自动补全 getContext 失败', e); }
   return ctx;
 };
 window.saveChat = function(){ return Promise.resolve(); };
@@ -464,8 +715,9 @@ window.SillyTavern = (window.SillyTavern || (function(){
   return {
     accountStorage: {},
     chat: __jskChat,
-    characters: window.characters,
-    groups: window.groups,
+    // ⚠️ 以下用 getter：对象字面量在定义时求值，window.characters / eventSource 等
+    //    可能此刻尚未初始化，直接赋值会永久捕获 undefined。
+    get characters(){ return window.characters || []; },
     name1: 'User',
     name2: '角色',
     characterId: '0',
@@ -478,12 +730,13 @@ window.SillyTavern = (window.SillyTavern || (function(){
     saveSettingsDebounced: function(){ return resolve(); },
     onlineStatus: 'auto',
     maxContext: 8192,
-    chatMetadata: {},
+    // ⚠️ 稳定引用（同 getContext 的理由）：插件用引用比较判断是否需要重渲染
+    get chatMetadata(){ return window.chat_metadata || (window.chat_metadata = {}); },
     streamingProcessor: {},
-    eventSource: window.eventSource,
-    eventTypes: window.tavern_events,
+    get eventSource(){ return window.eventSource; },
+    get eventTypes(){ return window.tavern_events || window.event_types; },
     // 兼容脚本用 SillyTavern.tavern_events（EventEmitter + 常量）
-    tavern_events: window.eventSource,
+    get tavern_events(){ return window.eventSource; },
     addOneMessage: function(m, opts){ return (typeof window.addOneMessage === 'function') ? window.addOneMessage(m, opts) : (window.jQuery ? window.jQuery('<div>') : document.createElement('div')); },
     deleteLastMessage: function(){ return resolve(); },
     generate: function(){ console.log('[SillyTavern.generate]'); return resolve(); },
@@ -527,7 +780,18 @@ window.SillyTavern = (window.SillyTavern || (function(){
     showLoader: noop,
     hideLoader: function(){ return resolve(); },
     mainApi: {},
-    extensionSettings: window.extension_settings,
+    // ⚠️ 必须是 getter，不能写成「extensionSettings: window.extension_settings」：
+    //    对象字面量在**定义时**就求值，而 window.extension_settings 此刻可能还没初始化，
+    //    于是永久捕获 undefined ⇒ 插件读 ctx.extensionSettings['xxx'] 直接抛
+    //    Cannot read properties of undefined。真实案例：RedBird 工具箱 st.ts。
+    get extensionSettings(){
+      if (!window.extension_settings) window.extension_settings = {};
+      return window.extension_settings;
+    },
+    get extension_settings(){
+      if (!window.extension_settings) window.extension_settings = {};
+      return window.extension_settings;
+    },
     ModuleWorkerWrapper: {},
     getTokenizerModel: function(){ return ''; },
     generateQuietPrompt: function(){ return function(){ return resolve(''); }; },
@@ -669,9 +933,48 @@ window.TavernHelper_API = (window.TavernHelper_API || {
 // 部分脚本以全局 TavernHelper（无 _API 后缀）访问，这里提供同源别名
 window.TavernHelper = (window.TavernHelper || window.TavernHelper_API);
 
+// —— [PATH] 消息停靠区（toastr / SlashRunner.showMessage 共用）——
+//     历史教训：showMessage 原来 4 秒后自动 remove()，导致 statusSystem.js 的
+//     状态面板「一闪就没」，用户完全看不到 —— 这是「预览没效果」的直接原因之一。
+//     现在改为**常驻**，右上角 × 手动关闭；最多保留 3 条，超出自动折叠最旧。
+window.__jskDockPush = function(title, msg){
+  try {
+    var dock = document.getElementById('jsk-toast-dock');
+    if (!dock) {
+      dock = document.createElement('div');
+      dock.id = 'jsk-toast-dock';
+      dock.style.cssText = 'position:fixed;top:44px;right:12px;z-index:999999;display:flex;flex-direction:column;gap:8px;max-width:360px;';
+      document.body.appendChild(dock);
+    }
+    // 超出 3 条：移除最旧
+    while (dock.children.length >= 3) {
+      try { dock.removeChild(dock.firstChild); } catch(e) { break; }
+    }
+    var el = document.createElement('div');
+    el.style.cssText = 'padding:12px 14px;border-radius:8px;background:#27272a;color:#e4e4e7;'
+      + 'font-size:13px;border:1px solid #3f3f46;box-shadow:0 4px 16px rgba(0,0,0,.4);'
+      + 'white-space:pre-line;position:relative;padding-right:32px;';
+    var head = '';
+    if (title) {
+      head = '<div style="font-weight:600;color:#a78bfa;margin-bottom:6px;"></div>';
+    }
+    el.innerHTML = head + '<div class="jsk-dock-body"></div>';
+    if (title) el.querySelector('div').textContent = '【' + String(title) + '】';
+    el.querySelector('.jsk-dock-body').textContent = String(msg == null ? '' : msg);
+    var btn = document.createElement('button');
+    btn.textContent = '×';
+    btn.title = '关闭';
+    btn.style.cssText = 'position:absolute;top:6px;right:8px;background:none;border:none;color:#a1a1aa;cursor:pointer;font-size:16px;line-height:1;padding:2px 4px;';
+    btn.addEventListener('click', function(){ try { el.remove(); } catch(e) {} });
+    el.appendChild(btn);
+    dock.appendChild(el);
+    console.log('[dock]', title || '', msg);
+  } catch(e) {}
+};
+
 // —— toastr（更好的聊天记录管理 / 全自动总结的提示组件）——
 window.toastr = (window.toastr || (function(){
-  function show(type, msg){ try { console.log('[toastr.' + type + ']', msg); const el = document.createElement('div'); el.textContent = String(msg); el.style.cssText = 'position:fixed;bottom:16px;left:50%;transform:translateX(-50%);z-index:999999;padding:8px 16px;border-radius:6px;color:#fff;font-size:13px;box-shadow:0 2px 8px rgba(0,0,0,.5);'; el.style.background = type==='success' ? '#16a34a' : type==='error' ? '#dc2626' : type==='warning' ? '#d97706' : '#3b82f6'; document.body.appendChild(el); setTimeout(function(){ try{ el.remove(); }catch(e){} }, 2500); } catch(e){} }
+  function show(type, msg){ try { console.log('[toastr.' + type + ']', msg); __jskDockPush(null, '[' + type + '] ' + String(msg)); } catch(e){} }
   return { success:function(m){show('success',m);}, error:function(m){show('error',m);}, warning:function(m){show('warning',m);}, info:function(m){show('info',m);}, remove:function(){} };
 })());
 
@@ -757,10 +1060,7 @@ window.SlashRunner = (window.SlashRunner || (function(){
   api.registerHook = function(name, cb){ api.hooks[name] = cb; try { console.log('[SlashRunner] 注册钩子:', name); } catch(e) {} return api; };
   api.registerMacro = api.registerHook;
   api.loadModule = function(name){ const m = api.modules[name]; if (m) { try { m.init && m.init(); } catch(e) { console.error(e); } } return api; };
-  api.showMessage = function(msg, title){
-    try { const el = document.createElement('div'); el.style.cssText = 'position:fixed;top:60px;right:12px;z-index:999999;max-width:320px;padding:12px 14px;border-radius:8px;background:#27272a;color:#e4e4e7;font-size:13px;border:1px solid #3f3f46;box-shadow:0 4px 16px rgba(0,0,0,.4);white-space:pre-line;'; el.textContent = (title ? '【' + title + '】\\n' : '') + String(msg); document.body.appendChild(el); setTimeout(function(){ try{ el.remove(); }catch(e){} }, 4000); } catch(e){}
-    return msg;
-  };
+  api.showMessage = function(msg, title){ __jskDockPush(title, msg); return msg; };
   return api;
 })());
 
@@ -781,7 +1081,7 @@ window.CSS = (window.CSS || {});
 window.GM_info = (window.GM_info || { script: { name: 'userscript' } });
 // 内存 localStorage（data: URL 沙箱下原生 localStorage 不可用）
 try { localStorage.getItem('__jsk_probe__'); } catch(e) {
-  const _s = (${buildMemoryStorage.toString()})();
+  const _s = ${MEMORY_STORAGE_SRC};
   Object.defineProperty(window, 'localStorage', { get: function(){ return _s; } });
 }
 
@@ -792,7 +1092,7 @@ try { localStorage.getItem('__jsk_probe__'); } catch(e) {
 ${buildNativeSlashStubs()}
 
 // —— ESM 模块解析器：bundle 重写后的 import 绑定据此从全局取酒馆 API ——
-${buildModuleResolver()}
+${buildModuleResolver(opts)}
 // —— 渲染演示会话消息（此时全部 window 级 API 均已定义；为插件提供 .mes 挂载点，已渲染则不重复）——
 try { if (window.__jskRenderDemoMessages) window.__jskRenderDemoMessages(); } catch(e) { console.error('[demo messages]', e); }
 `;
@@ -1056,7 +1356,7 @@ window.__jskSubstituteParams = function(mes, chName){
     s = s.split('{{user}}').join('User').split('{{char}}').join(n)
       .split('{{name1}}').join('User').split('{{name2}}').join(n)
       .split('{{original}}').join('')
-      .split('{{newline}}').join('\n').split('{{lf}}').join('\n')
+      .split('{{newline}}').join(String.fromCharCode(10)).split('{{lf}}').join(String.fromCharCode(10))
       .split('{{time}}').join(new Date().toLocaleTimeString());
   } catch(e) {}
   return s;
@@ -1077,8 +1377,8 @@ window.messageFormatting = function(mes, chName){
     : String(mes == null ? '' : mes);
   // 引号样式化：中文双引号/书名号内容包 <q>（跳过已含 HTML 标签的行，避免破坏结构）
   try {
-    s = s.replace(/“([^”\n]{1,80})”/g, '<q>$1</q>');
-    s = s.replace(/《([^》\n]{1,40})》/g, '<q>$1</q>');
+    s = s.replace(/“([^”]{1,80})”/g, '<q>$1</q>');
+    s = s.replace(/《([^》]{1,40})》/g, '<q>$1</q>');
   } catch(e) {}
   var html = (window.__jskMarkdown && window.__jskMarkdown.makeHtml) ? window.__jskMarkdown.makeHtml(s) : s;
   try {
@@ -1198,16 +1498,30 @@ window.getLastMessageId = function(){ return window.__jskChat ? window.__jskChat
  * 该模块的动态导出让任意绑定名都能从全局取到对应 API，从而覆盖所有酒馆内建模块的命名导出。
  * 配合 buildNativeSlashStubs / buildGlobalStubs 已在 window 上铺好的 API 层，实现「任意扩展可加载」。
  */
-function buildModuleResolver() {
+function buildModuleResolver(opts = {}) {
+    const metaPreviewId = String((opts && opts.previewId) || '');
+    // ⚠️ import.meta.url 必须是**能真正取到文件**的 URL：
+    //    扩展插件普遍写 `new URL('./index.html', import.meta.url)` 去读同目录的界面模板，
+    //    或者用 `await fetch(new URL('./data.json', import.meta.url))`。
+    //    历史上这里给的是硬编码假地址 `file:///plugin/dist/bundle.js`，
+    //    于是 new URL('./index.html', ...) → file:///plugin/dist/index.html ⇒ fetch 直接
+    //    `TypeError: Failed to fetch`，插件界面模板拿不到，后续所有 getElementById 全返回 null，
+    //    最终报一句完全无法定位的
+    //    `Cannot read properties of undefined (reading 'function(){ return undefined; }')`。
+    //    真实案例：AutoRandomInput 随机指令（`fetch(new URL('./index.html', window.__jskMeta.url))`）。
+    //    现在指向主进程的插件资源代理路由，`app://` 协议会按 previewId 登记的 rootDir 真实读盘。
+    const metaUrl = metaPreviewId
+        ? 'app://index.html/__jsk_plugin_res__/' + metaPreviewId + '/index.js'
+        : 'file:///plugin/dist/bundle.js';
     return `
 // —— ESM 模块解析器（万能命名空间）——
 // 扩展 bundle 的静态 import 已被 rewriteEsmModule 内联为 var 声明（从 window 取酒馆 API），
 // 这里为 import.meta 与动态 import() 提供沙箱内可运行的等价实现。
 // default / star import 的兜底值也在此提供。
-// ⚠️ import.meta.url 必须是合法 URL：bundle 常写 new URL("../", import.meta.url) 或
+// [!] import.meta.url 必须是合法 URL：bundle 常写 new URL("../", import.meta.url) 或
 //    String(import.meta.url).includes("/dist/")，空串会让 new URL("../", "") 抛 TypeError。
 //    这里给一个含 /dist/ 的 file: 基址，保证 new URL 解析始终合法（对任意 bundle 通用）。
-window.__jskMeta = { url: 'file:///plugin/dist/bundle.js', resolve: function(s){ return s; } };
+window.__jskMeta = { url: '${metaUrl}', resolve: function(s){ return s; } };
 window.__jskModuleExports = (function(){
   const NOOP = function(){ return undefined; };
   function resolve(name){
@@ -1250,113 +1564,127 @@ function rewriteEsmModule(src) {
     return rewriteEsmModulePure(src);
 }
 
-/** 生成酒馆宿主 DOM 骨架（#chat / .options-content / #extensions_settings 等插件常用挂载点）
- * 结构对齐 SillyTavern 官方 public/index.html 与 templates/wandMenu.html：
- * - #extensionsMenu 内含全部 *_wand_container（扩展菜单按钮区，token-counter/tts/translate/sd 等在此挂载按钮）
- * - #extensions_settings 与 #extensions_settings2 内含全部 *_container（扩展设置面板，memory→#summarize_container、tts→#tts_container、translate→#translation_container）
- * - #leftSendForm（官方 addExtensionsButtonAndMenu 把 wand 按钮挂到此处）
- * - #zoomed_avatar_template（memory doPopout 复用此模板）
- * 缺失这些挂载点时，插件 jQuery 空对象 .append() 会静默失败 → 表现为「空白」。
+/**
+ * 🧩 生成「扩展工程」的模块加载块 —— **真实 ESM，不做任何源码改写**。
+ *
+ * 为什么推倒重来（血泪教训）：
+ *   一开始走的是「猜工程形状 → 正则改写 import/export」的路子，结果：
+ *     · 随机指令（多文件源码工程）：test/preview.js 被当运行时模块 ⇒ 顶层 await 报错
+ *     · RedBird 工具箱（vite+TS 构建工程）：dev/ui-lint.js 被当运行时模块 ⇒ 同样报错
+ *     · 每次都是「再加一条排除规则」，插件千变万化，规则永远追不上
+ *   而且改写器要处理 named/default/star/副作用/动态 import、export 各种写法、
+ *   顶层 await、循环依赖……**这些都是浏览器原生就会的事**，我们根本没理由重写。
+ *
+ * 现在的做法：
+ *   · 主进程的 `app://.../__jsk_plugin_res__/<id>/<相对路径>` 已能按 previewId
+ *     登记的 rootDir **真实读盘**，且 .js/.mjs 返回 `text/javascript`（MIME 正确）。
+ *   · 于是只需让浏览器自己去加载 manifest 声明的入口：
+ *         <script type="module" src="app://…/__jsk_plugin_res__/<id>/dist/index.js">
+ *     浏览器会自己解析 `./core.js`、处理循环依赖、支持顶层 await、处理动态 import()。
+ *   · **入口由 manifest 决定**，所以 dev/、test/、src/（TS 源码）根本不会被加载 ——
+ *     不需要任何「排除目录」的正则。
+ *
+ * 唯一需要干预的是「非相对路径」的宿主 API import（'jquery'、'/script.js'），
+ * 由 importmap 把它们映射到桩模块（见 buildHostImportMap）。
+ *
+ * @param {object|null} bundleModules 保留形参以兼容旧调用；现在不再需要内容
+ * @param {boolean} isExtension
+ * @param {object} opts { previewId, entry }
+ * @returns {string} 注入用的 <script> 块；缺少 previewId 或入口时返回空串（退回旧路径）
  */
-function buildHostDom() {
-    return `
-<div id="chat" style="position:relative; min-height:100%; padding:16px; box-sizing:border-box;">
-  <div id="chat-history" style="min-height:120px;"></div>
-</div>
-<div id="sheld" style="display:none;"></div>
-<div id="options" class="options-content" style="position:relative; min-height:40px; padding:8px;">
-  <hr>
-</div>
-<div id="right-nav-panel" style="position:relative;"></div>
-<div id="send_form" style="position:relative; min-height:40px; padding:8px;">
-  <div id="leftSendForm" class="alignContentCenter" style="display:flex; gap:8px; align-items:center;"></div>
-</div>
-<div id="extensions_settings" class="flex1 wide50p" style="position:relative; min-height:40px; padding:8px;">
-  <div id="assets_container" class="extension_container"></div>
-  <div id="typing_indicator_container" class="extension_container"></div>
-  <div id="expressions_container" class="extension_container"></div>
-  <div id="sd_container" class="extension_container"></div>
-  <div id="tts_container" class="extension_container"></div>
-  <div id="rvc_container" class="extension_container"></div>
-  <div id="stt_container" class="extension_container"></div>
-  <div id="audio_container" class="extension_container"></div>
-  <div id="silence_container" class="extension_container"></div>
-  <div id="objective_container" class="extension_container"></div>
-  <div id="blip_container" class="extension_container"></div>
-  <div id="live2d_container" class="extension_container"></div>
-  <div id="vrm_container" class="extension_container"></div>
-  <div id="timelines_container" class="extension_container"></div>
-  <div id="webllm_container" class="extension_container"></div>
-  <div id="rss_container" class="extension_container"></div>
-</div>
-<div id="extensions_settings2" class="flex1 wide50p" style="position:relative; min-height:40px; padding:8px;">
-  <div id="websearch_container" class="extension_container"></div>
-  <div id="emulatorjs_container" class="extension_container"></div>
-  <div id="qr_container" class="extension_container"></div>
-  <div id="translation_container" class="extension_container"></div>
-  <div id="caption_container" class="extension_container"></div>
-  <div id="idle_container" class="extension_container"></div>
-  <div id="summarize_container" class="extension_container"></div>
-  <div id="hypebot_container" class="extension_container"></div>
-  <div id="regex_container" class="extension_container"></div>
-  <div id="vectors_container" class="extension_container"></div>
-  <div id="randomizer_container" class="extension_container"></div>
-  <div id="chromadb_container" class="extension_container"></div>
-  <div id="message_limit_container" class="extension_container"></div>
-  <div id="injects_container" class="extension_container"></div>
-  <div id="accuweather_container" class="extension_container"></div>
-  <div id="dice_container" class="extension_container"></div>
-</div>
-<div id="extensionsMenu" class="options-content" style="position:fixed; top:44px; left:12px; z-index:90000; display:flex; flex-direction:column; gap:4px;">
-  <div id="data_bank_wand_container" class="extension_container"></div>
-  <div id="attach_file_wand_container" class="extension_container"></div>
-  <div id="sd_wand_container" class="extension_container"></div>
-  <div id="caption_wand_container" class="extension_container"></div>
-  <div id="gallery_wand_container" class="extension_container"></div>
-  <div id="tts_wand_container" class="extension_container"></div>
-  <div id="screen_share_wand_container" class="extension_container"></div>
-  <div id="prompt_inspector_wand_container" class="extension_container"></div>
-  <div id="emulatorjs_wand_container" class="extension_container"></div>
-  <div id="notebook_wand_container" class="extension_container"></div>
-  <div id="chess_wand_container" class="extension_container"></div>
-  <div id="token_counter_wand_container" class="extension_container"></div>
-  <div id="dice_wand_container" class="extension_container"></div>
-  <div id="objective_wand_container" class="extension_container"></div>
-  <div id="translate_wand_container" class="extension_container"></div>
-</div>
-<button id="extensionsMenuButton" style="display:none;"></button>
-<!-- #zoomed_avatar_template：memory 插件 doPopout 复用的浮动弹窗模板 -->
-<div id="zoomed_avatar_template" class="template_element" style="display:none;"></div>
-<!-- #message_template：真实酒馆的消息克隆模板（script.js 用 $('#message_template .mes').clone() 生成每条消息）-->
-<div id="message_template" style="display:none;">
-  <div class="mes" style="display:flex; gap:12px; margin:0 0 16px; padding:10px 12px; border-radius:12px; background:#202024; border:1px solid #3f3f46;">
-    <div class="avatar" style="flex-shrink:0; width:44px; height:44px; border-radius:50%; overflow:hidden; background:#3f3f46;">
-      <img alt="" style="width:100%; height:100%; object-fit:cover; display:block;">
-    </div>
-    <div style="flex:1; min-width:0;">
-      <div class="mes_header" style="display:flex; align-items:baseline; gap:8px; margin-bottom:4px;">
-        <span class="ch_name"><span class="name_text" style="font-weight:700; color:#e4e4e7;"></span></span>
-        <span class="timestamp" style="font-size:11px; color:#71717a;"></span>
-        <span class="mesIDDisplay" style="font-size:10px; color:#52525b;"></span>
-      </div>
-      <div class="mes_text" style="color:#d4d4d8; font-size:14px; line-height:1.6; overflow-wrap:break-word;"></div>
-    </div>
-  </div>
-</div>`;
+function buildModuleRuntimeBlock(bundleModules, isExtension, opts = {}) {
+    const previewId = String((opts && opts.previewId) || '');
+    const entry = String((opts && opts.entry) || '').replace(/\\/g, '/').replace(/^\/+/, '');
+    if (!previewId || !entry) return '';
+
+    const base = `app://index.html/__jsk_plugin_res__/${encodeURIComponent(previewId)}/`;
+    const entryUrl = base + entry.split('/').map(encodeURIComponent).join('/');
+
+    // 兼容层：插件可能写 import { getContext } from '../../../script.js'
+    // 这类「向上跨出插件目录」的路径，浏览器会解析成 app://index.html/script.js ⇒ 404。
+    // 用一个 window.__jskModuleExports 兜底：在入口模块之前注册一个 importmap，
+    // 把常见的宿主模块名映射到桩。
+    const importMap = buildHostImportMap(base);
+
+    return `${importMap}<script type="module">
+// 真实 ESM 入口：浏览器自行解析依赖树（相对 import / 顶层 await / 动态 import 全部原生支持）
+try {
+  window.__jskEntryModule = import(${JSON.stringify(entryUrl)});
+  window.__jskEntryModule.catch(function(e){
+    console.error('[module] 入口加载失败: ' + ${JSON.stringify(entry)}, e);
+  });
+} catch (e) {
+  console.error('[module] 入口注入异常', e);
+}
+</script>`;
 }
 
 /**
- * 构建插件效果的沙箱 iframe HTML（srcdoc 主体，不含 <!DOCTYPE>/<html>/<head> 外壳）
- * @param {object} plugin 归一化后的 plugin 模型
- * @param {object} opts
- * @param {string[]} opts.bundleJs  扩展工程 bundle js 源码（按顺序内联注入）
- * @param {string[]} opts.bundleCss 扩展工程 css 源码（内联注入 <style>）
- * @returns {string} 完整可用的 HTML 字符串
+ * 宿主 API 的 importmap：把插件常 import 的模块名指向桩。
+ *
+ * 浏览器对「裸说明符」（'jquery'）必须有 importmap 才能解析；
+ * 对 '/script.js' 这种绝对路径会解析成 app://index.html/script.js ——
+ * 由 app:// 协议在 appRoot 下找不到 ⇒ 404 ⇒ 整个模块树加载失败。
+ * 因此这里统一映射到一个「万能桩模块」（由预览页内联注册）。
+ *
+ * @param {string} base 插件资源代理基址
+ * @returns {string}
  */
+function buildHostImportMap(base) {
+    const stubUrl = base + '__jsk_host_stub__.js';
+    // 常见宿主模块名（酒馆核心 + 第三方常用）
+    const bare = [
+        'jquery', 'lodash', 'moment', 'handlebars', 'showdown', 'dompurify',
+        'toastr', 'dayjs', 'localforage', 'yaml', 'zod',
+    ];
+    const imports = {};
+    for (const name of bare) imports[name] = stubUrl;
+    // 酒馆源码里的绝对路径 import（'/script.js'、'/scripts/xxx.js'）
+    imports['/script.js'] = stubUrl;
+    imports['/scripts/extensions.js'] = stubUrl;
+    imports['/scripts/events.js'] = stubUrl;
+    imports['/scripts/world-info.js'] = stubUrl;
+    imports['/scripts/power-user.js'] = stubUrl;
+    imports['/scripts/st-context.js'] = stubUrl;
+    imports['/scripts/utils.js'] = stubUrl;
+    // ⚠️ 插件常写相对路径「向上跨出插件目录」去 import 酒馆核心模块，例如
+    //      import(new URL('../../../personas.js', import.meta.url))
+    //    相对插件资源 URL 会被解析成 app://index.html/personas.js ⇒ 404
+    //    （真实案例：ST-iPhonie，控制台报 personas.js 404）。
+    //    importmap 无法用通配符覆盖所有相对深度，因此这里把「酒馆根目录下的常见核心文件」
+    //    全部映射到桩：浏览器解析出 app://index.html/personas.js 时会先查 importmap
+    //    的 imports 表（键为完整 URL），命中即用桩替代。
+    const CORE_AT_ROOT = [
+      'personas.js', 'script.js', 'scripts.js', 'secrets.js', 'group-chats.js',
+      'chats.js', 'characters.js', 'world-info.js', 'preset-manager.js',
+      'sysprompt.js', 'reasoning.js', 'user.js', 'openai.js',
+      'scripts/personas.js', 'scripts/group-chats.js', 'scripts/characters.js',
+      'scripts/chats.js', 'scripts/world-info.js', 'scripts/preset-manager.js',
+      'scripts/sysprompt.js', 'scripts/reasoning.js', 'scripts/extensions.js',
+      'scripts/events.js', 'scripts/utils.js', 'scripts/power-user.js',
+      'scripts/st-context.js', 'scripts/secrets.js', 'scripts/user.js',
+    ];
+    for (const rel of CORE_AT_ROOT) {
+      imports['app://index.html/' + rel] = stubUrl;
+    }
+
+    const json = JSON.stringify({ imports }, null, 0);
+    return `<script type="importmap">${json.replace(/</g, '\\u003c')}</script>`;
+}
+
 export function buildPluginPreviewHtml(plugin, opts = {}) {
     const bundleJs = opts.bundleJs || [];
+    // 🧩 扩展工程「多文件模块表」：{ 相对路径: 源码 }。
+    //    现代插件是多文件 + 相对 import（index.js → './core.js'），
+    //    必须按真实文件解析依赖，否则所有 import 都落到「万能 Proxy」返回 NOOP 函数，
+    //    插件随后对函数取属性 ⇒ `Cannot read properties of undefined`
+    //    （reading 'function(){ return undefined; }'）。真实案例：AutoRandomInput 随机指令。
+    const bundleModules = (opts.bundleModules && typeof opts.bundleModules === 'object')
+        ? opts.bundleModules : null;
     const bundleCss = opts.bundleCss || [];
     const templates = opts.templates || {}; // 扩展工程 html 模板映射 { 相对路径: 内容 }
+    // [PATH] 预览 id：用于把插件里的相对资源路径改写成代理 URL（解决「资源加载不出来」）
+    const previewId = opts.previewId || '';
     // JSON 序列化时转义 '<'，防模板内容里的 </script> 提前终止注入块
     const templatesJson = JSON.stringify(templates).replace(/</g, '\\u003c');
 
@@ -1375,15 +1703,46 @@ export function buildPluginPreviewHtml(plugin, opts = {}) {
         }
     }
 
-    const cssBlock = styles.map(c => `<style>${c}</style>`).join('\n');
-    const scriptBlocks = inlineScripts.map(src => {
+    // [PATH] 插件自身 CSS 里的相对资源（url(./img/a.png)、@import './theme.css'）改写成代理 URL
+    const cssBlock = styles
+        .map(c => `<style>${previewId ? rewritePluginResourcePaths(c, previewId) : c}</style>`)
+        .join('\n');
+
+    // [PROBE] 静态透视（只用于「跑完没内容」时解释原因，**不影响渲染决策**）
+    //    注意：此处扫描的是原始源码（inlineScripts），不是剥离 ESM 后的版本。
+    const probeData = probePluginSource({
+        source: inlineScripts.join('\n'),
+        hasTemplates: Object.keys(templates || {}).length > 0,
+        hasCss: styles.length > 0,
+        pluginKind: plugin.kind
+    });
+    // 转义为可安全嵌入 <script> 的字符串字面量
+    const probeHtmlLiteral = JSON.stringify(renderProbeHtml(probeData)).replace(/</g, '\\u003c');
+
+    // [CARD] 能力说明书（纯逻辑插件专用）：由渲染层预先算好传入（opts.capability）。
+    //    优先用它替换默认透视卡 —— 它对「后台逻辑插件」的解释更具体
+    //    （在什么时机跑、注册了哪些命令、读写什么数据）。
+    //    [!] 仍然只在「2 秒空白自检判定无可见内容」时显示，绝不阻止沙箱渲染。
+    const capInfo = (opts && opts.capability && opts.capability.capHtml) ? opts.capability : null;
+    const capCssBlock = capInfo && capInfo.capCss ? `<style>${String(capInfo.capCss).replace(/<\/style>/gi, '')}</style>` : '';
+    const capHtmlLiteral = capInfo
+        ? JSON.stringify(String(capInfo.capHtml)).replace(/</g, '\\u003c')
+        : probeHtmlLiteral;
+    // 🧩 扩展工程：真实 ESM 入口（由 manifest 决定，浏览器自行解析整棵依赖树）
+    //    entry 来自渲染层（manifest.js 的相对路径，已由 pluginScanner 解析）
+    //    ⚠️ 模块块存在时，**不再内联 bundleJs** —— 否则同一份代码会执行两次
+    //    （一次由浏览器 ESM 加载、一次被我们内联），产生重复注册/重复监听。
+    const moduleRuntimeBlock = buildModuleRuntimeBlock(bundleModules, isExtension, {
+        previewId: previewId,
+        entry: opts.entry || '',
+    });
+    const scriptBlocks = moduleRuntimeBlock || inlineScripts.map(src => {
         // 剥离 userscript 头（// ==UserScript== ... // ==/UserScript==）避免注释干扰（实际无害，但保持干净）
         let cleaned = src.replace(/^[\s\S]*?==\/UserScript==\s*/i, '');
         // 脚本内 </script> 提前终止风险：替换为转义形式
         cleaned = cleaned.replace(/<\/script>/gi, '<\\/script>');
         if (isExtension) {
-            // 扩展 bundle 是 minified ESM：重写 import/export 为沙箱可运行形式，
-            // 用 <script type="module"> 注入以支持顶层 await（如 bundle 内 fetch('/version')）。
+            // 仅当无法走真实 ESM（缺 previewId/entry）时才兜底：重写 import/export 后内联。
             cleaned = rewriteEsmModule(cleaned);
             return `<script type="module">\n${cleaned}\n</script>`;
         }
@@ -1445,24 +1804,71 @@ try {
 <head>
 <meta charset="utf-8">
 <style>
-html,body{width:100%;height:100%;margin:0;background:#18181b;color:#e4e4e7;font-family:system-ui,-apple-system,sans-serif;overflow:auto;}
+${buildTavernThemeCss()}
+html,body{width:100%;height:100%;margin:0;background:var(--SmartThemeBlurTintColor,#18181b);color:var(--SmartThemeBodyColor,#e4e4e7);font-family:var(--SmartThemeFontFamily,system-ui,-apple-system,sans-serif);font-size:var(--SmartThemeFontScale,15px);overflow:auto;}
 #host-banner{position:sticky;top:0;z-index:99999;padding:4px 12px;font-size:11px;background:#27272a;border-bottom:1px solid #3f3f46;color:#a1a1aa;}
-/* 酒馆风格扩展菜单项：让脚本注入的菜单/按钮具备可见外观（真实酒馆由 list-group-item 等 class 提供） */
-#extensionsMenu{display:flex;flex-direction:column;gap:4px;}
+/* [NAV] 挂载点导航条：插件把 UI 塞进了用户看不见的区域（折叠面板/侧栏）时，
+   用胶囊导航指路 + 点击平滑滚动，绝不移动 DOM 顺序（会破坏插件的父子选择器）。 */
+#jsk-mount-nav{position:sticky;top:22px;z-index:99998;display:none;flex-wrap:wrap;gap:6px;align-items:center;padding:6px 12px;background:#1f1f23;border-bottom:1px solid #3f3f46;font-size:11px;color:#a1a1aa;}
+#jsk-mount-nav .jsk-nav-pill{display:inline-flex;align-items:center;gap:4px;padding:3px 10px;border-radius:999px;background:#2b2b31;border:1px solid #3f3f46;color:#e4e4e7;cursor:pointer;transition:background .15s,border-color .15s;}
+#jsk-mount-nav .jsk-nav-pill:hover{background:#3f3f46;border-color:#8b5cf6;}
+#jsk-mount-nav .jsk-nav-hint{color:#71717a;}
+@keyframes jsk-breathe{0%,100%{outline-color:rgba(139,92,246,0);}50%{outline-color:rgba(139,92,246,.95);}}
+.jsk-nav-highlight{outline:2px solid #8b5cf6;outline-offset:2px;animation:jsk-breathe 1.5s ease-in-out;}
+/* [PLUGIN] 酒馆风格扩展菜单项 */
+/* [!] 不要在这里写 #extensionsMenu 的 display/flex-direction —— 骨架 hostStubDom.js
+   已经定义了横向 flex-wrap 布局，这里再写纵向 column 会冲突覆盖。 */
 #extensionsMenu .extension_container,
 #extensionsMenu .list-group-item,
-#extensionsMenu [class*="menu-item"]{display:flex;align-items:center;gap:6px;padding:6px 12px;border-radius:8px;background:#2b2b31;color:#e4e4e7;font-size:12px;cursor:pointer;border:1px solid #3f3f46;transition:background .15s,border-color .15s;white-space:nowrap;}
+#extensionsMenu [class*="menu-item"]{display:flex;align-items:center;gap:6px;padding:6px 12px;border-radius:8px;background:var(--SmartThemeBotMesBlurTintColor,#2b2b31);color:var(--SmartThemeBodyColor,#e4e4e7);font-size:12px;cursor:pointer;border:1px solid var(--SmartThemeBorderColor,#3f3f46);transition:background .15s,border-color .15s;white-space:nowrap;}
 #extensionsMenu .list-group-item:hover,
-#extensionsMenu [class*="menu-item"]:hover{background:#3f3f46;border-color:#8b5cf6;}
-#extensionsMenu .extensionsMenuExtensionButton{width:14px;text-align:center;color:#a78bfa;}
+#extensionsMenu [class*="menu-item"]:hover{background:var(--SmartThemeQuoteColor,#3f3f46);border-color:var(--SmartThemeEmColor,#8b5cf6);}
+#extensionsMenu .extensionsMenuExtensionButton{width:14px;text-align:center;color:var(--SmartThemeEmColor,#a78bfa);}
 </style>
 ${cssBlock}
+${capCssBlock}
 </head>
 <body>
-<div id="host-banner">🧩 酒馆运行模拟 · 插件: ${escapeHtml(plugin.name || '未命名')}${plugin.kind === 'extension' ? ' (扩展工程)' : ''}</div>
-${buildHostDom()}
+<!-- [WARN] 横幅与导航条已移入 buildHostDom() 的 #jsk-topbar 内（避免弹窗遮挡，见 hostStubDom.js 注释） -->
+<!-- [DIAG] 空白兜底：插件跑完但没产出任何可见 UI 时，显示自检信息而不是一片纯白
+     （用户实测「效果页一片空白」—— 之前连"为什么空"都看不出来）。 -->
+<div id="jsk-empty-hint" style="display:none;padding:24px;color:#a1a1aa;font-size:13px;line-height:1.8;">
+  <div style="font-size:15px;color:#e4e4e7;font-weight:600;margin-bottom:8px;">[PLUGIN] 插件已载入，但没有产出可见界面</div>
+  <div>这通常意味着以下几种情况之一：</div>
+  <ul style="margin:8px 0 8px 20px;padding:0;">
+    <li>插件只在聊天/消息楼层里生效（如正则改写、状态栏），不在独立页面显示</li>
+    <li>插件需要先点击扩展菜单按钮才展开面板（下方菜单区若是空的，说明它没注册菜单项）</li>
+    <li>插件运行时报错 —— 按 <strong>F12</strong>（或 Ctrl+Shift+I）打开开发者工具查看 Console</li>
+  </ul>
+  <div id="jsk-empty-stats" style="margin-top:10px;color:#71717a;font-size:12px;"></div>
+  <!-- [PROBE] 插件能力透视卡：仅在「跑完没产出可见 UI」时填充（绝不阻止渲染） -->
+  <div id="jsk-empty-probe" style="display:none;"></div>
+</div>
+<!-- [SYNTAX] 插件源码语法错误提示：无条件检测，一旦命中即强制显示。
+     必须在 jsk-empty-hint 之外，否则会被「有产出就不显示」的逻辑连带隐藏。 -->
+<div id="jsk-syntax-hint" style="display:none;margin:16px 24px;padding:14px 16px;border-radius:10px;
+     background:rgba(220,38,38,.14);border-left:3px solid #dc2626;font-size:13px;line-height:1.7;"></div>
+${buildHostDom(plugin)}
 <script>
 window.__jskHost = true;
+// [DIAG] 错误收集：供「空白兜底」自检显示（插件脚本报错是"空白"的常见原因）
+//       特别区分「插件源码语法错误」——这类错误是插件自身的问题，
+//       不是预览功能坏了，必须明确告知用户，否则只会得到「这软件不行」的结论。
+try {
+  window.__jskErrCount = 0;
+  window.__jskSyntaxErrors = [];
+  window.addEventListener('error', function(ev){
+    window.__jskErrCount++;
+    try {
+      var msg = String((ev && (ev.message || (ev.error && ev.error.message))) || '');
+      if (/SyntaxError|Invalid or unexpected token|Unexpected token|Unexpected end/.test(msg)) {
+        var line = ev && ev.lineno ? (' 第 ' + ev.lineno + ' 行') : '';
+        window.__jskSyntaxErrors.push(msg + line);
+      }
+    } catch (e) {}
+  });
+  window.addEventListener('unhandledrejection', function(){ window.__jskErrCount++; });
+} catch(e) {}
 </script>
 <script>${buildMiniJquery()}</script>
 <script>${lodashSource}</script>
@@ -1471,9 +1877,104 @@ window.__jskHost = true;
 <script>${dompurifySource}</script>
 <script>window.__jskTemplates = ${templatesJson};</script>
 <script>${buildEventSourceStub()}</script>
-<script>${buildGlobalStubs(plugin)}</script>
+<script>${buildGlobalStubs(plugin, { previewId: previewId })}</script>
 ${scriptBlocks}
 ${bootstrapBlock}
+<script>
+/* ────────────────────────────────────────────────────────────────────────────
+ * [START] 初始化事件脉冲（2026-10-25 上游 Q2 拍板）
+ *
+ * 为什么需要：大量插件不是「载入即渲染」，而是等 CHAT_CHANGED / APP_READY 才动手。
+ * 空环境里它们永远不动 → 用户看到空白 → 以为软件坏了。
+ *
+ * 为什么只发这三件套：APP_READY / SETTINGS_LOADED / CHAT_CHANGED 都是「初始化」语义，
+ * 插件收到后只会读数据、建 UI，**不会**去请求 LLM。
+ * 而 CHARACTER_MESSAGE_RENDERED / MESSAGE_RECEIVED 是「消息」语义 —— 插件收到后可能
+ * 真的调 generateQuietPrompt() 发网络请求、或把假消息写进变量树。故**绝不自动触发**，
+ * 交由预览栏顶部「💬 模拟收到 AI 消息」按钮手动派发（见下）。
+ * ──────────────────────────────────────────────────────────────────────────── */
+try {
+  setTimeout(function(){
+    // ① 先把模拟会话渲染成真实 .mes 气泡 —— 必须早于事件派发：
+    //    插件收到 chat_id_changed 后常立刻 querySelector('.mes') 取消息，此时 DOM 必须已有内容。
+    try { if (window.__jskRenderChat) window.__jskRenderChat(); } catch(e) {}
+    try { window.eventSource && window.eventSource.emit && window.eventSource.emit('app_ready'); } catch(e) {}
+    try { window.eventSource && window.eventSource.emit && window.eventSource.emit('settings_loaded'); } catch(e) {}
+    try { window.eventSource && window.eventSource.emit && window.eventSource.emit('extension_settings_loaded'); } catch(e) {}
+    try { window.eventSource && window.eventSource.emit && window.eventSource.emit('chat_id_changed', 'jsk-preview-chat'); } catch(e) {}
+    console.log('[效果诊断] 已派发初始化事件：app_ready / settings_loaded / extension_settings_loaded / chat_id_changed');
+  }, 100);
+
+  /* [NAV] 挂载点导航条：把「插件真的往里塞了东西」的区域指出来。
+     绝不移动 DOM —— 移动会破坏插件依赖的父子层级 CSS 选择器。
+
+     [!] 判定必须严格（历史教训）：早期用「childElementCount > 0」就算命中，
+        结果 #chat 里只要有我们预置的聊天气泡、或空容器 —— 导航胶囊就出现，
+        但点下去完全空白。这是假信号，比没有导航更误导。
+        现在改为：只认「有实际尺寸 + 有可见文字/图片」的节点，且排除占位容器。 */
+  var __jskMounts = [
+    { id: 'chat',                   icon: '💬', label: '聊天区' },
+    { id: 'extensions_settings',    icon: '⚙️', label: '扩展设置' },
+    { id: 'extensions_settings2',   icon: '⚙️', label: '扩展设置 2' },
+    { id: 'extensionsMenu',         icon: '🪄', label: '魔法棒菜单' },
+    { id: 'leftSendForm',           icon: '🔘', label: '发送区按钮' }
+  ];
+
+  /** 统计某挂载点里「真正可见的插件内容」数量（排除气泡自身与空壳容器） */
+  function __jskCountVisible(root) {
+    if (!root) return 0;
+    var n = 0;
+    var kids = root.querySelectorAll('*');
+    for (var i = 0; i < kids.length; i++) {
+      var el = kids[i];
+      if (el.classList && el.classList.contains('mes')) continue; // 模拟气泡不算插件产出
+      var tag = (el.tagName || '').toLowerCase();
+      if (tag === 'script' || tag === 'style' || tag === 'template') continue;
+      var r = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
+      if (!r || r.width <= 0 || r.height <= 0) continue;
+      var text = (el.textContent || '').trim();
+      var hasImg = el.querySelector && el.querySelector('img,canvas,svg,video,input,button,select,textarea');
+      if (text.length > 1 || hasImg || tag === 'img' || tag === 'canvas' || tag === 'svg' || tag === 'button' || tag === 'input') n++;
+    }
+    return n;
+  }
+
+  function __jskBuildNav() {
+    var nav = document.getElementById('jsk-mount-nav');
+    if (!nav) return;
+    var hits = [];
+    __jskMounts.forEach(function(it){
+      var el = document.getElementById(it.id);
+      if (!el) return;
+      var n = __jskCountVisible(el);
+      if (n > 0) hits.push({ it: it, n: n });
+    });
+    if (!hits.length) { nav.style.display = 'none'; return; }
+    nav.innerHTML = '<span class="jsk-nav-hint">📍 检测到插件界面已注入：</span>';
+    hits.forEach(function(h){
+      var pill = document.createElement('span');
+      pill.className = 'jsk-nav-pill';
+      pill.textContent = h.it.icon + ' ' + h.it.label + ' (' + h.n + ')';
+      pill.addEventListener('click', function(){
+        var el = document.getElementById(h.it.id);
+        if (!el) return;
+        try { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch(e) { el.scrollIntoView(); }
+        el.classList.add('jsk-nav-highlight');
+        setTimeout(function(){ el.classList.remove('jsk-nav-highlight'); }, 1600);
+      });
+      nav.appendChild(pill);
+    });
+    nav.style.display = 'flex';
+    console.log('[效果诊断] 挂载点导航：' + hits.map(function(h){ return h.it.label + '=' + h.n; }).join(' / '));
+  }
+
+  // 多轮检测：插件常有二次渲染（异步请求 / setTimeout 后才塞 DOM）
+  setTimeout(__jskBuildNav, 500);
+  setTimeout(__jskBuildNav, 1500);
+  setTimeout(__jskBuildNav, 3000);
+  window.__jskRebuildNav = __jskBuildNav;
+} catch(e) { console.error('[效果诊断] 初始化脉冲失败', e); }
+</script>
 <script>
 // 效果就绪信号：宿主桩加载完脚本后，把 #chat 内是否产生内容回传到 banner
 try {
@@ -1483,6 +1984,118 @@ try {
     const banner = document.getElementById('host-banner');
     if (banner) banner.textContent += ' · 已注入 ' + ${inlineScripts.length} + ' 个脚本 · #chat 节点 ' + kids + ' 个';
   }, 300);
+} catch(e){}
+
+// [DIAG] 空白兜底：2 秒后若页面仍没有任何「插件真正产出」的内容，就展示能力卡 / 自检提示。
+//
+// [BUG] 2026-11-08 修正：旧逻辑遍历 body > * 看「有尺寸 + 有文字」，
+//    但 #jsk-host-workbench 本身有尺寸、且 textContent 含顶部横幅文字，
+//    于是 visible 恒 >= 1 -> 自检永远不触发 -> 纯逻辑插件的空白永远没人解释。
+//    现在改为**只统计插件注入节点**（与挂载嗅探同一口径）。
+try {
+  setTimeout(function(){
+    try {
+      var hint = document.getElementById('jsk-empty-hint');
+      if (!hint) return;
+
+      var HOST_IDS = {
+        'host-banner': 1, 'jsk-empty-hint': 1, 'jsk-mount-nav': 1,
+        'jsk-topbar': 1, 'jsk-host-workbench': 1, 'jsk-host-content': 1,
+        'jsk-toast-dock': 1, 'jsk-empty-probe': 1
+      };
+      var SHELL_IDS = {
+        chat: 1, 'chat-history': 1, options: 1, extensionsMenu: 1, extensionsMenuButton: 1,
+        send_form: 1, leftSendForm: 1, rightSendForm: 1, send_textarea: 1,
+        extensions_settings: 1, extensions_settings2: 1,
+        message_template: 1, zoomed_avatar_template: 1, sheld: 1,
+        'right-nav-panel': 1, movingDivs: 1
+      };
+
+      function isShell(el) {
+        if (!el || !el.id) return false;
+        if (SHELL_IDS[el.id]) return true;
+        return /_container$/.test(el.id) || /_wand_container$/.test(el.id);
+      }
+
+      var produced = 0;
+      var all = document.body.querySelectorAll('*');
+      for (var i = 0; i < all.length; i++) {
+        var el = all[i];
+        if (!el.tagName) continue;
+        var tag = el.tagName.toLowerCase();
+        if (tag === 'script' || tag === 'style' || tag === 'template') continue;
+        if (el.id && HOST_IDS[el.id]) continue;
+        if (el.classList && el.classList.contains('mes')) continue;
+        if (isShell(el)) continue;
+
+        var r = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
+        if (!r || r.width <= 0 || r.height <= 0) continue;
+
+        var ownText = '';
+        for (var c = 0; c < el.childNodes.length; c++) {
+          var nd = el.childNodes[c];
+          if (nd.nodeType === 3) ownText += nd.nodeValue;
+        }
+        ownText = ownText.trim();
+        var isControl = /^(img|canvas|svg|video|input|button|select|textarea|iframe)$/.test(tag);
+        if (ownText.length > 1 || isControl) produced++;
+      }
+
+      if (produced === 0) {
+        var stats = document.getElementById('jsk-empty-stats');
+        if (stats) {
+          stats.textContent = '诊断：注入脚本 ' + ${inlineScripts.length} + ' 个'
+            + ' · 插件产出节点 ' + produced + ' 个'
+            + ' · 控制台错误 ' + (window.__jskErrCount || 0) + ' 条';
+        }
+        // [PLUGIN] 静态能力透视卡（上游 Q5 拍板：只作附加信息，绝不阻止渲染 —— 此时渲染已经跑完了）
+        var probe = document.getElementById('jsk-empty-probe');
+        if (probe) {
+          probe.innerHTML = ${capHtmlLiteral};
+          probe.style.display = 'block';
+        }
+        hint.style.display = 'block';
+        console.log('[效果诊断] 未产出可见 UI，已显示自检提示 + 透视卡');
+      }
+
+      // 🩺 插件源码语法错误提示 —— 必须「无条件」检查并强制显示。
+      //    历史教训：原先只在 produced===0 时才显示，而插件即使语法报错，
+      //    宿主骨架本身也会产出几十个节点（produced=23），于是提示被永久隐藏，
+      //    用户只能看到控制台里一条没人看得懂的 SyntaxError。
+      try {
+        var synErrs = (window.__jskSyntaxErrors || []).slice(0, 3);
+        if (synErrs.length) {
+          var sBox = document.getElementById('jsk-syntax-hint');
+          if (sBox) {
+            sBox.innerHTML = '';
+            var head = document.createElement('div');
+            head.style.cssText = 'font-weight:600;color:#fca5a5;margin-bottom:6px;';
+            head.textContent = '插件脚本存在语法错误 —— 这是插件源码的问题，不是预览功能的问题';
+            sBox.appendChild(head);
+            var list = document.createElement('div');
+            list.style.cssText = 'color:#e4e4e7;opacity:.88;white-space:pre-wrap;font-family:ui-monospace,monospace;font-size:12px;';
+            list.textContent = synErrs.join('\\n');
+            sBox.appendChild(list);
+            var foot = document.createElement('div');
+            foot.style.cssText = 'margin-top:8px;opacity:.7;line-height:1.6;';
+            foot.textContent = '这个插件在真实酒馆里同样会报错，需要修改插件源码（常见原因：注释换行导致后半行变成真代码）。';
+            sBox.appendChild(foot);
+            sBox.style.display = 'block';
+          }
+        }
+      } catch (eSyn) { console.error('[效果诊断] 语法错误提示异常', eSyn); }
+    } catch(e) {
+      console.error('[效果诊断] 自检脚本异常', e);
+      // [BUG] 把自检自身的异常显示到页面上 —— 历史上正是这里被静默吞掉，
+      //    导致「produced===0 但提示不显示」查了很久。
+      try {
+        var h2 = document.getElementById('jsk-empty-hint');
+        var st2 = document.getElementById('jsk-empty-stats');
+        if (h2) h2.style.display = 'block';
+        if (st2) st2.textContent = '[!] 自检脚本异常：' + (e && e.message ? e.message : String(e));
+      } catch (e2) { /* ignore */ }
+    }
+  }, 2000);
 } catch(e){}
 </script>
 </body>

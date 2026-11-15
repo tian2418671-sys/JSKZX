@@ -49,11 +49,30 @@ export function isExtensionManifest(parsed) {
 }
 
 /**
- * 归一化「酒馆助手 JSON 脚本」为 plugin 模型
- * @param {object} item 主进程扫描返回的原始条目 { type:'json', path, name, data }
+ * 归一化「酒馆助手 JSON 脚本 / 🎨 UI 主题 JSON」为 plugin 模型
+ * @param {object} item 主进程扫描返回的原始条目 { type:'json', path, name, data, isTheme? }
  */
 export function normalizeJsonPlugin(item) {
     const data = item.data || {};
+
+    // 🎨 UI 主题（晦明v2.6 等纯配色 JSON）：没有 content，不能当脚本处理。
+    //    打出 kind='theme' 标记，前端分类器与「效果」页据此走主题预览。
+    if (item.isTheme) {
+        return {
+            id: data.id || 'theme-' + stableId(item.path),
+            name: (data.name && String(data.name).trim()) || stripExt(item.name || ''),
+            source: { type: 'json', origin: item.path },
+            kind: 'theme',
+            scriptKind: 'theme',
+            meta: { info: '酒馆 UI 主题（纯配色配置）', buttons: [] },
+            scripts: [{ file: item.path, lang: 'json', kind: 'theme', content: '' }],
+            manifest: null,
+            files: [item.path],
+            // 原始配色对象直接挂在模型上，供 themePreview 使用（免二次读盘）
+            themeData: data,
+        };
+    }
+
     const content = String(data.content || '');
     const kind = detectScriptKind(content);
     const name = (data.name && data.name.trim()) || stripExt(item.name || '');
