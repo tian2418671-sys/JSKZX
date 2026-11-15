@@ -50,7 +50,7 @@
       "web/**/*",
       "main.js",
       "main/**/*",
-      "js/utils/simhash64.mjs",
+      "js/utils/**/*",
       "preload.js",
       "package.json"
     ],

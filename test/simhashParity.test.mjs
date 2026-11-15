@@ -65,5 +65,15 @@ test('hammingDistance64：0 / 64 / 中点与缺失输入', () => {
 test('打包白名单：js/utils/simhash64.mjs 必须随包分发（main.js require 依赖）', () => {
     const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
     assert.ok(Array.isArray(pkg.build && pkg.build.files), 'package.json build.files 缺失');
-    assert.ok(pkg.build.files.includes('js/utils/simhash64.mjs'), 'build.files 必须包含 js/utils/simhash64.mjs');
+
+    // 允两种写法：精确列该文件，或用目录通配覆盖到它（v2.5.0 起统一用 `js/utils/**/*`，
+    // 因为逐个文件列白名单漏一个就会导致打包版启动崩溃 —— 见 CHANGELOG「P0 发布事故」）
+    const files = pkg.build.files;
+    const covered = files.some((rule) => {
+        if (rule === 'js/utils/simhash64.mjs') return true;
+        // `js/utils/**/*` / `js/utils/*` / `js/**/*` 等都算覆盖
+        const prefix = String(rule).split('*')[0].replace(/\/+$/, '');
+        return prefix && 'js/utils/simhash64.mjs'.startsWith(prefix + '/');
+    });
+    assert.ok(covered, 'build.files 必须覆盖 js/utils/simhash64.mjs（精确列出或目录通配）');
 });

@@ -39,6 +39,28 @@
 
 ### 🔴 本版修复的关键缺陷
 
+#### 0. 打包版一启动就崩溃：`Cannot find module './js/utils/pluginInstallUrl.js'`（P0 · 发布事故）
+
+- **现象**：安装包里双击启动 → 弹「A JavaScript error occurred in the main process →
+  Cannot find module './js/utils/pluginInstallUrl.js'」，**软件根本打不开**。
+- **根因**：`package.json` 的 `build.files` 是**白名单**，只有列进去的文件才进 `app.asar`。
+  本版 `main.js` 新增了 `require('./js/utils/pluginInstallUrl.js')`、
+  `main/stManager.js` 新增了 `require('../js/utils/stInstallCore.js')`，
+  但白名单里只单独列了一个旧的 `js/utils/simhash64.mjs` —— **这两个文件没被打进包**。
+- **为什么源码版测不出来**：`electron .` 直接读磁盘，`js/utils/` 本来就在，
+  require 永远成功；只有**装完包真跑**才会暴露。
+- **修复**：白名单按目录整体包含 —— `js/utils/simhash64.mjs` → **`js/utils/**/*`**
+  （`js/utils` 仅 58 文件 / 670 KB，整体包含代价可忽略）。
+  ⚠️ **纪律：主进程新增依赖时，一律用目录通配，禁止逐个文件列白名单** —— 漏一个就是启动崩溃。
+- **新增防线**：`scripts/check-asar-completeness.mjs`
+  - 解析 `main.js` / `preload.js` / `main/**/*` / `js/utils/**/*` 里所有相对 `require`；
+  - 逐条到 `app.asar` 条目表里核对（含 Node 的 `.js` / `.json` / `index.js` 补全规则）；
+  - 缺失即列出「哪个文件 require 什么、期望 asar 里有什么」并以退出码 1 阻断发版。
+  - **有效性已反向验证**：拿坏包跑，精准报出这 2 处；修复后跑，`13 处 require 全部找到`。
+- **发布处理**：已按用户决定**保持 2.5.0 同号重发**（非新开 2.5.1）。
+  ⚠️ 已知代价：已经装了坏 2.5.0 的用户**不会**收到自动修复
+  （electron-updater 按版本号比较，同号不重下），需手动重新下载。
+
 #### 1. 世界书 / 会话统计恒为 0（DF-76）
 
 - **现象**：真实酒馆 `inspect()` 返回 `worldbooks: 0, chats: 0`，而实际有 108 本世界书、170 个会话。
