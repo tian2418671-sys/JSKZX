@@ -80,8 +80,9 @@
 
 | 模块 | 说明 |
 |------|------|
-| �️ 酒馆安装与维护 | 一键安装桌面版酒馆（codeload 下载 + 系统自带 `bsdtar` 解压 + `npm install`，缺 Node 走 winget 自动补）、🔍 自动查找本机已装位置、🩺 环境体检 10 项、🎯 检查更新（远程版本对比，已最新则置灰）、升级（自动备份并保留本地改动）、启动/停止、两档卸载（含注册表按 Publisher 校验，自动跳过浏览器 PWA） |
-| �📂 卡片库 | 文件夹导入、自动分类、多选勾选、Ctrl/Shift 连选、右键快捷菜单、**列表/网格双视图 + 常规/紧凑双密度**、**9 种排序方式**（导入最新/本地文件最新/A-Z 正序·倒序/修改时间/创建时间/大小正·倒序/Token，中文拼音+数字自然排序，稳定键链防乱飘） |
+| 🛠️ 酒馆安装与维护 | 一键安装桌面版酒馆（codeload 下载 + 系统自带 `bsdtar` 解压 + `npm install`，缺 Node 走 winget 自动补）、🔍 自动查找本机已装位置、🩺 环境体检 10 项、🎯 检查更新（远程版本对比，已最新则置灰）、升级（自动备份并保留本地改动）、启动/停止、两档卸载（含注册表按 Publisher 校验，自动跳过浏览器 PWA） |
+| 🧩 插件工作区 | 本地扫描并统一管理酒馆插件（酒馆助手 JSON / 用户脚本 / SlashRunner 命令 / 扩展工程）；**真实 ESM 加载**预览效果（宿主桩由真实酒馆源码自动生成，白屏/报错大幅减少）；从 **GitHub 链接一键安装**；代码编辑器支持 `Ctrl+F` 搜索、格式化、AI 修改助手 |
+| 📂 卡片库 | 文件夹导入、自动分类、多选勾选、Ctrl/Shift 连选、右键快捷菜单、**列表/网格双视图 + 常规/紧凑双密度**、**9 种排序方式**（导入最新/本地文件最新/A-Z 正序·倒序/修改时间/创建时间/大小正·倒序/Token，中文拼音+数字自然排序，稳定键链防乱飘） |
 | ⚙️ 预设管理 | **全新预设引擎**：加载酒馆预设目录、搜索、批量导出；脚本/正则分区在线编辑、沙箱 iframe 渲染预览；重命名/复制/回收站 |
 | 🔍 超级搜索 | 全字段穿透检索（含备选开场白、深度提示词、正则脚本、**世界书全部词条**、**物理文件名/路径**）、多关键词 AND、`tag:`/`author:`/`file:`/`wb:` 高级前缀语法、`-排除`、300ms 防抖 |
 | 🔎 全库词条搜索 | 一次性检索**全部独立世界书 + 全部角色卡内嵌词条**（触发词/次级词/备注/正文），点击直达并高亮 |
@@ -158,9 +159,11 @@
 | 项目 | 要求 |
 |------|------|
 | 系统 | Windows 10/11（64 位） |
-| Node.js | `>= 18`（开发构建用；**最终用户无需安装** Node/Electron/任何运行时） |
+| Node.js | `>= 20`（开发构建用；**最终用户无需安装** Node/Electron/任何运行时） |
 | npm | 随 Node.js 附带 |
 | 网络 | 首次 `npm install` 需联网（Electron 二进制可配置镜像加速） |
+| 选装 | **Git**（可选）：酒馆有 `.git` 时升级走增量 `git pull`；没有则改用下载覆盖 |
+| 内置酒馆安装器 | 若用「一键安装酒馆」，它会先检测系统 Node（要求 20+），缺失时经 `winget` 自动安装；解压用系统自带 `bsdtar`，不额外引入依赖 |
 
 > ✅ **纯净环境兼容**：最终打包产物自带 Chromium + Node 运行时，用户端**不需要** .NET / VC++ / Python / WebView2。
 
@@ -227,8 +230,8 @@ npm run build
 ## 📁 目录结构
 
 ```
-├── main.js                 # 主进程：窗口、app:// 协议、全部 IPC（99 通道）、PNG 写入、OTA、崩溃兜底
-├── preload.js              # 预加载：contextBridge 安全暴露 electronAPI（98 方法）
+├── main.js                 # 主进程：窗口、app:// 协议、全部 IPC（154 通道）、OTA、崩溃兜底
+├── preload.js              # 预加载：contextBridge 安全暴露 electronAPI（172 方法）
 ├── index.html              # 渲染进程挂载壳（<div id="app"> + 入口脚本）
 ├── package.json            # 项目配置 + electron-builder 打包配置 + publish（GitHub OTA）
 ├── vite.config.mjs         # Vite 构建配置（Vue 完整版别名、Tailwind、Vue DevTools）
@@ -236,24 +239,40 @@ npm run build
 ├── css/
 │   ├── tailwind.css        # Tailwind 指令入口（@tailwind base/…）
 │   └── style.css           # 自定义样式（主题变量、过渡动画等）
+├── main/                   # 主进程服务模块（由 main.js require）
+│   ├── stManager.js        #   🛠️ 酒馆安装器：检测/安装/启停/升级/体检/两档卸载
+│   ├── memoryStore.js      #   长期记忆存储（测卡）
+│   ├── vectorManager.js    #   本地向量引擎调度
+│   ├── vectorWorker.js     #   ONNX 推理 Worker 线程
+│   ├── fullBackup.js       #   整库冷备（全量快照/轮转/恢复）
+│   ├── cardFormats.js / cardBodyGuard.js / cardFieldSanitizer.js
+│   └── heavyCards/         #   独立前端角色卡（manager / backup）
 ├── js/
 │   ├── entry.js            # ★ 渲染进程入口：createApp(App) + 全局错误兜底
-│   ├── components/         # ★ 全部 Vue SFC 组件（47 个）
+│   ├── components/         # ★ 全部 Vue SFC 组件（56 个）
 │   │   ├── App.vue         #   根组件：状态/逻辑中枢 + provide/inject 上下文
+│   │   ├── StInstallModal.vue # 🛠️ 酒馆安装与维护（安装/查找/体检/升级/卸载）
 │   │   ├── HeaderBar.vue   #   顶部菜单栏 + 紧凑工具栏
 │   │   ├── SidebarPanel.vue#   左侧资源管理器（角色卡/世界书库）+ 拖拽把手
 │   │   ├── EditorPanel.vue #   右侧编辑器（角色卡编辑 + 世界书 IDE + 日志控制台）
+│   │   ├── PluginWorkspace.vue # 插件工作区（真实 ESM 预览）
 │   │   ├── AITagModal.vue  #   AI 智能批量打标弹窗
 │   │   ├── GraphModal.vue  #   角色宇宙关系图谱（ECharts）
-│   │   ├── … （其余 41 个弹窗/菜单组件：批量标签/查重/Diff/磁盘扫描/快照/更新/世界书系列等）
-│   ├── composables/        # ★ 逻辑组合式函数（41 个：顶层 24 + chat/ 17）
+│   │   ├── … （其余 49 个弹窗/菜单/工作区组件：批量标签/查重/Diff/磁盘扫描/快照/更新/世界书系列等）
+│   ├── composables/        # ★ 逻辑组合式函数（46 个：顶层 28 + chat/ 18）
 │   │   ├── useAITools.js / useSearch.js / useGraph.js / useSnapshots.js …
-│   │   └── chat/           #   测卡引擎（17 个：useChatEngine / chatStorage / useChatPresets …）
+│   │   └── chat/           #   测卡引擎（18 个：useChatEngine / chatStorage / useChatPresets …）
+│   ├── plugins/            # 插件预览宿主桩
+│   │   ├── hostStub.js     #   成 HTML/JS 桩（importmap + 真实 ESM 入口）
+│   │   └── hostStubs.generated.js # 由真实酒馆源码自动生成（勿手改）
 │   └── utils/
 │       ├── cardLoader.js   # 卡片读取、数据规范化（V1/V2/V3 兼容）、extractBookEntries 安全提取
 │       ├── pngParser.js    # PNG/WebP tEXt/iTXt 块解析、深度扫描提取 JSON
-│       └── tokenEstimate.js# Token 估算工具（App 与 TextModal 共享）
-├── test/                   # node:test 单元测试（1476 用例）
+│       ├── tokenEstimate.js# Token 估算工具（App 与 TextModal 共享）
+│       ├── stInstallCore.js     # 酒馆安装器纯逻辑（判定/校验/清单，可单测）
+│       └── pluginInstallUrl.js  # 插件链接解析（GitHub / zip / 单文件）
+├── test/                   # node:test 单元测试（1476 用例 / 104 个文件）
+├── scripts/                # 生成与检查脚本（宿主桩生成/asar 完整性/发版自查/链接校验 等）
 ├── build/                  # 打包资源（icon.ico、generate-icon.ps1）
 ├── web/                    # Vite 构建产物（gitignore）
 └── dist_new/               # electron-builder 打包产物（gitignore）
@@ -270,7 +289,7 @@ npm run build
 │  主进程 main.js                                  │
 │  ├─ app:// 协议（从项目根目录提供页面文件）       │
 │  ├─ local-file:// 协议（展示本地立绘，查询参数传路径）│
-│  ├─ 全部 IPC handler（99 通道：文件/对话框/API/OTA）│
+│  ├─ 全部 IPC handler（154 通道：文件/对话框/API/OTA/酒馆管理）│
 │  └─ electron-updater（OTA 检测/下载/静默安装）    │
 └───────────────┬─────────────────────────────────┘
                 │ contextBridge（仅暴露受控方法）
@@ -280,9 +299,9 @@ npm run build
                 │
 ┌───────────────▼─────────────────────────────────┐
 │  渲染进程 js/entry.js（Vue 3 SFC 组件化）          │
-│  App.vue 根组件 + 46 个 SFC 子组件               │
+│  App.vue 根组件 + 55 个 SFC 子组件               │
 │   ├─ HeaderBar / SidebarPanel / EditorPanel      │
-│   ├─ 41 个 composables 承载业务逻辑              │
+│   ├─ 46 个 composables 承载业务逻辑              │
 │  App.vue 通过 provide/inject 共享上下文（ctx）    │
 │  仅能通过 window.electronAPI 访问主进程能力，      │
 │  无法直接触碰 Node.js                             │
@@ -459,6 +478,9 @@ node scripts/check-asar-completeness.mjs
 | 环路防护 | `main.js` | 4 处递归扫描 realpath 去重，符号链接/junction 环路不再死循环 |
 | 原子写入 | `main.js` | saveCard/世界书保存/PNG 升级统一 tmp 唯一命名 + rename，中断不产生半截文件 |
 | 集成包导出 | 用户自选目录 `${角色名}_Package/` | 主卡 + worldbook.json + regex_scripts.json |
+| 酒馆安装路径校验 | `main/stManager.js` | 安装前校验盘符/空目录/剩余空间/路径长度；目录已有酒馆则转「升级」而非覆盖 |
+| 卸载安全 | `main/stManager.js` | ① 两档（只删酒馆 / 彻底删除）均需**手输 `DELETE`**；② 删前默认备份；③ 注册表项按 `Publisher` / `UninstallString` 校验归属，**浏览器安装的 PWA 一律跳过**；④ 删目录前验证确实是酒馆（`package.json` name / `server.js`+`public`） |
+| 子进程安全 | `main/stManager.js` | 全部 `spawn` + 参数数组（不拼命令行串）；`GIT_TERMINAL_PROMPT=0` 防 `git pull` 挂死；超时强杀进程树 |
 
 ---
 
@@ -592,7 +614,10 @@ nativeAlert('保存成功', 'info');                   // type 仅支持 none/in
 
 1. `npm install <包名>`（Vite 自动打包进产物）
 2. 在 `js/components/*.vue` 或 `js/utils/*.js` 中 `import` 使用
-3. `package.json` `build.files` 已含 `web/**/*`（Vite 构建产物），无需额外配置
+3. `package.json` 的 `build.files` 已含 `web/**/*`（Vite 构建产物）；
+   ⚠️ **若新增了主进程依赖（`main.js` / `main/**/*` 里的 `require`），
+   必须确认 `build.files` 覆盖到它** —— 源码版正常但打包版会 `Cannot find module`
+   （见「关键坑 13」）。推荐按目录通配，发版前跑 `node scripts/check-asar-completeness.mjs`。
 
 ### 提交前自查清单
 
@@ -622,6 +647,10 @@ nativeAlert('保存成功', 'info');                   // type 仅支持 none/in
 | electron-builder 卡住不动 | 正在下载 Electron（本机 GitHub 慢）→ 用 `electronDist` 离线打包，勿误杀进程 |
 | 打包后无图标 | 确认 `build/icon.ico` 存在且 `package.json` `win.icon` 配置正确 |
 | 安装包被杀软报毒 | 未签名 + Electron 特征；建议代码签名 |
+| 装完启动弹 `Cannot find module './js/...'` | `build.files` 白名单漏了主进程依赖 → 按目录通配收录（见关键坑 13），发版前跑 `node scripts/check-asar-completeness.mjs` |
+| 界面「点什么都没反应」但看不出异常 | 离场过渡卡死留下隐形遮罩（`opacity:0` + `pointer-events:auto`）→ 见关键坑 14 |
+| 酒馆「升级」报 `local changes would be overwritten` | 旧版行为；现已在升级前自动备份并 `git stash`，升级后自动恢复。若仍失败，备份在 `<酒馆上级目录>\_jsk-runtime\backups\local-changes-*` |
+| 酒馆已是最新版却一直显示「升级」 | 旧版行为；现新增「检查更新」，已最新时按钮直接置灰（见 v2.5.0） |
 
 ---
 
