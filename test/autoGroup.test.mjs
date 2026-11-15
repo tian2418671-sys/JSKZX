@@ -17,6 +17,7 @@ import {
     MATCH_TYPES_WITHOUT_PATTERN,
     sanitizeFolderName,
     currentGroupOf,
+    physicalGroupOf,
     normalizeGroupProfiles,
     normalizeAutoGroupLastRun,
     matchProfile,
@@ -71,6 +72,35 @@ test('currentGroupOf：空 / 缺失一律归「未分类」', () => {
     assert.strictEqual(currentGroupOf(null), '未分类');
 });
 
+test('physicalGroupOf：以 subFolder 一级名为准；根目录恒「未分类」（DF-30）', () => {
+    assert.strictEqual(physicalGroupOf({ subFolder: '限制级', category: '限制级' }), '限制级');
+    assert.strictEqual(physicalGroupOf({ subFolder: 'NTR/牛头人', category: 'NTR' }), 'NTR');
+    assert.strictEqual(physicalGroupOf({ subFolder: '', category: '限制级' }), '未分类');
+    assert.strictEqual(physicalGroupOf({ category: '限制级' }), '未分类');
+    assert.strictEqual(physicalGroupOf(null), '未分类');
+});
+
+test('buildAutoGroupPlan：根目录卡即便覆盖层残留旧分组，也照样能被收纳（DF-30 回归）', () => {
+    // 真实库现场：虎山.png 在库根（subFolder=''），覆盖层 category 却是旧的「限制级」
+    const stale = rootCard('虎山', { category: '限制级', customTags: ['幽灵/妖怪'] });
+    const plan = buildAutoGroupPlan({
+        cards: [stale],
+        profiles: [{ group: '幽灵/妖怪', match: { type: 'tag', pattern: '幽灵/妖怪' } }]
+    });
+    assert.strictEqual(plan.counters.willMove, 1);
+    assert.strictEqual(plan.moves[0].toGroup, '幽灵_妖怪'); // 目标名已净化为物理文件夹名
+    assert.strictEqual(plan.moves[0].fromGroup, '未分类');
+
+    // 真正躺在「限制级」文件夹里的卡仍受安全默认保护（未勾选「包含已分组」不动）
+    const real = groupedCard('真在组里', '限制级', { customTags: ['幽灵/妖怪'] });
+    const plan2 = buildAutoGroupPlan({
+        cards: [real],
+        profiles: [{ group: '幽灵/妖怪', match: { type: 'tag', pattern: '幽灵/妖怪' } }]
+    });
+    assert.strictEqual(plan2.counters.willMove, 0);
+    assert.match(plan2.skipped[0].reason, /已手动分组「限制级」/);
+});
+
 // ───────────────────────── 档案归一化 ─────────────────────────
 
 test('normalizeGroupProfiles：非数组 → []；逐条过滤非法项', () => {
@@ -103,6 +133,27 @@ test('normalizeGroupProfiles：同「分组+类型+pattern(小写)」去重保�
         { group: '纯爱', match: { type: 'name-keyword', pattern: '爱' } } // 同分组第二条规则：保留（S5 语义）
     ]);
     assert.strictEqual(out.length, 3);
+});
+
+test('normalizeGroupProfiles：分组名净化成物理文件夹名（/ → _），旧配置自动收敛（DF-31）', () => {
+    const out = normalizeGroupProfiles([
+        { group: '游戏/异世界', match: { type: 'tag', pattern: '游戏/异世界' } },
+        { group: '游戏_异世界', match: { type: 'tag', pattern: '游戏/异世界' } } // 净化后撞车 → 去重
+    ]);
+    assert.strictEqual(out.length, 1);
+    assert.strictEqual(out[0].group, '游戏_异世界');
+    assert.strictEqual(out[0].match.pattern, '游戏/异世界'); // 匹配用的标签原样保留
+});
+
+test('buildAutoGroupPlan：规则里的 / 与磁盘文件夹 _ 视为同一分组，不再重复进计划（DF-31）', () => {
+    const card = groupedCard('某卡', '游戏_异世界', { customTags: ['游戏/异世界'] });
+    const plan = buildAutoGroupPlan({
+        cards: [card],
+        profiles: [{ group: '游戏/异世界', match: { type: 'tag', pattern: '游戏/异世界' } }],
+        options: { includeGrouped: true }
+    });
+    assert.strictEqual(plan.counters.willMove, 0);
+    assert.match(plan.skipped[0].reason, /已在目标分组「游戏_异世界」/);
 });
 
 // ───────────────────────── 单条判定 ─────────────────────────
@@ -227,7 +278,7 @@ test('buildAutoGroupPlan：disabled 档案不参与；库外卡片跳过', () =>
     assert.match(plan.skipped[0].reason, /不在库目录内/);
 });
 
-test('buildAutoGroupPlan：目标分组汇总（将新建 / 名称被净化提示 / 已有空文件夹不算新建）', () => {
+test('buildAutoGroupPlan：目标分组汇总（规则名先净化成文件夹名 / 已有空文件夹不算新建）', () => {
     const cards = [
         rootCard('甲', { customTags: ['C++:基础'] }),
         groupedCard('乙', '旧组') // 用于贡献一个「已知分组」
@@ -238,10 +289,13 @@ test('buildAutoGroupPlan：目标分组汇总（将新建 / 名称被净化提�
         options: { knownGroups: ['旧组'], groupOrder: ['旧组', 'C++:基础'] }
     });
     assert.strictEqual(plan.targetGroups.length, 1);
+    // 档案归一化即净化（DF-31）：目标名与物理文件夹名从源头一致，不再需要「改名提示」
+    assert.strictEqual(plan.targetGroups[0].name, 'C++_基础');
     assert.strictEqual(plan.targetGroups[0].folder, 'C++_基础');
-    assert.strictEqual(plan.targetGroups[0].renamed, true);
+    assert.strictEqual(plan.targetGroups[0].renamed, false);
     assert.strictEqual(plan.targetGroups[0].isNew, true);
     assert.strictEqual(plan.counters.newFolders, 1);
+    assert.strictEqual(plan.moves[0].toGroup, 'C++_基础');
 
     // 卡片里已有 subFolder === 目标组（磁盘上文件夹存在）→ 不算「将新建」
     const plan2 = buildAutoGroupPlan({
@@ -287,6 +341,19 @@ test('resolveRollbackCard：ok / already / missing / changed / ambiguous 全分�
     assert.strictEqual(resolveRollbackCard([rootCard('芙宁娜'), rootCard('芙宁娜')], entry).status, 'ambiguous');
     // ambiguous 但有唯一一张在 toGroup → 可消歧
     assert.strictEqual(resolveRollbackCard([rootCard('芙宁娜'), groupedCard('芙宁娜', '纯爱')], entry).status, 'ok');
+});
+
+test('resolveRollbackCard：旧日志里的未净化分组名（含 /）仍能定位（DF-31 兼容）', () => {
+    const entry = { cardName: '某卡', fromGroup: '未分类', toGroup: '游戏/异世界' };
+    assert.strictEqual(resolveRollbackCard([groupedCard('某卡', '游戏_异世界')], entry).status, 'ok');
+});
+
+test('resolveRollbackCard：根目录卡按物理位置判，覆盖层旧 category 不再误判为已还原（DF-30）', () => {
+    const entry = { cardName: '虎山', fromGroup: '未分类', toGroup: '幽灵/妖怪' };
+    const stale = rootCard('虎山', { category: '限制级' });
+    assert.strictEqual(resolveRollbackCard([stale], entry).status, 'already');
+    const moved = groupedCard('虎山', '幽灵_妖怪'); // 目标组名净化后
+    assert.strictEqual(resolveRollbackCard([moved], { ...entry, toGroup: '幽灵_妖怪' }).status, 'ok');
 });
 
 // ───────────────────────── 日志归一化 ─────────────────────────

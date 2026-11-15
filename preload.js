@@ -237,7 +237,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
         installDeps: (params) => ipcRenderer.invoke('st:installDeps', params || {}),
         cancel: (taskId) => ipcRenderer.invoke('st:cancel', { taskId }),
         start: (params) => ipcRenderer.invoke('st:start', params || {}),
-        stop: () => ipcRenderer.invoke('st:stop', {}),
+        startConsole: (params) => ipcRenderer.invoke('st:startConsole', params || {}),
+        stop: (params) => ipcRenderer.invoke('st:stop', params || {}),
         status: () => ipcRenderer.invoke('st:status', {}),
         update: (params) => ipcRenderer.invoke('st:update', params || {}),
         backup: (params) => ipcRenderer.invoke('st:backup', params || {}),
@@ -314,6 +315,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     },
     // 🗑️ 智能查重清洗：将冗余文件移动到 userData 下的全局回收站（绝不物理删除）
     trashFiles: (paths) => ipcRenderer.invoke('sys:trashFiles', paths),
+    // ♻️ P5：撤销「移入回收站」（按原路径还原；目标已存在则加 _restored_<ts> 后缀）
+    restoreFromTrash: (paths) => ipcRenderer.invoke('sys:restoreFromTrash', paths),
     // �️ 打开全局回收站（世界书删除/查重清洗的 userData/jsTavern_Trash）
     openGlobalTrash: () => ipcRenderer.invoke('sys:openGlobalTrash'),
     // �🕒 智能查重：批量获取文件物理状态（修改时间/创建时间/大小）

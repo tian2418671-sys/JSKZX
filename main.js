@@ -135,8 +135,7 @@ const { stripInternalFields, restoreEntriesDict } = require('./main/cardFieldSan
 //    用**真实卡片**做样本的单测见 `test/cardBodyGuard.test.mjs`。
 const { checkBodyDegrade } = require('./main/cardBodyGuard.js');
 // 📦 v2.3.6：整库冷备（一键全量快照）—— 主进程实现见 main/fullBackup.js
-const { createFullBackupService } = require('./main/fullBackup.js');
-// 🛠️ 酒馆「安装与维护」：一键装桌面版酒馆 / 升级 / 两档卸载
+const { createFullBackupService } = require('./main/fullBackup.js');// 🛠️ 酒馆「安装与维护」：一键装桌面版酒馆 / 升级 / 两档卸载
 //    规格见 资料库/一键安装桌面版酒馆-方案-v1.md
 const { createStManager } = require('./main/stManager.js');
 
@@ -802,12 +801,15 @@ function isPathAllowed(filePath) {
   return false;
 }
 // 给渲染进程一个统一的拒绝返回体，方便前端识别
-function forbidden() {
-  return { success: false, error: '路径越界，操作被拒绝' };
+function forbidden() {  return { success: false, error: '路径越界，操作被拒绝' };
 }
 
-// ================= Vite 构建双模式 =================
-// 开发模式：VITE_DEV_SERVER_URL 指向 Vite Dev Server（支持热更新）
+// ♻️ P5：回收站清单路径（记录「原路径 ↔ 回收站文件」，撤销靠它精确还原）
+function trashManifestPath() {
+  try { return path.join(app.getPath('userData'), 'trash_manifest.json'); } catch (e) { return ''; }
+}
+
+// ================= Vite 构建双模式 =================// 开发模式：VITE_DEV_SERVER_URL 指向 Vite Dev Server（支持热更新）
 // 生产模式：app:// 协议加载 web/ 目录下的 Vite 构建产物
 const isDev = !!process.env.VITE_DEV_SERVER_URL;
 const appRoot = isDev ? __dirname : path.join(__dirname, 'web');
@@ -2438,7 +2440,10 @@ app.whenReady().then(() => {
   ipcMain.handle('st:installDeps', stGuard((p) => stManager.installDeps(p)));
   ipcMain.handle('st:cancel', stGuard((p) => stManager.cancelTask(p.taskId)));
   ipcMain.handle('st:start', stGuard((p) => stManager.startServer(p)));
-  ipcMain.handle('st:stop', stGuard(() => stManager.stopServer()));
+  // 🖥️ 终端窗口启动（原版 Start.bat 体验）：独立进程树、日志直连控制台
+  ipcMain.handle('st:startConsole', stGuard((p) => stManager.startServerConsole(p)));
+  // 停止需带 port：终端启动的酒馆我们只有 PID 线索在端口上（没有 child 句柄）
+  ipcMain.handle('st:stop', stGuard((p) => stManager.stopServer(p)));
   ipcMain.handle('st:status', stGuard(async () => ({ success: true, ...(await stManager.getServerStatus()) })));
   ipcMain.handle('st:update', stGuard((p) => stManager.update(p)));
   ipcMain.handle('st:backup', stGuard((p) => stManager.backupData(p.dirPath, p.tag)));
@@ -5520,6 +5525,7 @@ app.whenReady().then(() => {
       // 🔧 修复：分项报告。单个文件失败（EBUSY/EPERM）不再中断整批，
       // 也不再把「前面已删、后面失败」误报成整体失败 → 杜绝幽灵卡
       const results = { success: true, count: 0, failed: [] };
+      const trashPairs = [];
       let seq = 0; // 🔧 同批次 Date.now() 可能撞同一毫秒，加序号防回收站内同名互覆
       for (const p of (Array.isArray(filePaths) ? filePaths : [])) {
         // 🛡️ DF-27（2026-09-25）：白名单外 / 文件不存在 → **显式失败**，绝不静默跳过 ——
@@ -5534,29 +5540,88 @@ app.whenReady().then(() => {
           continue;
         }
         try {
-          const dest = path.join(trashDir, `${Date.now()}_${seq++}_${path.basename(p)}`);
-          try {
-            // 1. 首选：同盘 rename（极快）
-            await fs.promises.rename(p, dest);
-          } catch (renameErr) {
-            // 2. 跨盘（EXDEV）：降级为复制 + 删除
-            if (renameErr && renameErr.code === 'EXDEV') {
-              await fs.promises.copyFile(p, dest);
-              await fs.promises.unlink(p);
-            } else {
-              throw renameErr; // EBUSY/EPERM 等记入 failed，继续处理下一个
+          // 🛡️ 目标名必须**全局唯一**：旧写法 `${Date.now()}_${seq++}_${basename}` 的 seq 每次调用从 0 起，
+          //    两个并发/同毫秒的调用会算出同一个名字；Windows 的 rename 会**覆盖**已存在文件
+          //    ⇒ 回收站里两份内容互覆（数据丢失），且清单指向错文件（撤销还原错内容）。
+          //    现在：时间戳 + 随机段 + 存在即递增，确保绝不撞名。
+          let dest = '';
+          for (let n = 0; n < 50; n++) {
+            const rnd = Math.random().toString(36).slice(2, 8);
+            const cand = path.join(trashDir, `${Date.now()}_${seq++}_${rnd}_${path.basename(p)}`);
+            if (!fs.existsSync(cand)) { dest = cand; break; }
+          }
+          if (!dest) throw new Error('回收站内无法生成唯一文件名（同名冲突过多）');
+          // 🛡️ DF-33：杀毒实时扫描 / 预览程序 / 同步盘会短暂锁文件 → EBUSY/EPERM 多为**瞬时**。
+          //    旧实现一次失败就记 failed（用户看到「清理失败」）。这里对可重试错误做 2 次短退避重试，
+          //    仍失败才如实记录（原因原样返回给渲染层）。
+          let moved = false;
+          let lastErr = null;
+          for (let attempt = 0; attempt < 3 && !moved; attempt++) {
+            try {
+              try {
+                // 1. 首选：同盘 rename（极快）
+                await fs.promises.rename(p, dest);
+              } catch (renameErr) {
+                // 2. 跨盘（EXDEV）：降级为复制 + 删除
+                if (renameErr && renameErr.code === 'EXDEV') {
+                  await fs.promises.copyFile(p, dest);
+                  await fs.promises.unlink(p);
+                } else {
+                  throw renameErr;
+                }
+              }
+              moved = true;
+            } catch (err) {
+              lastErr = err;
+              const retryable = err && ['EBUSY', 'EPERM', 'EACCES', 'DELETE_PENDING'].includes(err.code);
+              if (!retryable || attempt === 2) throw err;
+              await new Promise((r) => setTimeout(r, 120)); // 让占用方（杀毒/预览）释放句柄
             }
           }
+          if (!moved && lastErr) throw lastErr;
           results.count++;
+          // P5：记下「原路径 ↔ 回收站文件」，撤销时才能精确还原（写过失败不影响清理本身）
+          try { trashPairs.push({ original: p, trashed: dest }); } catch (e) { /* 忽略 */ }
         } catch (err) {
           results.failed.push({ path: p, error: err.message });
         }
       }
       if (results.count === 0 && results.failed.length > 0) results.success = false;
+      if (trashPairs.length) {
+        try {
+          const { appendTrashEntries } = require('./main/trashManifest.js');
+          appendTrashEntries(trashManifestPath(), trashPairs);
+        } catch (e) { /* 清单写失败不阻断清理 */ }
+      }
       return results;
     } catch (err) {
       console.error('🗑️ 移入回收站失败:', err);
       return { success: false, error: err.message, count: 0, failed: [] };
+    }
+  });
+
+  // ♻️ P5：撤销「移入回收站」—— 按原路径还原（目标已存在则加 _restored_<ts> 后缀，绝不覆盖）
+  //    安全：还原落点仍过一遍 isPathAllowed（库目录可能换了），越界项单独返回 blocked
+  ipcMain.handle('sys:restoreFromTrash', async (event, paths) => {
+    try {
+      const { restoreFromTrash } = require('./main/trashManifest.js');
+      const all = (Array.isArray(paths) ? paths : []).filter((p) => typeof p === 'string' && p.trim());
+      if (!all.length) return { success: false, error: '未指定要还原的文件', restored: [], failed: [], blocked: [] };
+      const allowed = all.filter((p) => isPathAllowed(p));
+      const blocked = all.filter((p) => !isPathAllowed(p));
+      const manifestPath = trashManifestPath();
+      if (!manifestPath) return { success: false, error: '无法定位回收站清单', restored: [], failed: [], blocked };
+      const res = restoreFromTrash({ manifestPath, paths: allowed });
+      return {
+        success: res.restored.length > 0 || (res.failed.length === 0 && blocked.length === 0),
+        restored: res.restored,
+        failed: res.failed.concat(blocked.map((p) => ({ path: p, error: '路径不在授权范围（需在应用中先绑定该目录）' }))),
+        blocked,
+        remaining: res.remaining,
+      };
+    } catch (err) {
+      console.error('♻️ 从回收站还原失败:', err);
+      return { success: false, error: err.message, restored: [], failed: [], blocked: [] };
     }
   });
 

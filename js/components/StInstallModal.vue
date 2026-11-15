@@ -144,7 +144,11 @@
                             <button v-if="isInstalled" @click="doInstallDeps" :disabled="busy"
                                     class="px-3 py-1.5 rounded bg-zinc-700 hover:bg-zinc-600 text-zinc-200 text-[11px] disabled:opacity-40 transition">🔄 重装依赖</button>
                             <button v-if="isInstalled && !serverRunning" @click="doStart" :disabled="busy"
-                                    class="px-3 py-1.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-bold disabled:opacity-40 transition">▶️ 启动</button>
+                                    class="px-3 py-1.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-bold disabled:opacity-40 transition"
+                                    title="本软件托管：日志显示在下方日志框，可一键停止；关闭本软件会一并结束酒馆">▶️ 启动</button>
+                            <button v-if="isInstalled && !serverRunning" @click="doStartConsole" :disabled="busy"
+                                    class="px-3 py-1.5 rounded border border-emerald-600 bg-zinc-800 text-emerald-300 hover:bg-emerald-600 hover:text-white text-[11px] font-bold disabled:opacity-40 transition"
+                                    title="原版 Start.bat：弹出独立终端窗口，日志直连控制台（可 Ctrl+C）；关掉本软件不影响酒馆">🖥️ 终端启动</button>
                             <button v-if="serverRunning" @click="doStop" :disabled="busy"
                                     class="px-3 py-1.5 rounded bg-rose-600 hover:bg-rose-500 text-white text-[11px] font-bold disabled:opacity-40 transition">⏹ 停止</button>
                             <button v-if="serverRunning && serverUrl" @click="openUrl"
@@ -627,11 +631,44 @@ export default {
             } finally { busy.value = false; }
         };
 
+        /**
+         * 🖥️ 终端窗口启动（原版 Start.bat 体验）
+         *
+         * 与「▶️ 启动」的区别（用户对比实测后要求两种都能选）：
+         *   · 弹出独立终端窗口，日志直连控制台，不经过本软件的日志管道；
+         *   · 独立进程树，关掉本软件不影响酒馆继续跑；
+         *   · 优先跑酒馆自带 Start.bat（含依赖检查 / pause），没有则回退 node server.js。
+         */
+        const doStartConsole = async () => {
+            busy.value = true;
+            try {
+                const r = await window.electronAPI.st.startConsole({ dirPath: dirPath.value });
+                if (r.success) {
+                    serverRunning.value = true;
+                    serverUrl.value = r.url || '';
+                    toast(r.alreadyRunning ? ('酒馆已在运行：' + (r.url || '')) : ('已在终端窗口启动：' + (r.url || '')), 'success');
+                    pushLog('stdout', '🖥️ ' + (r.url || '') + (r.script ? ('（' + r.script + '）') : ''));
+                } else {
+                    toast('终端启动失败：' + r.error, 'error');
+                    pushLog('stderr', '❌ ' + r.error);
+                }
+                await recheck();
+            } finally { busy.value = false; }
+        };
+
         const doStop = async () => {
             busy.value = true;
             try {
-                const r = await window.electronAPI.st.stop();
-                if (r.success) { toast('已停止', 'success'); }
+                // 终端启动的酒馆没有 child 句柄，主进程要靠端口定位 PID，所以必须把端口带上
+                let port = 0;
+                try { port = Number(new URL(serverUrl.value || '').port) || 0; } catch (e) { port = 0; }
+                const r = await window.electronAPI.st.stop({ port });
+                if (r.success) {
+                    toast('已停止', 'success');
+                } else {
+                    toast('停止失败：' + (r.error || '未知原因'), 'error');
+                    pushLog('stderr', '❌ ' + (r.error || '停止失败'));
+                }
                 await recheck();
             } finally { busy.value = false; }
         };
@@ -754,7 +791,7 @@ export default {
             versionChecking, versionInfo, hasUpdate, checkVersion,
             fmtBytes,
             pickDir, recheck, openFolder,
-            doInstall, doInstallDeps, doUpdate, doStart, doStop, doCancel, openUrl, doBackup,
+            doInstall, doInstallDeps, doUpdate, doStart, doStartConsole, doStop, doCancel, openUrl, doBackup,
             openUninstall, doUninstall, close,
         };
     },

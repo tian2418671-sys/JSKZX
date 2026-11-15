@@ -187,3 +187,17 @@ test('同一卡数时的排序稳定（按名称升序）', () => {
     const r = draftProfilesFromTags(M({ zzz: 100, aaa: 100 }), [], { total: 1000, minCards: 5 });
     assert.deepEqual(r.drafts.map((d) => d.group), ['aaa', 'zzz']);
 });
+
+// ───────── DF-31：草稿分组名 = 物理文件夹名（标签里的 / → _） ─────────
+test('★ 草稿分组名净化：标签「游戏/异世界」⇒ 分组名「游戏_异世界」，pattern 仍小写原样', () => {
+    const r = draftProfilesFromTags(M({ '游戏/异世界': 10 }), [], { total: 89 });
+    assert.equal(r.drafts.length, 1);
+    assert.equal(r.drafts[0].group, '游戏_异世界');
+    assert.equal(r.drafts[0].match.pattern, '游戏/异世界');
+    assert.equal(r.drafts[0].label, '游戏/异世界'); // 显示保留原样
+    // 已有的净化后规则 ⇒ 不再产出重复草稿
+    const exist = normalizeGroupProfiles([{ group: '游戏/异世界', match: { type: 'tag', pattern: '游戏/异世界' } }]);
+    const r2 = draftProfilesFromTags(M({ '游戏/异世界': 10 }), exist, { total: 89 });
+    assert.equal(r2.drafts.length, 0);
+    assert.equal(r2.filtered.duplicate, 1);
+});

@@ -27,13 +27,36 @@
                 :indeterminate="indeterminate"
             />
 
+            <!-- 🧹 批量清理工具条（规则勾选 + 预演 + 一键清理；判定/执行都在父级，本组件只收集规则） -->
+            <dedupe-batch-bar
+                :plan="batchPlan"
+                :exec="batchExec"
+                @preview="onBatchPreview"
+                @execute="onBatchExecute"
+                @abort="$emit('batch-abort')"
+                @retry="$emit('batch-retry')"
+                @purge-missing="$emit('batch-purge-missing')"
+                @undo="$emit('batch-undo')"
+                @open-trash="$emit('open-trash')"
+                :selected-count="selectedGroupCount"
+                :total-count="groups.length"
+                @select-all="selectAllGroups"
+                @select-none="selectNoneGroups"
+                @invert-select="invertGroupSelection"
+                @select-kind="selectGroupsOfKind"
+            />
+
             <!-- 查重聚类列表 (滚动区) -->
             <div class="flex-1 overflow-y-auto p-5 custom-scrollbar space-y-6">
-                <div v-for="(group, gIndex) in groups" :key="gIndex" class="bg-zinc-900/50 border border-zinc-700/80 rounded-xl p-4">
+                <div v-for="(group, gIndex) in groups" :key="gIndex" v-memo="[group, excludedGroups]" class="bg-zinc-900/50 border border-zinc-700/80 rounded-xl p-4">
 
                     <!-- 组标题 -->
                     <div class="mb-3 flex items-center justify-between">
                         <div class="text-sm font-bold text-white flex items-center gap-2">
+                            <input type="checkbox" class="w-3.5 h-3.5 accent-emerald-500 shrink-0"
+                                   :checked="!isGroupExcluded(gIndex)"
+                                   :title="isGroupExcluded(gIndex) ? '本组不参与批量清理' : '本组参与批量清理'"
+                                   @change="toggleGroup(gIndex, $event.target.checked)">
                             🎎 角色名: <span class="text-amber-400 text-lg">『{{ group.name }}』</span>
                             <!-- 🛡️ 同名假阳性防护（2026-09-23）：组标题即给出「仅同名」比例 -->
                             <span v-if="group.nameOnlyCount"
@@ -138,10 +161,12 @@
 
 <script>
 import DedupeScanProgress from './DedupeScanProgress.vue';
+import DedupeBatchBar from './DedupeBatchBar.vue';
+import { isGroupExcluded, toggleGroupExcluded, collectExcludeIds } from '../utils/dedupeBatchGroupState.js';
 
 export default {
     name: 'DedupeModal',
-    components: { DedupeScanProgress },
+    components: { DedupeScanProgress, DedupeBatchBar },
     props: {
         show: { type: Boolean, default: false },
         groups: { type: Array, default: () => [] },
@@ -150,8 +175,51 @@ export default {
         scanProgress: { type: Object, default: () => ({ phase: 'idle', done: 0, total: 0, current: '' }) },
         scanPercent: { type: Number, default: 0 },
         // 不定态：底层重扫无进度通道时用滑动动画，不编假百分比
-        indeterminate: { type: Boolean, default: false }
+        indeterminate: { type: Boolean, default: false },
+        // 🧹 批量清理：预演计划 / 执行进度（父级 useDedupe 持有）
+        batchPlan: { type: Object, default: null },
+        batchExec: { type: Object, default: () => ({ running: false, done: 0, total: 0, deleted: 0, failed: [] }) }
     },
-    emits: ['close', 'open-diff', 'resolve-group']
+    emits: ['close', 'open-diff', 'resolve-group', 'batch-preview', 'batch-execute', 'batch-abort', 'batch-retry', 'batch-purge-missing', 'open-trash', 'batch-undo'],
+    data() {
+        return { excludedGroups: {} }; // 被取消勾选的组（只影响批量清理；单组按钮照旧可用）
+    },
+    watch: {
+        groups() { this.excludedGroups = {}; } // 重新扫描 → 组级勾选复位
+    },
+    computed: {
+        /** 已选组数（= 总组数 − 被取消勾选的组数），供工具条显示「已选 X / Y」 */
+        selectedGroupCount() { return Math.max(0, (this.groups || []).length - Object.keys(this.excludedGroups || {}).length); }
+    },
+    methods: {
+        isGroupExcluded(index) { return isGroupExcluded(this.excludedGroups, index); },
+        toggleGroup(index, checked) { this.excludedGroups = toggleGroupExcluded(this.excludedGroups, index, checked); },
+        excludeIds() { return collectExcludeIds(this.excludedGroups, this.groups); },
+        /** 🎯 全选：所有组参与批量 */
+        selectAllGroups() { this.excludedGroups = {}; },
+        /** 🎯 全不选：所有组都退出批量（单组按钮仍可手动处理） */
+        selectNoneGroups() {
+            const map = {};
+            (this.groups || []).forEach((g, i) => { map[i] = true; });
+            this.excludedGroups = map;
+        },
+        /** 🎯 反选：已选 ↔ 未选 */
+        invertGroupSelection() {
+            const map = {};
+            (this.groups || []).forEach((g, i) => { if (!this.excludedGroups[i]) map[i] = true; });
+            this.excludedGroups = map;
+        },
+        /** 🎯 按类型只选：exact(L0) / similar(L1~L2) / nameonly(仅名称相同) */
+        selectGroupsOfKind(kind) {
+            const map = {};
+            (this.groups || []).forEach((g, i) => {
+                const k = (g && (g._nameOnly || g.type === 'nameonly')) ? 'nameonly' : (g && g.type === 'duplicate' ? 'exact' : 'similar');
+                if (k !== kind) map[i] = true;
+            });
+            this.excludedGroups = map;
+        },
+        onBatchPreview(payload) { this.$emit('batch-preview', { ...payload, excludeIds: this.excludeIds() }); },
+        onBatchExecute(payload) { this.$emit('batch-execute', { ...payload, excludeIds: this.excludeIds() }); }
+    }
 };
 </script>

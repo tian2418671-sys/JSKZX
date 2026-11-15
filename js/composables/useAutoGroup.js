@@ -26,6 +26,7 @@ import {
     resolveRollbackCard,
     sanitizeFolderName,
     draftProfilesFromTags,
+    physicalGroupOf,
     AUTO_GROUP_ROOT_GROUP
 } from '../utils/autoGroup.js';
 import {
@@ -134,7 +135,7 @@ export function useAutoGroup({
         for (const s of suggestions) {
             const card = s.card;
             if (!card) continue;
-            const current = card.subFolder || card.category || AUTO_GROUP_ROOT_GROUP;
+            const current = physicalGroupOf(card);
             if (plan.moves.some(m => m.card === card)) continue; // 已有去向（规则命中优先）
             const si = plan.skipped.findIndex(x => x.cardId === card.id);
             if (si >= 0) plan.skipped.splice(si, 1);
@@ -272,10 +273,14 @@ export function useAutoGroup({
         autoGroupExec.value.finishedAt = Date.now();
 
         if (entries.length) {
-            // ⚠️ 与上一次日志**合并**（而不是覆盖）：否则上次执行过的卡将永久失去回滚能力
+            // 与上一次日志**合并**（而不是覆盖）：否则上次执行过的卡将永久失去回滚能力
             const prev = normalizeAutoGroupLastRun(autoGroupLastRun.value);
             const merged = prev ? prev.entries.concat(entries) : entries;
             autoGroupLastRun.value = { at: Date.now(), entries: merged };
+            // 新分组即时进侧边栏（否则文件夹已建好、侧栏却看不到，用户以为"执行不到位"，DF-32）
+            for (const g of new Set(entries.map(e => sanitizeFolderName(e.toGroup)))) {
+                if (g && !customCategories.value.includes(g)) customCategories.value.push(g);
+            }
             syncConfigToDiskDebounced();
             addLog(`🗂️ 自动分组：移动 ${entries.length} 张卡片` + (failures.length ? `（失败 ${failures.length} 张）` : ''), failures.length ? 'warning' : 'info');
         }
@@ -336,6 +341,11 @@ export function useAutoGroup({
         autoGroupRollback.value.running = false;
         autoGroupRollback.value.failed = failedList;
         autoGroupRollback.value.finishedAt = Date.now();
+
+        // 回滚还原到的原分组可能在执行阶段被当空组删掉，这里补回（DF-32）
+        for (const g of new Set(reverse.map(e => sanitizeFolderName(e.fromGroup || '')))) {
+            if (g && g !== AUTO_GROUP_ROOT_GROUP && !customCategories.value.includes(g)) customCategories.value.push(g);
+        }
 
         if (remain.length) {
             autoGroupLastRun.value = {

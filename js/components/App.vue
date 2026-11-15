@@ -351,6 +351,7 @@
             @snapshots="handleContextMenuAction('snapshots')"
             @replace-image="replaceCardImage(contextMenu.item); closeContextMenu()"
             @trash="handleContextMenuAction('trash')"
+            @close="closeContextMenu()"
         />
 
         <!-- ================= [ 右键快捷菜单：世界书（子组件 WbContextMenu） ] ================= -->
@@ -495,9 +496,18 @@
             :scan-progress="dedupeScanProgressForModal"
             :scan-percent="dedupeScanPercent"
             :indeterminate="dedupeScanIndeterminate"
+            :batch-plan="dedupeBatchPlan"
+            :batch-exec="dedupeBatchExec"
             @close="showDedupeModal = false"
             @open-diff="openDiffDetailModal"
             @resolve-group="resolveDedupeGroup"
+            @batch-preview="previewDedupeBatch('card', $event)"
+            @batch-execute="executeDedupeBatch('card', $event)"
+            @batch-abort="abortDedupeBatch"
+            @batch-retry="retryDedupeBatchFailures('card')"
+            @batch-purge-missing="purgeDedupeBatchMissing('card')"
+            @batch-undo="undoDedupeBatch('card')"
+            @open-trash="openGlobalTrash"
         />
 
         <!-- ================= [ 📖 世界书智能版本对比查重弹窗（子组件 WbDedupeModal） ] ================= -->
@@ -508,10 +518,19 @@
             :scan-progress="dedupeScanProgressForModal"
             :scan-percent="dedupeScanPercent"
             :indeterminate="dedupeScanIndeterminate"
+            :batch-plan="dedupeBatchPlan"
+            :batch-exec="dedupeBatchExec"
             @close="showWbDedupeModal = false"
             @open-diff="openDiffDetailModal"
             @resolve-group="resolveWbDedupeGroup"
             @merge-group="mergeWbDedupeGroup"
+            @batch-preview="previewDedupeBatch('wb', $event)"
+            @batch-execute="executeDedupeBatch('wb', $event)"
+            @batch-abort="abortDedupeBatch"
+            @batch-retry="retryDedupeBatchFailures('wb')"
+            @batch-purge-missing="purgeDedupeBatchMissing('wb')"
+            @batch-undo="undoDedupeBatch('wb')"
+            @open-trash="openGlobalTrash"
         />
 
         <!-- ================= [ 🔀 世界书合并预览（v2.3.6：两个入口共用一套算法 + 执行前预览） ] ================= -->
@@ -561,9 +580,18 @@
         <preset-dedupe-modal
             :show="showPresetDedupeModal"
             :groups="presetDuplicateGroups"
+            :batch-plan="dedupeBatchPlan"
+            :batch-exec="dedupeBatchExec"
             @close="showPresetDedupeModal = false"
             @open-diff="openDiffDetailModal"
             @resolve-group="resolvePresetDedupeGroup"
+            @batch-preview="previewDedupeBatch('preset', $event)"
+            @batch-execute="executeDedupeBatch('preset', $event)"
+            @batch-abort="abortDedupeBatch"
+            @batch-retry="retryDedupeBatchFailures('preset')"
+            @batch-purge-missing="purgeDedupeBatchMissing('preset')"
+            @batch-undo="undoDedupeBatch('preset')"
+            @open-trash="openGlobalTrash"
         />
 
         <!-- ================= [ 🧵 预设缝合中心弹窗（子组件 PresetStitchModal） ] ================= -->
@@ -633,9 +661,18 @@
             :scan-percent="dedupeScanPercent"
             :scan-label="dedupeScanLabel || '正在扫描并比对内容…'"
             :indeterminate="dedupeScanIndeterminate"
+            :batch-plan="dedupeBatchPlan"
+            :batch-exec="dedupeBatchExec"
             @close="showContentDedupeModal = false"
             @open-diff="openDiffDetailModal"
             @resolve-group="resolveContentDedupeGroup"
+            @batch-preview="previewDedupeBatch('content', $event)"
+            @batch-execute="executeDedupeBatch('content', $event)"
+            @batch-abort="abortDedupeBatch"
+            @batch-retry="retryDedupeBatchFailures('content')"
+            @batch-purge-missing="purgeDedupeBatchMissing('content')"
+            @batch-undo="undoDedupeBatch('content')"
+            @open-trash="openGlobalTrash"
         />
 
         <!-- ================= [ ⚖️ 数据版本差异深度比对 (Diff Inspector)（子组件 DiffModal） ] ================= -->
@@ -5924,6 +5961,7 @@ export default {
         const {
             importUrl, isImportingWb, wbContextMenu,
             loadWorldbooks, scanWorldbookDir, importWorldbookFromUrl, renameWorldbook,
+            refreshWorldbooks,
             handleWorldbookFolderSelect, deleteWorldbook, duplicateWorldbook,
             openWbContextMenu, closeWbContextMenu, openWbInFolder,
             wbCategories, changeWbCategory, filteredWorldbooks,
@@ -5999,6 +6037,9 @@ export default {
             showPresetDedupeModal, presetDuplicateGroups, startPresetDedupeScan, resolvePresetDedupeGroup,
             showContentDedupeModal, contentDuplicateGroups, startContentDedupeScan, resolveContentDedupeGroup,
             startSmartDedupe,
+            // 🧹 批量清理（预演 / 执行 / 中止 / 重试失败项）
+            dedupeBatchPlan, dedupeBatchExec, previewDedupeBatch, executeDedupeBatch,
+            abortDedupeBatch, retryDedupeBatchFailures, purgeDedupeBatchMissing, removeGhostEntries, undoDedupeBatch,
             // 📊🔍 查重扫描进度（单写入口在 useDedupe 内；弹窗消费见下方 dedupeScanProgressForModal）
             dedupeScanning, dedupeScanLabel, dedupeScanPercent, dedupeScanIndeterminate,
             dedupeScanDone, dedupeScanTotal,
@@ -6167,7 +6208,7 @@ export default {
         // ⚙️ 预设管理：组合式函数注入
         const {
             presetSearchQuery, isImportingPreset, importPresetUrl,
-            loadPresets, scanPresetDir, filteredPresets,
+            loadPresets, scanPresetDir, refreshPresets, filteredPresets,
             saveActivePreset, renamePreset, deletePreset, duplicatePreset,
             openPresetContextMenu, openPresetInFolder,
             importPresetFromUrl, exportPresetsBatch,
@@ -6209,7 +6250,7 @@ export default {
         // 🧩 插件管理：组合式函数注入
         const {
             pluginSearchQuery,
-            loadPlugins, scanPluginDir, filteredPlugins,
+            loadPlugins, scanPluginDir, refreshPlugins, filteredPlugins,
             pluginInstalling, installPluginFromUrlFlow,   // 🔗 链接安装（对齐酒馆「安装扩展」）
             deletePlugin,
             openPluginContextMenu, openPluginInFolder, readPluginSource,
@@ -7184,6 +7225,7 @@ export default {
             // 🌍 世界书双引擎模式
             appMode, worldbooks, activeWorldbook, lastWorldbookDirPath, editorLogs, showEditorLogs, addLog,
             loadWorldbooks, scanWorldbookDir, saveActiveWorldbook, exportActiveWorldbook, exportFilteredWorldbook, saveCurrentAsset,
+            refreshWorldbooks,
             wbScanProgress, isWbScanning, wbScanPercent,
             // 📊🔍 查重/版本对比的扫描进度（2026-09-22 设计修正）
             //    ⚠️ 必须连 `dedupeScanProgressForModal` 一起暴露：它是 computed，
@@ -7202,7 +7244,7 @@ export default {
             // ⚙️ 预设管理
             presets, activePreset, lastPresetDirPath,
             presetSearchQuery, presetSortBy, isImportingPreset, importPresetUrl,
-            loadPresets, scanPresetDir, filteredPresets,
+            loadPresets, scanPresetDir, refreshPresets, filteredPresets,
             saveActivePreset, renamePreset, deletePreset, duplicatePreset,
             openPresetContextMenu, openPresetInFolder, importPresetFromUrl, exportPresetsBatch,
             listPresetSnapshots, restorePresetSnapshot, deletePresetSnapshot,
@@ -7221,7 +7263,7 @@ export default {
             // 🧩 插件管理
             plugins, activePlugin, lastPluginDirPath,
             pluginSearchQuery,
-            loadPlugins, scanPluginDir, filteredPlugins,
+            loadPlugins, scanPluginDir, refreshPlugins, filteredPlugins,
             pluginInstalling, installPluginFromUrlFlow,
             deletePlugin,
             openPluginContextMenu, openPluginInFolder, readPluginSource,
@@ -7334,6 +7376,9 @@ export default {
             showPresetDedupeModal, presetDuplicateGroups, startPresetDedupeScan, resolvePresetDedupeGroup,
             showContentDedupeModal, contentDuplicateGroups, startContentDedupeScan, resolveContentDedupeGroup,
             startSmartDedupe,
+            // 🧹 查重批量清理（预演计划 / 执行进度 / 中止 / 重试失败项）
+            dedupeBatchPlan, dedupeBatchExec, previewDedupeBatch, executeDedupeBatch,
+            abortDedupeBatch, retryDedupeBatchFailures, purgeDedupeBatchMissing, removeGhostEntries, undoDedupeBatch,
             // ⚖️ 双屏差异比对器 (Diff Inspector)
             showDiffDetailModal, diffMasterItem, diffCompareItem, diffFieldResults, openDiffDetailModal,
             // 🌐 世界书关系图谱 v2（过滤/搜索/布局/统计/导出）+ 🔗 多书合并 + 🔀 条目导入

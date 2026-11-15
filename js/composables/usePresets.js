@@ -56,6 +56,24 @@ export function usePresets({
         }
     };
 
+    /**
+     * 🔄 重新扫描当前预设目录（不弹目录选择器）
+     *
+     * 用户要求：「在所有库中添加一个刷新按钮，如在角色卡库中的刷新按钮一样」。
+     * 与 `loadPresets` 的区别：那个每次都要弹目录选择器；用户只是往**原目录**新丢几个
+     * .json 预设，不想重新选一遍路径。这里直接复用记住的 `lastPresetDirPath`。
+     */
+    const refreshPresets = async () => {
+        const dir = lastPresetDirPath && lastPresetDirPath.value;
+        if (!dir) {
+            nativeAlert('还没有选择过预设目录。\n请先点「📂 打开预设目录」选一次，之后就能用 🔄 一键刷新。', 'warning');
+            return { ok: false, error: '未设置预设目录' };
+        }
+        addLog(`🔄 刷新预设库：重新扫描 ${dir}`, 'info');
+        await scanPresetDir(dir);
+        return { ok: true };
+    };
+
     // 📢 DF-18：把「被跳过的文件」以可感知方式反馈给用户（与 useWorldbooks 同款口径）
     const reportSkipped = (kind, skipped) => {
         const list = Array.isArray(skipped) ? skipped : [];
@@ -247,17 +265,23 @@ export function usePresets({
     // =========================================================
 
     const openPresetContextMenu = (event, p) => {
+        // 菜单项必须挂在 item 上：ContextMenu 组件用 item.items 判断「动态模式」。
+        // 以前挂在顶层 items 上，组件根本不读 ⇒ 弹出的仍是角色卡菜单（换卡图/导出 PNG 等全对不上预设）。
         contextMenu.value = {
             visible: true,
             x: event.clientX,
             y: event.clientY,
-            items: [
-                { label: '✏️ 重命名', action: () => renamePreset(p) },
-                { label: '📋 复制副本', action: () => duplicatePreset(p) },
-                { label: '📂 在资源管理器中定位', action: () => openPresetInFolder(p) },
-                { type: 'separator' },
-                { label: '🗑️ 删除（移入回收站）', action: () => deletePreset(p), danger: true }
-            ]
+            item: {
+                name: p?.name || '未命名预设',
+                path: p?.path || '',
+                items: [
+                    { label: '✏️ 重命名', action: () => renamePreset(p) },
+                    { label: '📋 复制副本', action: () => duplicatePreset(p) },
+                    { label: '📂 在资源管理器中定位', action: () => openPresetInFolder(p) },
+                    { type: 'separator' },
+                    { label: '🗑️ 删除（移入回收站）', action: () => deletePreset(p), danger: true }
+                ]
+            }
         };
     };
 
@@ -388,6 +412,7 @@ export function usePresets({
         // 扫描
         loadPresets,
         scanPresetDir,
+        refreshPresets,
         // 📢 DF-18：跳过可见化
         reportSkipped,
         // 筛选

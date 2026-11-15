@@ -276,7 +276,9 @@ export function useCardGroups({
             const oldPath = item.path;
             item.path = res.newFilePath;
             item.subFolder = res.newSubFolder || '';
-            item.category = cleanTarget;
+            // 分组名以**物理文件夹名**为准（主进程已净化 `/` 等非法字符），
+            // 否则徽标会显示成规则里那个不存在的名字（DF-31）
+            item.category = (item.subFolder ? item.subFolder.split(/[\\/]/)[0] : '') || cleanTarget;
             const isImage = /\.(png|webp)$/i.test(res.newFilePath);
             item.avatar = isImage ? 'local-file://img/?path=' + encodeURIComponent(res.newFilePath) : null;
             migrateOverlayKey(oldPath, res.newFilePath);

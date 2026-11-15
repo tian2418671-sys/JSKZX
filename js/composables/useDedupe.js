@@ -29,6 +29,7 @@ import { buildGroup } from '../utils/dedupeView.js';
 import { buildFieldResults } from '../utils/dedupeDiff.js';
 import { collectDfLines, buildTemplateKeySet, stripDataTemplateLines } from '../utils/dedupeDf.js';
 import { cardDataOf } from '../utils/dedupeCommon.js';
+import { buildBatchPlan, chunkList } from '../utils/dedupeBatch.js'; // 🧹 批量清理判定层（纯函数）
 
 // （纯函数已抽到 `js/utils/dedupeCommon.js` / `dedupeNames.js` —— P1；本文件只做编排）
 
@@ -286,6 +287,9 @@ export function useDedupe({
         const silent = !!(opts && opts.silent);
         skipped.count = 0; skipped.reasons = Object.create(null); skipped.samples = [];
         notices.length = 0;
+        // 🛡️ 重新扫描 ⇒ 旧批量计划立即失效：组结构与「推荐版」都可能变，
+        //    继续用旧计划执行可能删掉新的推荐版本（未报告隐患，见 AR-81）。
+        dedupeBatchPlan.value = null;
         setDedupeBusy(true);
         try {
             if (kind === 'card') {
@@ -388,6 +392,102 @@ export function useDedupe({
     };
 
     // ── 清理（v4 §10：confirmDialog + trashFiles；回收站安全网） ──
+    const dedupeSourceOf = (kind) => (kind === 'card' ? duplicateGroups
+        : kind === 'wb' ? wbDuplicateGroups
+            : kind === 'preset' ? presetDuplicateGroups
+                : contentDuplicateGroups);
+
+    /** 内存同步（单组清理与批量清理共用）：只按**实际成功路径**剔除，失败项保留 —— 杜绝幽灵卡 */
+    const applyTrashedPaths = async (kind, trashedPaths, failedPaths) => {
+        if (!Array.isArray(trashedPaths) || trashedPaths.length === 0) return;
+        if (kind === 'card') {
+            if (library && Array.isArray(library.value)) {
+                const openItem = (cardData && cardData.value) ? library.value.find((it) => it.data === cardData.value) : null;
+                const currentTrashed = !!(openItem && trashedPaths.includes(openItem.path));
+                library.value = library.value.filter((it) => !trashedPaths.includes(it.path));
+                if (currentTrashed && typeof reset === 'function') reset();
+            }
+            if (typeof deleteCardOverlays === 'function') { try { deleteCardOverlays(trashedPaths); } catch (e) { /* 忽略 */ } }
+            if (typeof cleanupEmptyCategories === 'function') { try { await cleanupEmptyCategories(); } catch (e) { /* 忽略 */ } }
+        } else if (kind === 'wb') {
+            if (worldbooks && Array.isArray(worldbooks.value)) worldbooks.value = worldbooks.value.filter((w) => !trashedPaths.includes(w.path));
+        } else if (kind === 'preset') {
+            if (presets && Array.isArray(presets.value)) presets.value = presets.value.filter((p) => !trashedPaths.includes(p.path));
+        } else if (kind === 'content') {
+            const mode = appMode && appMode.value;
+            if (mode === 'worldbooks' && worldbooks && Array.isArray(worldbooks.value)) worldbooks.value = worldbooks.value.filter((w) => !trashedPaths.includes(w.path));
+            else if (mode === 'presets' && presets && Array.isArray(presets.value)) presets.value = presets.value.filter((p) => !trashedPaths.includes(p.path));
+            else if (library && Array.isArray(library.value)) library.value = library.value.filter((it) => !trashedPaths.includes(it.path));
+        }
+        void failedPaths;
+    };
+
+    /** 组数据同步：全删净（剩 0~1 张）的组移除；有残留只剔已删项（弹窗与磁盘一致） */
+    const pruneGroupsAfterTrash = (kind, trashedSet) => {
+        const src = dedupeSourceOf(kind);
+        const list = src && Array.isArray(src.value) ? src.value : null;
+        if (!list) return;
+        for (let i = list.length - 1; i >= 0; i--) {
+            const g = list[i];
+            const members = (g && (g.cards || g.list)) || [];
+            const remain = members.filter((m) => m && !trashedSet.has(m.path));
+            if (remain.length === members.length) continue;
+            if (remain.length <= 1) list.splice(i, 1);
+            else { g.cards = remain; g.list = remain; }
+        }
+    };
+
+    /** 从列表移除**失效条目**（磁盘上已不存在；只动内存与覆盖层，绝不删文件 —— DF-33） */
+    const removeGhostEntries = async (kind, paths) => {
+        const set = new Set((Array.isArray(paths) ? paths : []).filter(Boolean));
+        if (!set.size) return 0;
+        if (kind === 'card') {
+            if (library && Array.isArray(library.value)) library.value = library.value.filter((it) => !set.has(it.path));
+            if (typeof deleteCardOverlays === 'function') { try { deleteCardOverlays([...set]); } catch (e) { /* 忽略 */ } }
+        } else if (kind === 'wb') {
+            if (worldbooks && Array.isArray(worldbooks.value)) worldbooks.value = worldbooks.value.filter((w) => !set.has(w.path));
+        } else if (kind === 'preset') {
+            if (presets && Array.isArray(presets.value)) presets.value = presets.value.filter((p) => !set.has(p.path));
+        } else if (kind === 'content') {
+            const mode = appMode && appMode.value;
+            if (mode === 'worldbooks' && worldbooks && Array.isArray(worldbooks.value)) worldbooks.value = worldbooks.value.filter((w) => !set.has(w.path));
+            else if (mode === 'presets' && presets && Array.isArray(presets.value)) presets.value = presets.value.filter((p) => !set.has(p.path));
+            else if (library && Array.isArray(library.value)) library.value = library.value.filter((it) => !set.has(it.path));
+        }
+        pruneGroupsAfterTrash(kind, set);
+        if (typeof addLog === 'function') addLog(`🧹 已从列表移除 ${set.size} 个失效条目（磁盘未改动）`, 'warning');
+        return set.size;
+    };
+
+    /** 把 `trashFiles` 的分项失败渲染成人能看懂的多行文本（DF-33：不再用「未知错误」糊掉真因） */
+    const describeTrashFailures = (fails, limit = 8) => {
+        const list = (Array.isArray(fails) ? fails : []).filter((f) => f && f.path);
+        if (!list.length) return '';
+        const lines = list.slice(0, limit).map((f) => `  · ${String(f.path).split(/[\\/]/).pop()} —— ${f.error || '未知原因'}`);
+        if (list.length > limit) lines.push(`  …还有 ${list.length - limit} 个`);
+        return lines.join('\n');
+    };
+
+    const isMissingError = (err) => /文件不存在|不存在|ENOENT/i.test(String(err || ''));
+    const isBusyError = (err) => /占用|EBUSY|EPERM|EACCES|DELETE_PENDING|权限/i.test(String(err || ''));
+    const isOutsideError = (err) => /授权|越界|白名单/.test(String(err || ''));
+
+    /** 失败后的可操作建议（按原因类别生成；没有对应类别就不写 —— 不制造噪音） */
+    const trashHints = (fails) => {
+        const list = Array.isArray(fails) ? fails : [];
+        const hints = [];
+        if (list.some((f) => isMissingError(f && f.error))) {
+            hints.push('· 文件已不存在：多半是在软件外被移动/删除/改名，点「🔄 刷新/重扫」后这些条目会消失');
+        }
+        if (list.some((f) => isBusyError(f && f.error))) {
+            hints.push('· 文件被占用：关掉正在预览/同步这些文件的程序（含杀毒实时扫描）后点「↻ 重试失败项」');
+        }
+        if (list.some((f) => isOutsideError(f && f.error))) {
+            hints.push('· 路径未授权：重新「打开角色库目录」（或世界书/预设目录）授权后再清理');
+        }
+        return hints.length ? `\n\n💡 处理建议：\n${hints.join('\n')}` : '';
+    };
+
     const resolveGeneric = async (kind, groupIndex, keepPath) => {
         const source = kind === 'card' ? duplicateGroups
             : kind === 'wb' ? wbDuplicateGroups
@@ -423,9 +523,31 @@ export function useDedupe({
         }
 
         let res = null;
-        try { res = await api.trashFiles(pathsToTrash); } catch (e) { res = { success: false, error: e && e.message }; }
-        if (!res || !res.success) {
-            if (typeof nativeAlert === 'function') nativeAlert(`清理失败：${(res && res.error) || '未知错误'}`, 'error');
+        try { res = await api.trashFiles(pathsToTrash); } catch (e) { res = { success: false, error: e && e.message, failed: [] }; }
+        const fails = ((res && res.failed) || []).filter((f) => f && f.path);
+
+        // 整批失败（一个都没删成）：必须把 failed[] 的逐项原因说出来 —— 旧实现只说「未知错误」（DF-33）
+        if (!res || (res.success === false && fails.length === 0)) {
+            if (typeof nativeAlert === 'function') nativeAlert(`清理失败：${(res && res.error) || '未知错误（接口未返回原因）'}`, 'error');
+            return;
+        }
+        if (res.success === false && fails.length > 0) {
+            const missing = fails.filter((f) => isMissingError(f.error)).map((f) => f.path);
+            let note = `❌ 这 ${fails.length} 个文件都没能移入回收站：\n\n${describeTrashFailures(fails)}` + trashHints(fails);
+            if (missing.length) {
+                note += `\n\n其中 ${missing.length} 个在磁盘上已不存在（可能被移动 / 删除 / 改名后没重扫）。`;
+            }
+            if (typeof nativeAlert === 'function') nativeAlert(note, 'error');
+            // 全是失效条目 → 主动提出「从列表移除」（只动列表，不动磁盘）
+            if (missing.length === fails.length && typeof confirmDialog === 'function') {
+                const ok = await confirmDialog(
+                    `这些卡片在磁盘上已不存在，删不掉也清不掉，会一直留在查重列表里。\n\n是否从**列表**中移除这些失效条目？（只改列表，不动磁盘）`
+                );
+                if (ok) {
+                    const n = await removeGhostEntries(kind, missing);
+                    if (typeof showToast === 'function') showToast(`✅ 已移除 ${n} 个失效条目（磁盘未改动）`, 'success', 4000);
+                }
+            }
             return;
         }
 
@@ -433,38 +555,27 @@ export function useDedupe({
         const failedPaths = new Set(((res && res.failed) || []).map((f) => f && f.path).filter(Boolean));
         const trashedPaths = pathsToTrash.filter((p) => !failedPaths.has(p));
 
-        if (kind === 'card') {
-            if (library && Array.isArray(library.value)) {
-                const openItem = (cardData && cardData.value) ? library.value.find((it) => it.data === cardData.value) : null;
-                const currentTrashed = !!(openItem && trashedPaths.includes(openItem.path));
-                library.value = library.value.filter((it) => !trashedPaths.includes(it.path));
-                if (currentTrashed && typeof reset === 'function') reset();
-            }
-            if (typeof deleteCardOverlays === 'function') { try { deleteCardOverlays(trashedPaths); } catch (e) { /* 忽略 */ } }
-            if (typeof cleanupEmptyCategories === 'function') { try { await cleanupEmptyCategories(); } catch (e) { /* 忽略 */ } }
-        } else if (kind === 'wb') {
-            if (worldbooks && Array.isArray(worldbooks.value)) worldbooks.value = worldbooks.value.filter((w) => !trashedPaths.includes(w.path));
-        } else if (kind === 'preset') {
-            if (presets && Array.isArray(presets.value)) presets.value = presets.value.filter((p) => !trashedPaths.includes(p.path));
-        } else if (kind === 'content') {
-            const mode = appMode && appMode.value;
-            if (mode === 'worldbooks' && worldbooks && Array.isArray(worldbooks.value)) worldbooks.value = worldbooks.value.filter((w) => !trashedPaths.includes(w.path));
-            else if (mode === 'presets' && presets && Array.isArray(presets.value)) presets.value = presets.value.filter((p) => !trashedPaths.includes(p.path));
-            else if (library && Array.isArray(library.value)) library.value = library.value.filter((it) => !trashedPaths.includes(it.path));
-        }
+        await applyTrashedPaths(kind, trashedPaths, failedPaths);
 
-        // 组数据同步：全删净（无失败）才移除整组；有残留只剔除已删项（弹窗与磁盘一致）
-        const remain = members.filter((m) => m && m.path && !trashedPaths.includes(m.path));
-        if (failedPaths.size === 0 || remain.length <= 1) {
-            source.value.splice(groupIndex, 1);
-        } else {
-            group.cards = remain; group.list = remain;
-        }
+        // 组数据同步：全删净（剩 0~1 张）的组移除；有残留只剔已删项（弹窗与磁盘一致）
+        pruneGroupsAfterTrash(kind, new Set(trashedPaths));
 
         if (failedPaths.size > 0) {
-            const names = [...failedPaths].map((p) => String(p).split(/[\\/]/).pop()).join('、');
-            if (typeof showToast === 'function') showToast(`已清理 ${trashedPaths.length} 个，${failedPaths.size} 个失败（可能被占用）`, 'warning', 5000);
-            if (typeof nativeAlert === 'function') nativeAlert(`已清理 ${trashedPaths.length} 个；${failedPaths.size} 个失败（可能被其他程序占用）：\n${names}`, 'warning');
+            const failsDetail = fails.filter((f) => failedPaths.has(f.path));
+            const missing = failsDetail.filter((f) => isMissingError(f.error)).map((f) => f.path);
+            if (typeof showToast === 'function') showToast(`已清理 ${trashedPaths.length} 个，${failedPaths.size} 个失败`, 'warning', 5000);
+            if (typeof nativeAlert === 'function') {
+                nativeAlert(
+                    `已清理 ${trashedPaths.length} 个；${failedPaths.size} 个失败：\n\n${describeTrashFailures(failsDetail)}`
+                    + (missing.length ? `\n\n其中 ${missing.length} 个在磁盘上已不存在（失效条目）。` : '')
+                    + trashHints(failsDetail),
+                    'warning'
+                );
+            }
+            if (missing.length && missing.length === failedPaths.size && typeof confirmDialog === 'function') {
+                const ok = await confirmDialog('这些失效条目还留在查重列表里，是否从**列表**中移除？（只改列表，不动磁盘）');
+                if (ok) await removeGhostEntries(kind, missing);
+            }
         } else if (typeof showToast === 'function') {
             showToast(`✅ 清理成功：已将 ${trashedPaths.length} 个文件移入回收站`, 'success', 4000);
         }
@@ -474,6 +585,336 @@ export function useDedupe({
     const resolveWbDedupeGroup = (groupIndex, keepPath) => resolveGeneric('wb', groupIndex, keepPath);
     const resolvePresetDedupeGroup = (groupIndex, keepPath) => resolveGeneric('preset', groupIndex, keepPath);
     const resolveContentDedupeGroup = (groupIndex, keepPath) => resolveGeneric('content', groupIndex, keepPath);
+
+    // ══════════════════════════════════════════════════════════════
+    // 🧹 批量清理（方案：docs/规格与计划/查重引擎/查重-批量清理与规则化勾选-方案.md）
+    //   两段式：preview（纯只读）→ execute（分批 trashFiles + 整批一次内存同步）
+    //   ⚠️ 与单组清理共用 applyTrashedPaths / pruneGroupsAfterTrash，禁止另写删除逻辑
+    // ══════════════════════════════════════════════════════════════
+
+    /** 最近一次预演计划（含 deletions/keepList/skipGroups/stats；活引用禁止序列化落盘） */
+    const dedupeBatchPlan = ref(null);
+    /** 批量执行进度/结果 */
+    const dedupeBatchExec = ref({ running: false, done: 0, total: 0, deleted: 0, deletedPaths: [], failed: [], aborted: false, finishedAt: 0 });
+    let batchAbort = false;
+    const BATCH_CHUNK = 200;
+    const BATCH_TIMEOUT_MS = 30000; // 单批 IPC 超时：主进程卡住也不能把 UI 永远锁死
+
+    /** 给 promise 加超时（超时按"整批失败"返回，绝不让 running 卡在 true —— 预演按钮会因此永久变灰） */
+    const withTimeout = (p, ms, onTimeout) => new Promise((resolve) => {
+        let settled = false;
+        const timer = setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            resolve(onTimeout());
+        }, ms);
+        Promise.resolve(p).then(
+            (v) => { if (settled) return; settled = true; clearTimeout(timer); resolve(v); },
+            (e) => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timer);
+                resolve({ success: false, error: (e && e.message) || '调用异常', failed: [] });
+            }
+        );
+    });
+
+    /** 当前视图的库根（用于「不在库目录内」预判；取不到就跳过该校验） */
+    const dedupeRootOf = (kind) => {
+        const val = (r) => (r && typeof r === 'object' && 'value' in r ? r.value : r) || '';
+        if (kind === 'wb') return val(lastWorldbookDirPath) || '';
+        if (kind === 'preset') return val(lastPresetDirPath) || '';
+        if (kind === 'content') {
+            const mode = appMode && appMode.value;
+            if (mode === 'worldbooks') return val(lastWorldbookDirPath) || '';
+            if (mode === 'presets') return val(lastPresetDirPath) || '';
+        }
+        return val(currentFolderPath) || '';
+    };
+
+    /** 正在编辑/打开的文件（批量清理整组跳过，避免删掉用户正在改的那份） */
+    const openPathsOf = () => {
+        const out = new Set();
+        const push = (v) => { if (v && typeof v === 'string') out.add(v); };
+        push(cardData && cardData.value && cardData.value.path);
+        push(activeWorldbook && activeWorldbook.value && activeWorldbook.value.path);
+        push(activePreset && activePreset.value && activePreset.value.path);
+        return out;
+    };
+
+    /**
+     * 预演（**零写入**）：生成删除清单并写入 `dedupeBatchPlan`
+     * @param {'card'|'wb'|'preset'|'content'} kind
+     * @param {object} opts `{ keepBy, scopes, guards, excludeIds, maxGroups, maxFiles }`
+     */
+    const previewDedupeBatch = (kind = 'card', opts = {}) => {
+        const source = dedupeSourceOf(kind);
+        const groups = (source && Array.isArray(source.value)) ? source.value : [];
+        const openSet = openPathsOf();
+        const plan = buildBatchPlan(groups, {
+            ...opts,
+            libraryPath: opts.libraryPath || dedupeRootOf(kind),
+            isOpenPath: opts.isOpenPath || ((p) => openSet.has(p)),
+        });
+        dedupeBatchPlan.value = { kind, ...plan };
+        // 点击后必须有可见反馈（否则同规则二次预演"看起来像没反应"）
+        const stats = dedupeBatchPlan.value.stats || {};
+        const msg = stats.files
+            ? `👁 预演完成：将清理 ${stats.groupsPlanned} 组 / ${stats.files} 个文件（约 ${(Number(stats.bytes || 0) / 1024 / 1024).toFixed(1)} MB）`
+                + (stats.skipByReason && Object.keys(stats.skipByReason).length
+                    ? `；跳过 ${Object.entries(stats.skipByReason).map(([k, v]) => `${k} ${v}`).join(' · ')}`
+                    : '')
+            : '👁 预演完成：当前规则下没有可清理的文件（可调整「处理范围」或检查是否都已是最新版）';
+        if (typeof showToast === 'function') showToast(msg, stats.files ? 'info' : 'warning', 4000);
+        if (typeof addLog === 'function') addLog(msg, 'info');
+        return dedupeBatchPlan.value;
+    };
+
+    /**
+     * 执行批量清理（先预演/确认，再分批 trashFiles）
+     * @param {'card'|'wb'|'preset'|'content'} kind
+     * @param {object} opts 同 preview，另支持 `{ skipConfirm, plan }`（skipConfirm 仅 dev 端到端用）
+     */
+    const executeDedupeBatch = async (kind = 'card', opts = {}) => {
+        const quiet = !!(opts && opts.skipConfirm);
+        if (dedupeBatchExec.value.running) return null;
+
+        const plan = (opts && opts.plan) || previewDedupeBatch(kind, opts);
+        const deletions = (plan && plan.deletions) || [];
+        if (!deletions.length) {
+            if (!quiet && typeof nativeAlert === 'function') nativeAlert('没有需要清理的文件（可调整「处理范围」后重新预演）。', 'info');
+            return null;
+        }
+
+        if (typeof confirmDialog !== 'function') {
+            if (typeof nativeAlert === 'function') nativeAlert('清理确认对话框不可用（confirmDialog 未注入），已取消。', 'error');
+            return null;
+        }
+        const mb = ((plan.stats.bytes || 0) / 1024 / 1024).toFixed(1);
+        const samples = deletions.slice(0, 5).map((d) => `  · ${String(d.path).split(/[\\/]/).pop()}（${d.groupName}）`).join('\n');
+        const riskyScopes = [];
+        if (plan.options && plan.options.scopes) {
+            if (plan.options.scopes.similar) riskyScopes.push('高度相似(L1/L2)');
+            if (plan.options.scopes.nameonly) riskyScopes.push('仅名称相同');
+        }
+        if (!quiet) {
+            const ok = await confirmDialog(
+                `即将把 ${plan.stats.groupsPlanned} 组里的 ${deletions.length} 个重复/旧版文件移入回收站`
+                + `（约 ${mb} MB，每组都会保留 1 张）：\n\n${samples}`
+                + (deletions.length > 5 ? `\n  …还有 ${deletions.length - 5} 个` : '')
+                + (riskyScopes.length
+                    ? `\n\n🚨 本次包含高风险范围：${riskyScopes.join('、')}。\n这些组并非「内容完全一致」，请确认已逐组看过差异。`
+                    : '')
+                + '\n\n文件会进回收站，可在「打开回收站」里找回。是否继续？'
+            );
+            if (!ok) return null;
+            if (riskyScopes.length) {
+                const ok2 = await confirmDialog(`二次确认：包含「${riskyScopes.join('、')}」的组，删错需要手动去回收站捞。\n确定继续？`);
+                if (!ok2) return null;
+            }
+        }
+
+        const api = window.electronAPI;
+        if (!api || typeof api.trashFiles !== 'function') {
+            if (typeof nativeAlert === 'function') nativeAlert('❌ 回收站接口不可用（preload 未提供 trashFiles），已取消清理。', 'error');
+            return null;
+        }
+
+        batchAbort = false;
+        dedupeBatchExec.value = { running: true, done: 0, total: deletions.length, deleted: 0, deletedPaths: [], failed: [], aborted: false, finishedAt: 0 };
+        const failedList = [];
+        const trashed = [];
+
+        try {
+            const timeoutMs = Math.max(50, Number(opts && opts.batchTimeoutMs) || BATCH_TIMEOUT_MS);
+            for (const chunk of chunkList(deletions, BATCH_CHUNK)) {
+                if (batchAbort) { dedupeBatchExec.value.aborted = true; break; }
+                const res = await withTimeout(
+                    api.trashFiles(chunk.map((d) => d.path)),
+                    timeoutMs,
+                    () => ({ success: false, error: `批次超时（${Math.round(timeoutMs / 1000)} 秒无响应）`, failed: [] })
+                );
+                const failedPaths = new Set(((res && res.failed) || []).map((f) => f && f.path).filter(Boolean));
+                for (const d of chunk) {
+                    if (failedPaths.has(d.path)) continue;
+                    // 整批失败（success=false 但无分项）也要如实计入失败，绝不虚报成功
+                    if (res && res.success === false && failedPaths.size === 0) {
+                        failedList.push({ path: d.path, groupName: d.groupName, cardName: d.cardName, error: res.error || '未知错误' });
+                        continue;
+                    }
+                    trashed.push(d.path);
+                }
+                for (const f of ((res && res.failed) || [])) {
+                    const hit = chunk.find((d) => d.path === (f && f.path));
+                    failedList.push({
+                        path: (f && f.path) || '',
+                        groupName: (hit && hit.groupName) || '',
+                        cardName: (hit && hit.cardName) || '',
+                        error: (f && f.error) || '未知错误',
+                    });
+                }
+                dedupeBatchExec.value.done += chunk.length;
+                dedupeBatchExec.value.deleted = trashed.length;
+                dedupeBatchExec.value.deletedPaths = trashed.slice(); // ♻️ 撤销依据（本次成功移入回收站的路径）
+                dedupeBatchExec.value.failed = failedList.slice();
+                await new Promise((r) => setTimeout(r, 0)); // 让出主线程：进度条可刷新、可中止
+            }
+        } catch (e) {
+            // 兜底：循环里任何未预期异常都要留痕，但不阻断收尾
+            failedList.push({ path: '', groupName: '', cardName: '', error: `执行异常：${(e && e.message) || e}` });
+            if (typeof addLog === 'function') addLog(`❌ 批量清理异常：${(e && e.message) || e}`, 'error');
+        } finally {
+            // 🛡️ 生死线：无论成功 / 异常 / 中止都必须解锁 running
+            //    （旧实现只在正常路径置 false —— 一旦抛错，「预演」按钮就永久变灰，四个窗口一起瘫）
+            dedupeBatchExec.value.failed = failedList.slice(); // 兜底：异常分支的失败项也要可见
+            dedupeBatchExec.value.running = false;
+            dedupeBatchExec.value.finishedAt = Date.now();
+        }
+
+        await applyTrashedPaths(kind, trashed, new Set(failedList.map((f) => f.path)));
+        pruneGroupsAfterTrash(kind, new Set(trashed));
+        dedupeBatchPlan.value = plan.deletions.length === trashed.length ? null : previewDedupeBatch(kind, opts);
+
+        const summary = `🧹 批量清理${dedupeBatchExec.value.aborted ? '已中止' : '完成'}：移入回收站 ${trashed.length} 个`
+            + (failedList.length ? `，失败 ${failedList.length} 个（可「重试失败项」）` : '，无失败')
+            + (dedupeBatchExec.value.aborted ? '（剩余未执行的仍在预演清单里）' : '');
+        if (typeof addLog === 'function') addLog(summary, failedList.length ? 'warning' : 'info');
+        if (typeof showToast === 'function') showToast(summary, failedList.length ? 'warning' : 'success', 5000);
+        if (!quiet && typeof nativeAlert === 'function') {
+            const reasonTop = {};
+            for (const f of failedList) {
+                const key = /占用|EBUSY|EPERM/i.test(f.error) ? '文件被占用' : (f.error || '未知错误');
+                reasonTop[key] = (reasonTop[key] || 0) + 1;
+            }
+            const detail = Object.entries(reasonTop).map(([k, v]) => `  · ${k}：${v} 个`).join('\n');
+            const missingCount = failedList.filter((f) => isMissingError(f.error)).length;
+            nativeAlert(
+                summary + (detail ? `\n\n失败原因分布：\n${detail}` : '')
+                + (missingCount ? `\n\n其中 ${missingCount} 个在磁盘上已不存在（失效条目）—— 可在工具条里点「🧹 移除失效条目」只清理列表。` : '')
+                + trashHints(failedList),
+                failedList.length ? 'warning' : 'info'
+            );
+        }
+        return dedupeBatchExec.value;
+    };
+
+    /**
+     * ♻️ P5：撤销「本次批量清理」（把这一批移入回收站的文件按原路径还原）
+     * · 只还原**本次批量**实际删掉的那些（`dedupeBatchExec.deletedPaths`），不影响历史批次；
+     * · 还原后自动重扫对应库，列表/分组与磁盘重新一致。
+     */
+    const undoDedupeBatch = async (kind = 'card') => {
+        const paths = Array.isArray(dedupeBatchExec.value.deletedPaths) ? dedupeBatchExec.value.deletedPaths.slice() : [];
+        if (!paths.length) {
+            if (typeof nativeAlert === 'function') nativeAlert('没有可撤销的记录（本次批量没有成功移入回收站的文件）。', 'info');
+            return null;
+        }
+        const api = window.electronAPI;
+        if (!api || typeof api.restoreFromTrash !== 'function') {
+            if (typeof nativeAlert === 'function') nativeAlert('❌ 撤销接口不可用（preload 未提供 restoreFromTrash）。', 'error');
+            return null;
+        }
+        if (typeof confirmDialog === 'function') {
+            const ok = await confirmDialog(`将把本次移入回收站的 ${paths.length} 个文件**还原回原位**。\n（原位置已有同名文件时会另存为 _restored_<时间戳>，绝不覆盖）\n\n是否继续？`);
+            if (!ok) return null;
+        }
+        // 🔁 分批还原：1000 个文件一次性 IPC 会超时误报（且主进程仍在还原 → 二次撤销互撞）
+        const restored = [];
+        const failed = [];
+        for (const chunk of chunkList(paths, BATCH_CHUNK)) {
+            const res = await withTimeout(
+                api.restoreFromTrash(chunk),
+                BATCH_TIMEOUT_MS,
+                () => ({ success: false, restored: [], failed: chunk.map((p) => ({ path: p, error: '撤销超时（未响应）' })), blocked: [] })
+            );
+            for (const r of ((res && res.restored) || [])) restored.push(r);
+            for (const f of ((res && res.failed) || [])) failed.push(f);
+        }
+        if (restored.length) {
+            dedupeBatchExec.value.deletedPaths = paths.filter((p) => !restored.some((r) => r.original === p));
+            dedupeBatchExec.value.deleted = Math.max(0, (dedupeBatchExec.value.deleted || 0) - restored.length);
+            dedupeBatchPlan.value = null; // 原计划已失效，避免"撤销后还显示要删"
+            // 还原后尽量刷新列表，让「列表 ↔ 磁盘」重新一致
+            const mode = appMode && appMode.value;
+            const realKind = kind === 'content'
+                ? (mode === 'worldbooks' ? 'wb' : mode === 'presets' ? 'preset' : 'card')
+                : kind;
+            try {
+                if (realKind === 'card' && typeof refreshLibrary === 'function') await refreshLibrary();
+                else if (realKind === 'wb' && typeof rescanWorldbooks === 'function') await rescanWorldbooks();
+                else if (realKind === 'preset' && typeof addLog === 'function') {
+                    addLog('♻️ 已还原预设文件；预设列表需「重扫/重新打开目录」后刷新', 'info');
+                }
+            } catch (e) { /* 重扫失败不影响撤销结论 */ }
+        }
+        const renamed = restored.filter((r) => r.renamed).length;
+        const summary = `♻️ 撤销完成：还原 ${restored.length} 个`
+            + (renamed ? `（其中 ${renamed} 个因原位已存在另存为 _restored_*）` : '')
+            + (failed.length ? `，失败 ${failed.length} 个` : '');
+        if (typeof addLog === 'function') addLog(summary, failed.length ? 'warning' : 'info');
+        if (typeof showToast === 'function') showToast(summary, failed.length ? 'warning' : 'success', 5000);
+        if (failed.length && typeof nativeAlert === 'function') {
+            const lines = failed.slice(0, 8).map((f) => `  · ${String(f.path).split(/[\\/]/).pop()} —— ${f.error}`).join('\n');
+            nativeAlert(`${summary}\n\n未还原的文件：\n${lines}` + (failed.length > 8 ? `\n  …还有 ${failed.length - 8} 个` : ''), 'warning');
+        }
+        return { restored, failed };
+    };
+
+    /** 移除批量清单里「文件不存在」的失效条目（只动列表，不动磁盘 —— DF-33） */    const purgeDedupeBatchMissing = async (kind = 'card') => {
+        const failed = dedupeBatchExec.value.failed || [];
+        const missing = failed.filter((f) => f && f.path && isMissingError(f.error));
+        if (!missing.length) {
+            if (typeof showToast === 'function') showToast('没有「文件不存在」的失效条目可移除', 'info', 3000);
+            return 0;
+        }
+        if (typeof confirmDialog === 'function') {
+            const ok = await confirmDialog(
+                `将从**列表**中移除 ${missing.length} 个磁盘上已不存在的条目（不动磁盘文件）。是否继续？`
+            );
+            if (!ok) return 0;
+        }
+        const n = await removeGhostEntries(kind, missing.map((f) => f.path));
+        dedupeBatchExec.value.failed = failed.filter((f) => !isMissingError(f.error));
+        if (typeof showToast === 'function') showToast(`✅ 已移除 ${n} 个失效条目（磁盘未改动）`, 'success', 4000);
+        return n;
+    };
+
+    /** 中止批量清理（已完成的不回退；剩余项保留在预演清单里；2 秒后强制复位，防状态卡死） */
+    const abortDedupeBatch = () => {
+        if (!dedupeBatchExec.value.running) return;
+        batchAbort = true;
+        if (typeof showToast === 'function') showToast('正在中止…（已完成的不回退）', 'info', 2000);
+        setTimeout(() => {
+            if (!dedupeBatchExec.value.running) return;
+            // 兜底复位：IPC 无响应时也必须把 UI 解锁（否则「预演」永久变灰）
+            dedupeBatchExec.value.running = false;
+            dedupeBatchExec.value.aborted = true;
+            dedupeBatchExec.value.finishedAt = Date.now();
+            if (typeof showToast === 'function') showToast('⏹ 已强制中止（状态已复位，可重新预演）', 'warning', 4000);
+            if (typeof addLog === 'function') addLog('⏹ 批量清理已强制中止（状态复位）', 'warning');
+        }, 2000);
+    };
+
+    /** 重试失败项（仅重跑这批路径，不重新生成计划） */
+    const retryDedupeBatchFailures = async (kind = 'card') => {
+        const failed = (dedupeBatchExec.value.failed || []).filter((f) => f && f.path);
+        if (!failed.length || dedupeBatchExec.value.running) return null;
+        const api = window.electronAPI;
+        if (!api || typeof api.trashFiles !== 'function') return null;
+        const res = await api.trashFiles(failed.map((f) => f.path));
+        const stillFailed = new Set(((res && res.failed) || []).map((f) => f && f.path).filter(Boolean));
+        const okPaths = failed.map((f) => f.path).filter((p) => !stillFailed.has(p));
+        if (okPaths.length) {
+            await applyTrashedPaths(kind, okPaths, stillFailed);
+            pruneGroupsAfterTrash(kind, new Set(okPaths));
+        }
+        dedupeBatchExec.value.failed = failed.filter((f) => stillFailed.has(f.path));
+        dedupeBatchExec.value.deleted = (dedupeBatchExec.value.deleted || 0) + okPaths.length;
+        const msg = `重试完成：成功 ${okPaths.length} 个` + (stillFailed.size ? `，仍失败 ${stillFailed.size} 个` : '');
+        if (typeof showToast === 'function') showToast(msg, stillFailed.size ? 'warning' : 'success', 4000);
+        if (typeof addLog === 'function') addLog(`🧹 查重批量·${msg}`, stillFailed.size ? 'warning' : 'info');
+        return { ok: okPaths.length, failed: dedupeBatchExec.value.failed };
+    };
 
     // ── 差异窗口（v4 §10.3）：三分支深度比对 + 懒加载/瘦身正文按需读回 ──
     //   🔑 同步入口（模板 @open-diff 直接调用）：
@@ -551,6 +992,10 @@ export function useDedupe({
         showPresetDedupeModal, presetDuplicateGroups, startPresetDedupeScan, resolvePresetDedupeGroup,
         showContentDedupeModal, contentDuplicateGroups, startContentDedupeScan, resolveContentDedupeGroup,
         startSmartDedupe,
+        // 🧹 批量清理（预演 / 执行 / 中止 / 重试失败项）
+        dedupeBatchPlan, dedupeBatchExec, previewDedupeBatch, executeDedupeBatch,
+        abortDedupeBatch, retryDedupeBatchFailures, purgeDedupeBatchMissing, removeGhostEntries,
+        undoDedupeBatch,
         dedupeScanning, dedupeScanLabel, dedupeScanPercent, dedupeScanIndeterminate,
         dedupeScanDone, dedupeScanTotal,
         showDiffDetailModal, diffMasterItem, diffCompareItem, diffFieldResults, openDiffDetailModal

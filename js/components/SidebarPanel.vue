@@ -519,6 +519,10 @@
                             📂 打开世界书目录
                             <input type="file" webkitdirectory directory multiple class="hidden" @change="handleWorldbookFolderSelect">
                         </label>
+                        <button @click="refreshWorldbooks" title="重新扇描当前世界书目录（读取新放入的世界书）"
+                                class="h-7 w-7 shrink-0 flex items-center justify-center bg-zinc-800 hover:bg-zinc-700 text-zinc-400 hover:text-zinc-200 text-[11px] rounded-lg border border-zinc-700/60 transition shadow-sm">
+                            🔄
+                        </button>
                         <button @click="syncWorldbooksToDisk" title="将仍停留在内存中（无本地文件）的世界书统一落盘保存到世界书目录"
                                 class="h-7 px-3 bg-zinc-800 hover:bg-emerald-600 text-zinc-200 hover:text-white text-[11px] rounded-lg border border-zinc-700/60 transition shadow-sm shrink-0">
                             💾 落盘
@@ -699,6 +703,10 @@
                     <button @click="loadPresets" class="flex-1 h-7 flex items-center justify-center gap-1.5 px-2.5 bg-zinc-800 hover:bg-sky-600 text-zinc-200 text-[11px] rounded-lg border border-zinc-700/60 transition">
                         📂 打开预设目录
                     </button>
+                    <button @click="refreshPresets" title="重新扇描当前预设目录（读取新放入的 .json 预设，不用重新选路径）"
+                            class="h-7 w-7 shrink-0 flex items-center justify-center bg-zinc-800 hover:bg-zinc-700 text-zinc-400 hover:text-zinc-200 text-[11px] rounded-lg border border-zinc-700/60 transition">
+                        🔄
+                    </button>
                     <button @click="exportPresetsBatch" title="批量导出预设"
                             class="h-7 px-2.5 bg-zinc-800 hover:bg-blue-600 text-zinc-200 text-[11px] rounded-lg border border-zinc-700/60 transition">
                         📦 导出
@@ -759,6 +767,10 @@
                 <div class="flex items-center gap-1.5">
                     <button @click="loadPlugins" class="flex-1 h-7 flex items-center justify-center gap-1.5 px-2.5 bg-zinc-800 hover:bg-violet-600 text-zinc-200 text-[11px] rounded-lg border border-zinc-700/60 transition">
                         📂 打开插件目录
+                    </button>
+                    <button @click="refreshPlugins" title="重新扇描当前插件目录（读取新放入的插件，不用重新选路径）"
+                            class="h-7 w-7 shrink-0 flex items-center justify-center bg-zinc-800 hover:bg-zinc-700 text-zinc-400 hover:text-zinc-200 text-[11px] rounded-lg border border-zinc-700/60 transition">
+                        🔄
                     </button>
                     <!-- 🔗 链接安装（对齐酒馆「扩展 → 安装扩展」填仓库地址的做法） -->
                     <button @click="installPluginFromUrlFlow"
@@ -1327,6 +1339,7 @@ export default {
             presetSortBy: ctx.presetSortBy,
             filteredPresets: ctx.filteredPresets,
             loadPresets: ctx.loadPresets,
+            refreshPresets: ctx.refreshPresets,
             exportPresetsBatch: ctx.exportPresetsBatch,
             renamePreset: ctx.renamePreset,
             duplicatePreset: ctx.duplicatePreset,
@@ -1339,6 +1352,7 @@ export default {
             pluginSearchQuery: ctx.pluginSearchQuery,
             filteredPlugins: ctx.filteredPlugins,
             loadPlugins: ctx.loadPlugins,
+            refreshPlugins: ctx.refreshPlugins,
             pluginInstalling: ctx.pluginInstalling,
             installPluginFromUrlFlow: ctx.installPluginFromUrlFlow,
             deletePlugin: ctx.deletePlugin,
@@ -1438,6 +1452,7 @@ export default {
             batchExportSelected: ctx.batchExportSelected,
             handleWorldbookFolderSelect: ctx.handleWorldbookFolderSelect,
             syncWorldbooksToDisk: ctx.syncWorldbooksToDisk,
+            refreshWorldbooks: ctx.refreshWorldbooks,
             currentWbCategory: ctx.currentWbCategory,
             wbCategories: ctx.wbCategories,
             // 🏷️ A2（2026-09-24）：世界书标签 —— 渲染 + 切换 + 分组生命周期

@@ -23,7 +23,7 @@
 | `RL` | 发布 / 打包 / 更新 / OTA | [BUG-发布更新与打包.md](BUG-发布更新与打包.md) |
 | `CT` | 测卡工作区（对话测试） | [BUG-测卡工作区.md](BUG-测卡工作区.md)（27 条） |
 
-> **合计 196 条**（**AR 74** ｜ **DF 29** ｜ **AI 20** ｜ **PK 34** ｜ RL 13 ｜ **CT 27**）
+> **合计 209 条**（**AR 81** ｜ **DF 33** ｜ **AI 22** ｜ **PK 34** ｜ RL 13 ｜ **CT 26**）
 
 **等级**：🔴 严重（崩溃/数据丢失/功能不可用） ｜ 🟡 中（功能异常但有绕法） ｜ 🟢 轻（体验/精度/日志）
 **状态**：✅ 已修复 ｜ ⚠️ 已缓解未根除 ｜ ⬜ 未处理 ｜ 📌 设计如此 ｜ 🧩 非 BUG（缺口/取舍）
@@ -32,7 +32,7 @@
 
 ## 二、总表
 
-### AR · 架构 / 渲染 / 测试调试（74 条）
+### AR · 架构 / 渲染 / 测试调试（81 条）
 
 | ID | 等级 | 缺陷 | 版本 | 状态 |
 | --- | --- | --- | --- | --- |
@@ -113,7 +113,11 @@
 | AR-75 | 🔴 | **拖拽导入不区分文件类型 → 世界书/预设被当成角色卡，且两头都落空**（用户实测「拖动导入世界书是角色卡，拖动导入预设也是角色卡；拖动导入后预设库没有、角色卡库也没有」）。根因：`useCardCrud.handleDrop` 拿到文件后**不做任何内容判定**，直接 `file:copyToLibrary` 把文件**复制进卡库目录**，再走 `parseAndAddCard`；而后者内部的 `isCharacterCardData` 会拒绝非角色卡 ⇒ 文件已躺在卡库目录却**没入库**（用户看到的「是角色卡」＝卡库里多了个解析不了的垃圾文件），同时世界书库/预设库**毫无变化**（用户看到的「没有」）。修：① 新增 `js/utils/dropRouter.js`（纯函数：`isCardLike` / `looksLikeWorldbook` / `looksLikePreset` / `classifyDroppedJson` / `planDrop`），拖入时**先读 JSON 内容判类型**；② 世界书 → `importDroppedWorldbooks`、预设 → `importDroppedPresets`，分别落到 `lastWorldbookDirPath` / `lastPresetDirPath` 并重扫该目录；③ 新增主进程 `file:importJsonToDir`（目标目录必须已授权、**重名自动加 `(2)`/`(3)` 绝不覆盖**、优先复制原文件字节保证一字不改）；④ 认不出的仍走角色卡流程（保持旧行为）。⚠️ 判定陷阱：角色卡内嵌 `character_book.entries` **不得**被判为独立世界书；V2 卡若带 `data.temperature`+`max_context` **不得**被判为预设（两处均有单测钉住）。⚠️ 纪律：**拖拽导入必须先判内容类型再决定收进哪个库，绝不能先复制再指望解析层拒绝** || AR-76 | 🔴 | **弹窗点「关闭」没反应，遮罩永久挡住全屏 → 之后点什么都没反应**（用户实测「怎么点击没任何反应是不是没有绑定按钮」）。现象：`StInstallModal` 打开后点 ✕ 关闭，DOM 里弹窗还在，`elementFromPoint` 处处命中遮罩，整个界面被吞掉所有点击；软件**一启动就处于这个状态**（`overlay` 初始计数即为 1）。排查过程：绑定链完全正常（`@click="close"` → `close()` → `emit('close')` → `App.vue @close="showStInstallModal=false"`），`busy=false`、按钮 `disabled=false`、无 JS 报错，注入 `console.log` 确认 `close()` **确实执行**且 `emit` 已发出 —— 但 `v-if` 为 false 后节点不消失。根因：外层 `<transition name="fade">`（**系统性根因与全局修复见 AR-78**，此处只记个案表现）。全局 `css/style.css` 里 `.fade-leave-from { opacity: 0 }` 与 `.fade-leave-active { transition: opacity .4s }` **同时**被应用，起始态与终态都是 opacity:0 ⇒ 属性无变化、浏览器**不触发 `transitionend`**，Vue 的 leave 钩子永远等不到结束回调，节点卡在 `fade-leave-from fade-leave-active` 阶段不卸载（实测 class 快照可证）。修：`StInstallModal.vue` **移除 `<transition>` 包裹**（弹窗不需要淡出），并在模板顶部写明原因防止后人加回。⚠️ 教训：**诊断「点了没反应」不要只查绑定，要 dump 出问题节点的 `className` —— 停在 `*-leave-*` 就是过渡钩子没收敛，不是事件没触发**。⚠️ 复查项：项目内另有 29 处 `<transition name="fade">`（`AiTagLogModal` / `ApiSettingsModal` / `PromptModal` 等），它们目前能正常开关，但**新增弹窗时应优先不加过渡**，或确保 `fade` 的 `leave-from`/`leave-to` 不要同时为同一目标值 |
 | AR-77 | 🔴 | **弹窗里点「选择目录…」没反应，原生目录对话框根本不弹**（用户实测「弹窗里的选择路径也是有问题的」）。根因：`App.vue` 的 `setup()` 末尾是 `return ctx;` —— **模板能访问的一切都必须先放进 `ctx` 对象**。`showStInstallModal` / `openStInstallModal` 放进去了（所以弹窗能开），但 `selectGenericFolderForSt` / `stNotify` 虽在 L3979/L3983 定义、**却漏了没进 `ctx`** ⇒ 模板里 `:select-folder="selectGenericFolderForSt"` 解析为 `undefined` ⇒ `StInstallModal.pickDir()` 首行 `if (!props.selectFolder) return;` **静默返回**，连日志都没有。同一个遗漏还让 `:notify="stNotify"` 失效，于是弹窗内所有 toast 也全军覆没（加重了「什么都没反应」的观感）。修：① 把两个回调补进 `ctx`；② `pickDir` **不再静默 return** —— 缺 props 时 `toast` + `pushLog` 留痕，防止同类问题再次无声无息；③ 同步给 `dialog:selectGenericFolder` 补上**父窗口**（`dialog.showOpenDialog(win, opts)`）并加 `createDirectory`，避免对话框跑到主窗口背后、以及无法新建安装目录。④ 新增 `test/appCtxExposure.test.mjs`（4 例）扫「模板引用的标识符是否都在 ctx 里」，227 个绑定零误报，并做了反向验证（撤掉修复后能精确报出两个缺失名）。⚠️ 教训：**`return ctx` 架构下「定义了 ≠ 模板能用」，函数型回调尤其容易漏**（`ctx_exposure.py` 只扫 `ref/computed/reactive`，扫不到箭头函数，所以没拦住）。⚠️ 验证手法：`dialog.showOpenDialog` 会阻塞 IPC，可在页面里 `await` 该 IPC 并做 2.5 秒超时探测 —— **Promise 一直 pending 就证明对话框真的弹出了**（不要靠「窗口列表里有没有」判断，模态子窗口可能不单列） |
 | AR-78 | 🔴 | **全局 `fade` 过渡偶发不收敛 → 隐形遮罩吞掉所有点击（系统性，影响 30 处弹窗）**。现象：连续开关若干弹窗后，界面上看不出任何异常，但**点哪都没反应**。用 CDP 抓 DOM 才看到：多个 `div.fixed.inset-0` 残留在 DOM 里，`opacity: 0`（用户看不见）却 `pointer-events: auto`（照样吃点击），`document.elementFromPoint(100,700)` 命中的正是其中一个 `z-[110]` 遮罩。实测连续开关「命令面板 → 整库冷备 → 一键质检」能叠出 **3 层隐形遮罩**。根因：`css/style.css` 用 `transition: opacity .4s` 实现淡出，**`transitionend` 在部分场景下不触发**（元素 opacity 已归 0、视觉上动画跑完了，但 Vue 的离场钩子等不到结束回调），节点就永久留在 DOM 里。触发条件与节奏/并发相关（慢速单个操作往往正常，快速连续开关时命中率高），所以长期没被发现。修：① `css/style.css` 里 `fade` / `slide-up` / `toast` 三组过渡**全部改用 CSS `animation`** —— animation 由时间驱动，`animationend` 必定触发，不依赖「属性是否真的变化」；② 所有 `*-leave-active` 统一加 **`pointer-events: none`** 作为**兜底** —— 就算将来又以别的方式残留，也绝不吞掉点击。验证：修复前 6 个弹窗只有 2 个能干净关闭，修复后 **6/6 全绿**；另在页面注入一个 `fade-leave-active` 探针层，实测 `pointer-events: none` + `elementFromPoint` 穿透。⚠️ 教训：**「界面点不动但看不出异常」优先怀疑隐形遮罩残留**，用 `getComputedStyle` 看 `opacity` 与 `pointer-events` 的组合，别只看 `display`。⚠️ 检查方法：`[...document.querySelectorAll('div')].filter(d=>/fixed/.test(d.className)&&/inset-0/.test(d.className))` 数残留层数、看有没有 `-leave-` class。⚠️ 注：29 处 `<transition name="fade">` 是共用同一套全局样式的，改这一处 CSS 即可全覆盖，无需逐个组件改 |
-### DF · 数据 / 文件 / 字段口径（29 条）
+| AR-82 | 🔴 | **回收站目标名可能撞名并互相覆盖**（自审发现，数据丢失隐患）：`sys:trashFiles` 目标名 `${Date.now()}_${seq++}_${basename}` 的 `seq` **每次调用从 0 起**，两次同毫秒调用会算出同名；Windows `rename` 会覆盖同名目标 ⇒ 回收站内两份内容互覆、清单指向错文件（撤销还原错内容）。✅ 修：时间戳 + 随机段 + 存在即递增（绝不撞名） | v2.5.1 | ✅ |
+| AR-81 | 🟡 | **重扫后仍能执行旧的批量清理计划**（自审发现）：预览生成 `dedupeBatchPlan` 后若重新扫描（组结构与「推荐版」已变），旧计划仍在，「清理选中」会按旧推荐删文件。✅ 修：任何查重扫描开始即清空批量计划；撤销后同样置空 | v2.5.1 | ✅ |
+| AR-80 | 🔴 | **查重批量清理「预演」按钮永久变灰**（用户实测：四个查重窗口全灰）：`exec.running` 唯一复位点在执行循环**正常结束之后**；一旦 `trashFiles` 抛错/抛异常/永不 resolve，`running` 永远停在 `true` ⇒ 所有窗口的「预演」按钮一起点不了。✅ 修：执行体 `try/finally` 强制复位 + 单批 30s 超时 + 中止 2s 后强制解锁 + 「预演」本身不再受 `running` 限制（只读操作随时可点） | v2.5.1 | ✅ |
+| AR-79 | 🔴 | **预设库 / 插件库右击，弹出的是角色卡菜单（系统性错位）**（用户实测截图反馈「预设库右击弹出的菜单有的按钮命令出现问题，还有的按钮不应该出现在预设库中」）。现象：在预设库右击任一预设，弹出的全是角色卡专属项——查看/编辑卡片、创建卡片物理副本、**移动到指定分组**、历史快照、**换卡图**、导出单张卡片 PNG、推送到当前目标、单卡快捷 AI 打标、移入安全回收站；点下去要么报错要么毫无反应；菜单头部还写着「未知角色」。根因（**两层叠加**）：① `ContextMenu.vue` 把角色卡那 11 个按钮**写死在模板里**，只用 `$emit` 冒事件，**从不读 `item.items`** —— 于是 `usePresets.js` / `usePlugins.js` 精心准备的 items 一直是**死代码，从未被渲染**；② 这两个 composable 把菜单项挂在 `contextMenu.value.items`（**顶层**）而不是 `contextMenu.value.item.items`，且**完全没设 `item` 字段** ⇒ 组件里 `item?.name || '未知角色'` 必然 fallback。修：① `ContextMenu.vue` 新增 `hasCustomItems` 计算属性（`Array.isArray(this.item.items) && length > 0`），模板分两模式——**动态模式**逐条渲染 `item.items`（支持 `type:'separator'`、`danger` 红字样式、`action` 回调），**默认模式**保留原角色卡 11 项，历史行为零改动；② 新增 `close` emit + `runItem()`，动态项执行后自动收起菜单（否则 action 再开弹窗时菜单会叠在上面）；③ `usePresets` / `usePlugins` 改为 `contextMenu.value.item = { name, path, items:[...] }`；④ `App.vue` 的 `<context-menu>` 补 `@close="closeContextMenu()"`。验证：**CDP 真实界面操作**（切预设模式 → 派发 contextmenu → 读菜单 DOM）——菜单只有 4 项（✏️ 重命名 / 📋 复制副本 / 📂 在资源管理器中定位 / 🗑️ 删除），7 个角色卡专属项**全部消失**，头部显示真实文件名而非「未知角色」；另加 `test/contextMenuDynamic.test.mjs` **5 条单测**锁死契约（必须基于 `item.items` 判断、预设/插件菜单禁止出现角色卡动作、App.vue 必须绑 `@close`）。⚠️ 教训：**多个模块共用同一份浮层状态对象时，光「写进去」不算数——必须确认渲染组件真的消费了你写的字段**（同 AR-13 / AR-77 的「定义了 ≠ 能用」家族）。⚠️ 排查手法：右键点了不对，先看菜单 DOM 的按钮文本是不是**目标域**该有的，再看渲染组件的 props 契约。 |
+### DF · 数据 / 文件 / 字段口径（33 条）
 
 | ID | 等级 | 缺陷 | 版本 | 状态 |
 | --- | --- | --- | --- | --- |
@@ -145,9 +149,13 @@
 | DF-26 | 🟡 | **世界书分组缺用户输入碰撞防护 → 建同名分组会让筛选静默失效**：用户建一个名叫 **「全部」** 的分组把书移进去后，点「🌍 全部」看不出区别、点那个自定义分组也筛不出东西，**全程无提示**。根因：`'全部'` 是**视图哨兵**（表示"不按分组过滤"），而筛选是 `if (currentWbCategory.value !== '全部')` ⇒ 用户建的同名分组**永远进不了过滤分支**（哨兵值与用户输入命名空间冲突；规格原方案用 `__` 前缀**拦不住存量中文名**）。✅ 修（A2 落地，`RFC-20260921-WB-TAGS-02`）：新增 `js/utils/wbGroupsTags.js` 纯函数层，`validateWbCategoryName()` 做碰撞防护（**「全部」拦下 + 给原因**；「默认」放行=移出分组；重名拦下；空名拦下），接线 `changeWbCategory` / `renameWbGroup`，且 `wbCategories` **剔除「全部」**。同批落地：**世界书标签**（存配置层 `wbTagMap`）+ **复合过滤**（分组+标签 **AND**，抽为纯函数 `matchWbFilter`）+ **分组生命周期显式入口**（`renameWbGroup` / `deleteWbGroup` —— 级联逻辑早已存在，缺的只是入口）。📌 **三个已拍板决策**：① 元数据**只留配置文件**（不动用户文件、不产快照）② **保持中文哨兵** + 补碰撞防护 ③ **角色卡随卡片走 / 独立世界书留系统配置**（两套口径刻意并存）。⚠️ **原方案 ①②③ 项决策后全部不需要**（不写文件 ⇒ 无新 IPC、无快照、无第三方格式风险），④ 原方案**改错了模块**（世界书检索在 `useWorldbooks.filteredWorldbooks`，`useSearch.js` 只服务角色卡）| v2.2.13 | ✅ |
 | DF-27 | 🔴 | 查重清理：白名单外路径被回收站接口**静默跳过**（`continue` 不计 failed，返回 `{success:true, count:0}`）→ 调用方把「未处理」当「已删」⇒ **幽灵移除**（内存删了、磁盘还在，UI 还显示清理成功）。✅ 修：`sys:trashFiles` 对白名单外/不存在路径**显式入 `failed`**（绝不静默）；CDP 探针双用例（白名单内=入回收站+内存同步；白名单外=文件/内存双保留）作回归哨兵。**防再犯：「跳过」不是「成功」——批量接口任何 `continue` 必须进 `failed` 报告** | v2.2.13 | ✅ |
 | DF-28 | 🔴 | **预设扫描误杀（DF-18 残留）**：大文件（>512KB）「头部 64KB 预检」假设不成立——`extensions` 巨型对象在前的预设（`Izumi 0923` / `Izumi 1002` /【MoM】糖糖公司，实测 `"temperature"` 位于 **714.9KB / 853.0KB / 90.2KB**）被挤出 64KB 窗口 → **每次扫描都判「非预设」跳过**（用户报「预设库有预设被跳过」）。✅ **根治**：**彻底删除预检**（preset+wb 两处）改全量 parse（实测 116 文件/61.8MB 仅 504ms，首次后走缓存）——「采样判拒」模式从根移除。**防再犯（升级）：任何局部样本判拒一律删除而非兜底**。📊 **H:\01 全库复核救回 5 个唯一真预设**（A.U.T.O.×2 / 万象枢机 / 双人成行×2，缓存已验证转 `true`；跳过 13 条→4 条=剩真损坏）；**同类排查**：深度剪枝（实测 0 深层受害者）/ 各体积闸门（均不丢弃、仅降级或显式报错）逐项核过；**同批加固**：三处 parse 前清洗 BOM | v2.3.0 后 | ✅ |
+| DF-33 | 🟡 | **查重清理失败只说「未知错误」**（用户反馈截图）：`resolveGeneric` 对 `trashFiles` 的 `{success:false}` 只弹 `清理失败：${res.error \|\| '未知错误'}`，而 `success:false` **只表示「一个都没删成」**，真实原因在 `failed[]{path,error}`（文件不存在 / 被占用 / 路径越界）—— 三种原因被吞成同一句，用户既改不了也没法反馈。✅ 修：单组与批量都按分项原因展示 + 可操作提示；「文件不存在」类支持一键「移除失效条目」（只动列表不动磁盘） | v2.5.1 | ✅ |
+| DF-30 | 🔴 | **自动分组把「覆盖层残留的旧 `category`」当成物理分组**：判定用 `currentGroupOf(card)`（只读 `card.category`），而根目录卡的 `category` 来自覆盖层历史值（如 限制级 / Sci-Fi）⇒ 卡片实际躺在库根（未分类），却被判「已手动分组」**永久跳过**，用户连跑两遍都归不进任何文件夹。✅ 修：判定改用**物理位置**（`subFolder` 一级名，根目录恒「未分类」）。防再犯：**分组 = 磁盘位置，不是内存缓存** | v2.5.1 | ✅ |
+| DF-31 | 🟡 | **收纳规则的分组名未净化 ⇒ 规则名 ≠ 物理文件夹名**：`normalizeGroupProfiles` 只 `trim()`，规则存 `游戏/异世界`，主进程建文件夹把 `/` 换成 `_` ⇒ 磁盘 `游戏_异世界`、卡片徽标却显示 `游戏/异世界`；判「已在目标分组」永远不相等 ⇒ 反复进计划 / 规则在分组下拉里显示成不存在的组。✅ 修：落盘归一化时按 `sanitizeFolderName` 收敛（与主进程逐字一致） | v2.5.1 | ✅ |
+| DF-32 | 🟡 | **自动分组执行完新分组不进侧边栏**：`executeAutoGroup` 全程没把目标分组补进 `customCategories`（`quickMoveGroup` / 批量移动都有），新文件夹已落盘但侧栏看不到，要等重扫或重启才出现 —— 用户观感「执行不到位」 | v2.5.1 | ✅ |
 | DF-29 | 🔴 | **批量读正文守卫对「无 `dataLoaded` 字段」的对象静默空转**：`consumeWorldbookBodies` 判据 `dataLoaded === false`，而查重扫描快照**没有该字段**（undefined）⇒ 一次 `ensure` 都不调；`ensureWorldbookLoaded` 首行 `dataLoaded !== false` 同样早退 ⇒ 即使硬调也不载入；且守卫**不报错**（`done` 计满 / `failed` 空 / `data` 仍 null）⇒ 世界书合并误判「正文无法读取」（同一入口还用 `Array.isArray(data.entries)` 判可读，ST 字典形态亦被误杀）。✅ 修：守卫判据改**目标状态**（`path && !item.data`）+ 补 `dataLoaded`；合并入口改 `worldbookEntryList` 兼容两形态；查重入口先把快照映射回活对象。**防再犯：「没做过」必须和「做成了」区分开——判据写目标状态，跳过项必须进 `failed`/显式日志**。验证：真库只读预览 10/10 + 隔离副本（真实书副本）落盘演练 12/12 | v2.3.6 ③ | ✅ |
 
-### AI · AI 打标 / 本地向量 / 标签体系（20 条）
+### AI · AI 打标 / 本地向量 / 标签体系（22 条）
 
 | ID | 等级 | 缺陷 | 版本 | 状态 |
 | --- | --- | --- | --- | --- |
@@ -231,7 +239,7 @@
 | RL-12 | 🟡 | BOM-less `.ps1` 含中文字面量 → 乱码；`Start-Process` 两个重定向**不能同文件** | v2.2.7 | ✅ |
 | RL-13 | 🟡 | 打包/校验脚本里的中文参数与超长单行命令在终端被随机 `^C` | v2.2.7 | 📌 |
 
-### CT · 测卡工作区（27 条）
+### CT · 测卡工作区（26 条）
 
 | ID | 等级 | 缺陷 | 版本 | 状态 |
 | --- | --- | --- | --- | --- |

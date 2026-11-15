@@ -969,9 +969,191 @@ function createStManager({ sendProgress, getMainWindow }) {
         }
     };
 
+    /**
+     * 在酒馆根目录里找「原版启动脚本」。
+     *
+     * 存在的意义：用户实测对比后明确反馈「原版 bat 启动更好用」，要求两种方式都能选。
+     * 直接跑酒馆自带脚本，才能拿到**完全等同于双击**的行为：
+     * 它自己的 `npm install` 依赖检查、`NODE_ENV=production`、`pause` 保留窗口都在脚本里。
+     *
+     * @param {string} stRoot 酒馆根目录
+     * @returns {string} 脚本绝对路径；没有则空串
+     */
+    const findStartScript = (stRoot) => {
+        for (const name of ['Start.bat', 'start.bat', 'Start.cmd', 'start.cmd']) {
+            const p = path.join(stRoot, name);
+            try { if (fs.statSync(p).isFile()) return p; } catch (e) { /* 不存在，继续找 */ }
+        }
+        return '';
+    };
+
+    /**
+     * 按端口找到「正在监听」的进程 PID 及其命令行（只读，用于停止前核对身份）。
+     * @param {number} port
+     * @returns {Promise<{pid:number, cmd:string}>}
+     */
+    const findListenerByPort = (port) => new Promise((resolve) => {
+        if (process.platform !== 'win32') return resolve({ pid: 0, cmd: '' });
+        const { execFile } = require('child_process');
+        const ps = [
+            '-NoProfile', '-NonInteractive', '-Command',
+            `$c = Get-NetTCPConnection -LocalPort ${Number(port)} -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1; ` +
+            'if ($c) { $p = Get-CimInstance Win32_Process -Filter "ProcessId=$($c.OwningProcess)" -ErrorAction SilentlyContinue; ' +
+            'Write-Output ("{0}|{1}" -f $c.OwningProcess, $p.CommandLine) }',
+        ];
+        execFile('powershell', ps, { encoding: 'utf-8', windowsHide: true, timeout: 10000 }, (err, stdout) => {
+            if (err) return resolve({ pid: 0, cmd: '' });
+            const raw = String(stdout || '').trim();
+            const i = raw.indexOf('|');
+            if (i < 0) return resolve({ pid: 0, cmd: '' });
+            const pid = Number(raw.slice(0, i).trim()) || 0;
+            resolve({ pid, cmd: raw.slice(i + 1).trim() });
+        });
+    });
+
+    /**
+     * 结束「终端启动」的酒馆进程（我们手里没有它的 child 句柄，只能按端口定位）。
+     *
+     * 安全校验（必须有）：确认该 PID 的命令行含 `server.js` 才杀。
+     * 否则一旦端口被别的程序占用，会把无关进程误杀 —— 这类事故不可逆。
+     *
+     * @param {number} port
+     */
+    const killServerByPort = async (port) => {
+        const { pid, cmd } = await findListenerByPort(port);
+        if (!pid) {
+            return { success: true, alreadyStopped: true, note: `端口 ${port} 上没有监听进程` };
+        }
+        if (!/server\.js/i.test(cmd)) {
+            return {
+                success: false,
+                error: `端口 ${port} 被非酒馆程序占用（PID ${pid}），已拒绝结束。命令行：${cmd.slice(0, 120)}`,
+            };
+        }
+        try {
+            spawn('taskkill', ['/pid', String(pid), '/T', '/F'], { windowsHide: true });
+        } catch (e) {
+            return { success: false, error: e && e.message ? e.message : String(e) };
+        }
+        // 等端口真正释放（最多 10 秒）
+        for (let i = 0; i < 20; i++) {
+            await new Promise((r) => setTimeout(r, 500));
+            if (!(await isPortListening(port))) break;
+        }
+        const stillUp = await isPortListening(port);
+        return stillUp
+            ? { success: false, error: '已发送结束指令，但端口仍在监听，请稍后重试' }
+            : { success: true, killedPid: pid };
+    };
+
+    /**
+     * 🖥️ 终端窗口启动（原版体验）
+     * ─────────────────────────────────────────────────────────────
+     * 与 `startServer`（软件托管）的关键差别：
+     *   1. 日志直连控制台，**不经过本软件的 stdout 管道** ⇒ 无背压、可 Ctrl+C、可滚动翻历史；
+     *   2. `detached` 独立进程树 ⇒ **关掉本软件不影响酒馆**（软件托管的会被 taskkill /T 一并结束）；
+     *   3. 直接跑酒馆自带的 `Start.bat`（含它自己的 npm install / NODE_ENV / pause），
+     *      没有脚本时才回退 `node server.js --port N`。
+     *
+     * 代价：拿不到 child 句柄 ⇒ 停止改走「按端口定位 PID + 校验 server.js 后结束」。
+     *
+     * @param {object} p { dirPath, port }
+     */
+    const startServerConsole = async ({ dirPath, port } = {}) => {
+        try {
+            const stRoot = findStRoot(String(dirPath || '').trim());
+            if (!stRoot) return { success: false, error: '未找到酒馆目录' };
+
+            const usePort = Number(port) > 0 ? Number(port) : 8000;
+            const url = `http://localhost:${usePort}`;
+
+            // 已经在跑就直接复用，不再开第二个窗口（否则会出现「端口冲突」的假故障）
+            if (await isPortListening(usePort)) {
+                return { success: true, alreadyRunning: true, url, port: usePort, mode: 'console' };
+            }
+            if (await isPortBusy(usePort)) {
+                return {
+                    success: false,
+                    error: `端口 ${usePort} 已被占用，请换一个端口（可能是上次未正常关闭的酒馆，或其它程序）`,
+                    portBusy: true,
+                    port: usePort,
+                };
+            }
+
+            if (process.platform !== 'win32') {
+                return { success: false, error: '「终端启动」目前仅支持 Windows（其它系统请用软件启动）' };
+            }
+
+            const script = findStartScript(stRoot);
+            if (!script) {
+                const node = await detectNode();
+                if (node.level !== 'ok') return { success: false, error: node.message, needManualNode: true };
+            }
+
+            // `start` 是 cmd 内建命令，第一个参数是窗口标题（必须显式给空串，
+            // 否则带空格的路径会被当成标题，窗口一闪就没了）。
+            // shell:true 让 cmd 负责解析；stdio:'ignore' 确保不继承我们的管道；detached 让新窗口独立存活。
+            // ⚠️ 端口参数用 `--port`：Start.bat 是 `node server.js %*` 透传，SillyTavern 只认 `--port`，
+            //    写成 `/port` 会被它当成未知参数忽略，结果仍然起在默认端口上。
+            const cmdLine = script
+                ? `start "" "${script}"${usePort !== 8000 ? ` --port ${usePort}` : ''}`
+                : `start "" node server.js --port ${usePort}`;
+            log(`正在终端窗口中启动酒馆（端口 ${usePort}）… ${script ? '脚本：' + path.basename(script) : '（无启动脚本，回退 node server.js）'}`);
+
+            const child = spawn(cmdLine, {
+                cwd: stRoot,
+                shell: true,
+                detached: true,
+                stdio: 'ignore',
+                windowsHide: false,
+                env: { ...process.env },
+            });
+            child.unref();
+
+            let spawnErr = '';
+            child.on('error', (e) => { spawnErr = e && e.message ? e.message : String(e); });
+
+            // 等端口起来（Start.bat 里可能先跑 npm install，给足时间）
+            const WAIT_MS = 180000;
+            const startedAt = Date.now();
+            let lastReport = 0;
+            while (Date.now() - startedAt < WAIT_MS) {
+                if (spawnErr) return { success: false, error: '无法打开终端窗口：' + spawnErr, mode: 'console' };
+                if (await isPortListening(usePort)) {
+                    return {
+                        success: true,
+                        url,
+                        port: usePort,
+                        mode: 'console',
+                        script: script ? path.basename(script) : '',
+                    };
+                }
+                const waited = Math.round((Date.now() - startedAt) / 1000);
+                if (waited - lastReport >= 10) {
+                    lastReport = waited;
+                    emit({ type: 'info', text: `等待终端里的酒馆就绪…（已 ${waited} 秒，首次会先跑依赖安装）`, ts: Date.now() });
+                }
+                await new Promise((r) => setTimeout(r, 600));
+            }
+            return {
+                success: false,
+                error: '终端已打开，但 180 秒内未监听端口，请查看该终端窗口里的报错信息',
+                mode: 'console',
+                script: script ? path.basename(script) : '',
+            };
+        } catch (err) {
+            return { success: false, error: err && err.message ? err.message : String(err), mode: 'console' };
+        }
+    };
+
     /** 停止酒馆 */
-    const stopServer = async () => {
-        if (!serverProc) return { success: true, alreadyStopped: true };
+    const stopServer = async ({ port } = {}) => {
+        if (!serverProc) {
+            // 没有托管进程 ⇒ 可能是「终端启动」或用户自己双击 bat 起的：按端口定位后结束
+            const p = Number(port) > 0 ? Number(port) : 8000;
+            if (!(await isPortListening(p))) return { success: true, alreadyStopped: true };
+            return await killServerByPort(p);
+        }
         const { child } = serverProc;
         try {
             if (process.platform === 'win32') {
@@ -1748,9 +1930,12 @@ function createStManager({ sendProgress, getMainWindow }) {
         isEmptyDir,
         validateInstallPath,
         startServer,
+        startServerConsole,
         stopServer,
         getServerStatus,
         isPortBusy,
+        findStartScript,
+        killServerByPort,
         update,
         backupData,
         inventory,

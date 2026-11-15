@@ -185,15 +185,20 @@ export function usePlugins({
     // =========================================================
 
     const openPluginContextMenu = (event, p) => {
+        // 同 usePresets：菜单项必须挂 item.items，ContextMenu 组件只认这个字段
         contextMenu.value = {
             visible: true,
             x: event.clientX,
             y: event.clientY,
-            items: [
-                { label: '📂 在资源管理器中定位', action: () => openPluginInFolder(p) },
-                { type: 'separator' },
-                { label: '🗑️ 删除（移入回收站）', action: () => deletePlugin(p), danger: true }
-            ]
+            item: {
+                name: p?.name || '未命名插件',
+                path: p?.source?.origin || p?.files?.[0] || '',
+                items: [
+                    { label: '📂 在资源管理器中定位', action: () => openPluginInFolder(p) },
+                    { type: 'separator' },
+                    { label: '🗑️ 删除（移入回收站）', action: () => deletePlugin(p), danger: true }
+                ]
+            }
         };
     };
 
@@ -289,12 +294,31 @@ export function usePlugins({
         if (lastPluginDirPath.value) await scanPluginDir(lastPluginDirPath.value);
     };
 
+    /**
+     * 🔄 刷新插件库（带用户反馈版）
+     *
+     * 与 `rescanPluginDir`（内部静默重扫）的区别：这里会在未选目录时明确提示，
+     * 并在日志里留下「刷新了什么」—— 用户用工具栏按钮触发时必须看得见反馈，
+     * 否则点了没反应会被当成无效按钮。
+     */
+    const refreshPlugins = async () => {
+        const dir = lastPluginDirPath.value;
+        if (!dir) {
+            nativeAlert('还没有选择过插件目录。\n请先点「📂 打开插件目录」选一次，之后就能用 🔄 一键刷新。', 'warning');
+            return { ok: false, error: '未设置插件目录' };
+        }
+        addLog(`🔄 刷新插件库：重新扫描 ${dir}`, 'info');
+        await scanPluginDir(dir);
+        return { ok: true };
+    };
+
     return {
         // 状态
         pluginSearchQuery,
         // 扫描
         loadPlugins,
         scanPluginDir,
+        refreshPlugins,
         normalizePlugins,
         // 🔗 链接安装
         pluginInstalling,

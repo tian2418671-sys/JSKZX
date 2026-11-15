@@ -571,6 +571,27 @@ export function useWorldbooks({
         }
     };
 
+    /**
+     * 🔄 刷新世界书库（工具栏按钮用）
+     *
+     * 用户要求：「在所有库中添加一个刷新按钮，如在角色卡库中的刷新按钮一样」。
+     * 底层复用 `rescanWorldbooks`（它原本只给差重流程用，会占 wbScanProgress）。
+     * 这层包装的价值：未选目录时给出**明确提示**，成功后在日志里报「刷新了几本」——
+     * 否则用户点完看不到任何变化，会当成「无效按钮」。
+     */
+    const refreshWorldbooks = async () => {
+        const dir = lastWorldbookDirPath && lastWorldbookDirPath.value;
+        if (!dir) {
+            nativeAlert('还没有选择过世界书目录。\n请先点「📂 打开世界书目录」选一次，之后就能用 🔄 一键刷新。', 'warning');
+            return { ok: false, error: '未设置世界书目录' };
+        }
+        addLog(`🔄 刷新世界书库：重新扫描 ${dir}`, 'info');
+        const r = await rescanWorldbooks(dir);
+        if (r.ok) addLog(`✅ 世界书刷新完成：共 ${r.count} 本`, 'success');
+        else nativeAlert('世界书刷新失败：' + (r.error || '未知错误'), 'error');
+        return r;
+    };
+
     // 拉取远程 JSON 文本：优先渲染层 fetch（Discord/GitHub 等允许 CORS 的直链），
     // 失败时回退主进程 net.fetch 转发（彻底绕开渲染层跨域限制）
     const fetchRemoteText = async (url) => {
@@ -1432,6 +1453,7 @@ export function useWorldbooks({
     return {
         importUrl, isImportingWb, wbContextMenu,
         loadWorldbooks, scanWorldbookDir, importWorldbookFromUrl, renameWorldbook,
+        refreshWorldbooks,
         handleWorldbookFolderSelect, deleteWorldbook, duplicateWorldbook,
         openWbContextMenu, closeWbContextMenu, openWbInFolder,
         wbCategories, changeWbCategory, filteredWorldbooks,

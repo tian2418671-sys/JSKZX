@@ -65,6 +65,17 @@ export function currentGroupOf(card) {
     return raw || AUTO_GROUP_ROOT_GROUP;
 }
 
+/**
+ * 卡片**物理**分组：库内子文件夹（`subFolder` 一级名）是唯一事实来源。
+ * 根目录卡一律「未分类」——根目录卡的 `category` 可能是覆盖层里的历史值，
+ * 拿它判定会把「实际在根目录的卡」当成已手动分组而永久跳过（DF-30）。
+ */
+export function physicalGroupOf(card) {
+    const raw = card && typeof card.subFolder === 'string' ? card.subFolder.trim() : '';
+    const first = raw ? (raw.split(/[\\/]/)[0] || '').trim() : '';
+    return first || AUTO_GROUP_ROOT_GROUP;
+}
+
 /** 路径归一化（Windows 分隔符 + 大小写；仅用于「是否在库目录内」的粗判定） */
 function normPath(p) {
     return String(p == null ? '' : p).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
@@ -108,7 +119,8 @@ export function normalizeGroupProfiles(raw) {
     const out = [];
     raw.forEach((item, idx) => {
         if (!item || typeof item !== 'object') return;
-        const group = typeof item.group === 'string' ? item.group.trim() : '';
+        // 目标分组名 = 物理文件夹名：必须与主进程净化规则逐字一致（DF-31）
+        const group = typeof item.group === 'string' ? sanitizeFolderName(item.group) : '';
         if (!group) return;
         const match = item.match && typeof item.match === 'object' ? item.match : {};
         const type = AUTO_GROUP_MATCH_TYPES.includes(match.type) ? match.type : 'tag';
@@ -300,7 +312,7 @@ export function buildAutoGroupPlan({ cards = [], profiles = [], options = {} } =
         if (!card || typeof card !== 'object') continue;
         const cardName = String(card.name || '(未命名卡片)');
         const cardId = card.id;
-        const currentGroup = currentGroupOf(card);
+        const currentGroup = physicalGroupOf(card);
 
         // 库外卡片：主进程会拒绝移动 → 预览阶段就必须说清楚（而不是执行时才报错）
         if (libraryPath && card.path && !isUnderPath(card.path, libraryPath)) {
@@ -399,13 +411,15 @@ export function resolveRollbackCard(cards, entry) {
     if (!name) return { status: 'missing' };
     const list = (Array.isArray(cards) ? cards : []).filter(c => c && String(c.name || '') === String(name));
     if (!list.length) return { status: 'missing' };
-    const toGroup = entry.toGroup || '';
-    const fromGroup = entry.fromGroup || AUTO_GROUP_ROOT_GROUP;
-    const inTarget = list.filter(c => currentGroupOf(c) === toGroup);
+    const toGroup = sanitizeFolderName(entry.toGroup || '');
+    const fromGroupRaw = entry.fromGroup || AUTO_GROUP_ROOT_GROUP;
+    const fromGroup = fromGroupRaw === AUTO_GROUP_ROOT_GROUP ? AUTO_GROUP_ROOT_GROUP : sanitizeFolderName(fromGroupRaw);
+    // 定位同样按**物理位置**（与计划同口径，DF-30）；日志里的旧名先净化再比（DF-31 兼容旧日志）
+    const inTarget = list.filter(c => physicalGroupOf(c) === toGroup);
     if (inTarget.length === 1) return { status: 'ok', card: inTarget[0] };
     if (inTarget.length > 1) return { status: 'ambiguous' };
     if (list.length === 1) {
-        const g = currentGroupOf(list[0]);
+        const g = physicalGroupOf(list[0]);
         if (g === fromGroup) return { status: 'already', card: list[0] };
         return { status: 'changed', card: list[0], actualGroup: g };
     }
@@ -471,7 +485,7 @@ export function draftProfilesFromTags(tagCounts, existingProfiles, opts = {}) {
     const existingKeys = new Set();
     for (const p of (Array.isArray(existingProfiles) ? existingProfiles : [])) {
         if (!p || typeof p !== 'object') continue;
-        const g = typeof p.group === 'string' ? p.group.trim() : '';
+        const g = typeof p.group === 'string' ? sanitizeFolderName(p.group) : '';
         const m = p.match && typeof p.match === 'object' ? p.match : {};
         const t = m.type || 'tag';
         const pat = typeof m.pattern === 'string' ? m.pattern.trim() : '';
@@ -493,11 +507,14 @@ export function draftProfilesFromTags(tagCounts, existingProfiles, opts = {}) {
         }
         // ② 卡数不足
         if (count < effectiveMinCards) { filtered.belowMinCards++; continue; }
-        // ③ 已有同档案
-        const key = `${label}\u0000tag\u0000${label.toLowerCase()}`;
+        // ③ 分组名 = 物理文件夹名（标签里的 `/` 等非法字符须净化，否则与真实文件夹对不上，DF-31）
+        const groupName = sanitizeFolderName(label);
+        if (!groupName) { filtered.emptyTag++; continue; }
+        // ④ 已有同档案
+        const key = `${groupName}\u0000tag\u0000${label.toLowerCase()}`;
         if (existingKeys.has(key)) { filtered.duplicate++; continue; }
 
-        candidates.push({ group: label, pattern: label.toLowerCase(), label, count });
+        candidates.push({ group: groupName, pattern: label.toLowerCase(), label, count });
     }
 
     // 按卡数降序；同数按名称（稳定，便于单测与 UI 可预期）
