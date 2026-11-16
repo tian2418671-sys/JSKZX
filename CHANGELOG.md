@@ -1,7 +1,57 @@
-# SillyTavern 资源管理器 · v1.0 → v2.5.0 更新汇总
+# SillyTavern 资源管理器 · v1.0 → v2.5.5 更新汇总
 
-> 更新周期：2026-08-09 ~ 2026-10-26
+> 更新周期：2026-08-09 ~ 2026-11-16
 > 技术栈：Electron + Vue3 + Tailwind + ECharts
+
+---
+
+## 🚀 v2.5.5 · 查重批量清理 + 自动分组修复 + 酒馆安装器硬化（2026-11-16）
+
+> 需求来源：①「一千多组重复文件一个一个删太累、还会报错」；②「自动分组和方案冲突，分组后文件名字没变」；
+> ③ 无依赖新机上「一键装酒馆」连环失败（体检崩溃 / 依赖 EINVAL / 没进度 / 取消锁死）；④「下载要能看到数值进度」「关掉软件后别从头再下」。
+
+### 🔁 查重引擎：批量清理与规则化勾选（P1~P5，四个查重窗口通用）
+
+- 新增 `js/utils/dedupeBatch.js`（判定纯函数）+ `test/dedupeBatch.test.mjs`(19)
+  - **保留策略 5 选 1**：最旧 / 最新 / 最大 / 最全（条目最多）/ 推荐（评分）
+  - **处理范围 3 档**：只处理 L0（完全重复）/ L0+相似 / 全部
+  - 跳过原因码（该组未勾选 / 无可删项 / 受保护 …）逐条可追溯
+- 新增 `js/components/DedupeBatchBar.vue`：四窗（角色卡 / 世界书 / 预设 / 内容）共用一条工具条
+  - 组选择行：☑ 全选 / ☐ 全不选 / ↔ 反选 / 已选 X/Y；✅ 只选 L0 / ⚠️ 只选相似 / ⚠️ 只选仅同名
+  - 「预演」只读、任何时候可点；「执行」按批处理（分批 + 单批 30s 超时 + 中止 2s 强制解锁）
+  - 失败清单可**逐条归因**（哪个文件、什么原因）→ 支持「重试失败项」「移除失效条目」
+- 新增 `main/trashManifest.js` + IPC `sys:trashFiles` / `sys:restoreFromTrash`
+  - 回收站清单记录「原路径 ↔ 回收站文件」，**支持「↩️ 撤销本次」整批还原**
+  - 回收站目标名改为「时间戳 + 随机段 + 存在即递增」，杜绝撞名互覆（AR-82）
+- 执行状态机：`exec.running` 一律 `try/finally` 复位；重扫即清空旧计划（AR-80 / AR-81）
+
+### 🗂️ 卡片自动分组修复（DF-30 / DF-31 / DF-32）
+
+- `physicalGroupOf()`：判定「已手动分组」读**磁盘 `subFolder`**，不再被覆盖层残留 `category` 误判（DF-30）
+- 规则名统一过 `sanitizeFolderName()`：`游戏/异世界` 与磁盘 `游戏_异世界` 视为同一组（DF-31）
+- 执行后把新分组补进 `customCategories`，侧边栏立即可见（DF-32）
+
+### 🛠️ 酒馆安装器：从「装不上 / 看不懂」到「装得上、看得清、能续传」
+
+| 缺陷 | 修复要点 |
+|---|---|
+| AR-83 体检 100% 报 `summarize is not defined` | 改调 `summarizeChecks`；`guard:scope` 默认扫描扩到 `main/`（118 → 134 文件） |
+| AR-84 依赖安装必失败（`spawn EINVAL`） | 新增 `main/spawnPlan.js`：`.cmd/.bat` 走安全包装，最终定为 `node.exe + npm-cli.js`（Windows CVE-2024-27980） |
+| AR-85 依赖安装无进度 / 取消没反应 | `runStreamed` 加心跳（每 5s「已用 N 秒｜已装 M 个包」）；UI 传 `activeTaskId`；取消统一翻译成 `-3` → 显示「已取消」 |
+| AR-86 取消后按钮全灰、弹窗关不掉 | 取消升级为「标记 + abort fetch + 杀子进程 + 阶段检查点」；`tar` 登记进 running；UI 加 `cancelling` 逃生口 |
+| AR-87 下载无任何数值进度 | 新增 `main/downloadProgress.js`；改流式写 `.part`，250ms 节流推「37% · 13.6 MB / 36.7 MB · 1.1 MB/s」 |
+| AR-88 体检「必须修复」看不懂 | 新增 `main/dirStatePlan.js` 区分 5 种目录状态（空目录=可以安装，不再报错）；体检不再早退；新增**问题详情弹窗** |
+| AR-89 关掉软件就得从头再下 | 新增 `main/downloadResume.js`：`.part` + `.part.json` + `Range` 续传；实测直连不支持 Range，自动挑支持 206 的镜像；10 秒测速守卫防止「续传反而更慢」 |
+
+- 新增 `main/networkPlan.js`：**先测网络再选源**（并行 HEAD 探测 GitHub 直连 / 各镜像 / npm 官方与镜像，4s 超时），按实测耗时排序；npm 走 `--registry` 国内镜像
+- 下载安全：首块 `PK` 魔数校验、`content-length` 不一致判为不完整、收尾用 zip EOCD 校验兜底
+
+### 🧪 测试与门禁
+
+- 单测新增：`dedupeBatch`(19) / `dedupeBatchGroupState`(5) / `dedupeBatchExecute`(4) / `trashManifest`(7) /
+  `spawnPlan`(10) / `networkPlan`(9) / `downloadProgress`(11) / `downloadResume`(12) / `dirStatePlan`(7)
+- 全量：`npm run check` = 4 守卫 + **1572 用例**（114 个测试文件）全绿
+- `scripts/check-undefined-scope.mjs` 覆盖 `main/`，并加门禁用例防回退
 
 ---
 

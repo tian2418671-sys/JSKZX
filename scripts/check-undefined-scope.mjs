@@ -235,7 +235,9 @@ const isMain = (() => {
 })();
 if (isMain || process.argv[1] && process.argv[1].includes('check-undefined-scope')) {
     const args = process.argv.slice(2).filter(a => !a.startsWith('-'));
-    const targets = args.length ? args : ['js', 'main.js', 'preload.js'].filter(p => existsSync(p));
+    // 🛡️ AR-83：默认也要扫 `main/`（主进程服务模块）—— 只扫 js/ + main.js 时，
+    //    `main/stManager.js` 里的未定义标识符（如 `summarize`）会整片漏掉，直到用户实测才炸。
+    const targets = args.length ? args : ['js', 'main', 'main.js', 'preload.js'].filter(p => existsSync(p));
     const { files, problems } = checkPaths(targets);
     for (const p of problems) {
         console.log(`${relative('.', p.file)}:${p.line}:${p.column}  ${p.name}${p.message ? '  (' + p.message + ')' : ''}`);

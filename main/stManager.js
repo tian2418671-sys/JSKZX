@@ -10,6 +10,29 @@
  */
 
 const { spawn } = require('child_process');
+const { planSpawn, pickNodeCli } = require('./spawnPlan.js'); // 🛡️ AR-84：Windows 的 .cmd/.bat 必须走 cmd.exe 包装
+const { pickDownloadOrder, pickNpmRegistry, describeDecision } = require('./networkPlan.js'); // 🌐 先测网络再选地址
+const { classifyDirState } = require('./dirStatePlan.js'); // 🗂️ 空目录 = 待安装，不是「必须修复」
+const {
+    DEFAULT_TICK_MS,
+    readTotalBytes,
+    buildDownloadReadout,
+    shouldEmit,
+    mapToOverall,
+} = require('./downloadProgress.js'); // 📥 下载百分比读数（流式统计）
+const {
+    buildRangeHeaders,
+    decideResume,
+    normalizeMeta,
+    makeMeta,
+    isPartComplete,
+    prioritizeResumeSource,
+    isRangeProbeOk,
+    pickResumeSource,
+    checkZipTail,
+    parseContentRange,
+    shouldAbandonResume,
+} = require('./downloadResume.js'); // ⏯️ 断点续传（Range + .part 片段）
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -43,6 +66,10 @@ const RUNTIME_DIRNAME = '_jsk-runtime';
 function createStManager({ sendProgress, getMainWindow }) {
     /** 正在跑的 npm / node 子进程：{ [taskId]: ChildProcess } */
     const running = new Map();
+    /** 已被用户「取消」的任务（用于把退出码翻译成「已取消」而不是「失败」） */
+    const cancelledTasks = new Set();
+    /** 每个任务的取消信号（覆盖 fetch 下载这类没有子进程的阶段） */
+    const taskAborts = new Map();
     /** 正在运行的酒馆服务：{ child, url, port, startedAt } */
     let serverProc = null;
 
@@ -363,6 +390,10 @@ function createStManager({ sendProgress, getMainWindow }) {
         };
     };
 
+    // ==================== 跨平台 spawn 计划（AR-84） ====================
+    // 实现收敛到 `main/spawnPlan.js`（纯函数，可单测）：Windows 的 `.cmd` / `.bat`
+    // 必须走 `cmd.exe /d /s /c`，否则 Node ≥18.20.2 抛 EINVAL（npm 在 Windows 上就是 npm.cmd）。
+
     // ==================== Node 检测 ====================
 
     /**
@@ -383,9 +414,11 @@ function createStManager({ sendProgress, getMainWindow }) {
         const finish = (r) => { if (!done) { done = true; resolve(r); } };
         let child;
         try {
-            child = spawn(cmd, args, {
+            const plan = planSpawn(cmd, args); // 🛡️ AR-84：Windows 的 .cmd/.bat 必须走 cmd.exe 包装
+            child = spawn(plan.cmd, plan.args, {
                 windowsHide: true,
                 shell: false,
+                windowsVerbatimArguments: plan.windowsVerbatimArguments,
                 cwd: opts.cwd || process.cwd(),
                 env: opts.env || process.env,
             });
@@ -433,6 +466,68 @@ function createStManager({ sendProgress, getMainWindow }) {
             message: judged.message,
             path: nodePath,
         };
+    };
+
+    /**
+     * 解析 npm 可执行文件位置，并把 Node 目录注入 PATH（AR-84 配套）
+     *
+     * 为什么需要：如果用「一键安装」里的 winget 才装上 Node，**当前进程的 PATH 还没刷新**，
+     * 直接找 `npm.cmd` 会「不是内部或外部命令」；而 `npm.cmd` 本身还要靠 PATH 找到 `node.exe`。
+     * 所以这里既解析绝对路径，又把它所在目录（以及 node 目录）前置进子进程 PATH。
+     *
+     * @param {{path?:string}} [nodeInfo] detectNode() 的返回值
+     * @returns {Promise<{npmCmd:string, env:object, resolved:boolean}>}
+     */
+    const resolveNpm = async (nodeInfo) => {
+        const isWin = process.platform === 'win32';
+        const nodeDir = nodeInfo && nodeInfo.path ? path.dirname(nodeInfo.path) : '';
+        const candidates = [];
+        if (isWin && nodeDir) candidates.push(path.join(nodeDir, 'npm.cmd'));
+        try {
+            const w = await runOnce('where', [isWin ? 'npm.cmd' : 'npm'], 10000);
+            if (w.ok) String(w.out).split(/\r?\n/).map((s) => s.trim()).filter(Boolean).forEach((p) => candidates.push(p));
+        } catch (e) { /* 忽略 */ }
+        if (isWin) {
+            const roots = [
+                'C:\\Program Files\\nodejs',
+                process.env['ProgramFiles(x86)'] ? path.join(process.env['ProgramFiles(x86)'], 'nodejs') : '',
+                process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'Programs', 'nodejs') : '',
+            ].filter(Boolean);
+            for (const r of roots) candidates.push(path.join(r, 'npm.cmd'));
+            if (process.env.APPDATA) candidates.push(path.join(process.env.APPDATA, 'npm', 'npm.cmd'));
+        }
+        const found = candidates.find((p) => {
+            try { return !!p && fs.existsSync(p); } catch (e) { return false; }
+        });
+        const npmCmd = found || (isWin ? 'npm.cmd' : 'npm');
+        const toolDir = found ? path.dirname(found) : nodeDir;
+        const env = { ...process.env };
+        const prepend = [];
+        if (toolDir) prepend.push(toolDir);
+        if (nodeDir && nodeDir !== toolDir) prepend.push(nodeDir);
+        if (prepend.length) env.PATH = `${prepend.join(path.delimiter)}${path.delimiter}${env.PATH || ''}`;
+
+        // 🛡️ AR-84 首选：node.exe + npm-cli.js（完全绕开 cmd，路径带空格也不会出错）
+        const nodeExe = (nodeInfo && nodeInfo.path) || (isWin ? 'node.exe' : 'node');
+        const nodeCli = pickNodeCli({ nodeExe, npmCmdPath: found, exists: (p) => { try { return fs.existsSync(p); } catch (e) { return false; } } });
+        if (nodeCli) {
+            return { cmd: nodeCli.cmd, argsPrefix: nodeCli.argsPrefix, npmCmd, env, resolved: true, mode: 'node-cli' };
+        }
+        // 兜底：PATH 里的裸名 npm.cmd（不能带路径，见 spawnPlan 注释）
+        return { cmd: isWin ? 'npm.cmd' : 'npm', argsPrefix: [], npmCmd, env, resolved: !!found, mode: 'cmd' };
+    };
+
+    /** 计数 node_modules 下的包数（心跳进度探针：让「静默的 npm」有可见增长） */
+    const countInstalled = (root) => {
+        try {
+            const nm = path.join(String(root || ''), 'node_modules');
+            if (!fs.existsSync(nm)) return '已装 0 个包';
+            const n = fs.readdirSync(nm, { withFileTypes: true })
+                .filter((e) => e.isDirectory() && !e.name.startsWith('.')).length;
+            return `已装 ${n} 个包`;
+        } catch (e) {
+            return '';
+        }
     };
 
     /** 探测 winget 是否可用 */
@@ -488,24 +583,28 @@ function createStManager({ sendProgress, getMainWindow }) {
      * @param {string} taskId
      * @param {string} cmd
      * @param {string[]} args
-     * @param {object} [opts] { cwd, env, timeoutMs }
-     * @returns {Promise<number>} 退出码；-1 启动失败/进程错误；-2 超时
+     * @param {object} [opts] { cwd, env, timeoutMs, heartbeatMs, heartbeatProbe }
+     * @returns {Promise<number>} 退出码；-1 启动失败/进程错误；-2 超时；-3 用户取消
      */
     const runStreamed = (taskId, cmd, args, opts = {}) => new Promise((resolve) => {
         let child;
         let done = false;
         let timer = null;
+        let heartbeat = null;
         const finish = (code) => {
             if (done) return;
             done = true;
             if (timer) { clearTimeout(timer); timer = null; }
+            if (heartbeat) { clearInterval(heartbeat); heartbeat = null; }
             resolve(code);
         };
         try {
-            child = spawn(cmd, args, {
+            const plan = planSpawn(cmd, args); // 🛡️ AR-84：Windows 的 .cmd/.bat 必须走 cmd.exe 包装
+            child = spawn(plan.cmd, plan.args, {
                 cwd: opts.cwd || process.cwd(),
                 windowsHide: true,
                 shell: false,
+                windowsVerbatimArguments: plan.windowsVerbatimArguments,
                 env: opts.env || process.env,
             });
         } catch (e) {
@@ -513,6 +612,24 @@ function createStManager({ sendProgress, getMainWindow }) {
             return finish(-1);
         }
         running.set(taskId, child);
+
+        // 💓 心跳：npm 在 `--loglevel=error --no-progress` 下**成功前一个字节都不输出**，
+        //    用户会以为卡死。这里每隔 heartbeatMs 推一条「仍在执行 + 已用秒数（+ 进度探针）」，
+        //    保证 UI 一直在动，也说明「不是没反应」。
+        const heartbeatMs = Number(opts.heartbeatMs) > 0 ? Number(opts.heartbeatMs) : 0;
+        if (heartbeatMs) {
+            const startedAt = Date.now();
+            heartbeat = setInterval(() => {
+                if (done) return;
+                const sec = Math.round((Date.now() - startedAt) / 1000);
+                let extra = '';
+                try {
+                    if (typeof opts.heartbeatProbe === 'function') extra = String(opts.heartbeatProbe() || '');
+                } catch (e) { /* 探针失败不影响心跳 */ }
+                emit({ type: 'stdout', text: `⏳ 仍在执行（已用 ${sec} 秒）${extra ? '｜' + extra : ''}`, ts: Date.now(), taskId });
+            }, heartbeatMs);
+            if (heartbeat.unref) heartbeat.unref();
+        }
 
         const timeoutMs = Number(opts.timeoutMs) > 0 ? Number(opts.timeoutMs) : 0;
         if (timeoutMs) {
@@ -554,23 +671,53 @@ function createStManager({ sendProgress, getMainWindow }) {
         });
         child.on('close', (code) => {
             running.delete(taskId);
+            // 🛑 用户主动取消 → 统一翻译成 -3（否则会被报成「依赖安装失败（退出码 1）」误导用户）
+            if (cancelledTasks.has(taskId)) {
+                cancelledTasks.delete(taskId);
+                return finish(-3);
+            }
             finish(typeof code === 'number' ? code : -1);
         });
     });
 
-    /** 取消任务 */
+    /**
+     * 取消任务
+     *
+     * 🛑 AR-85：UI 早期调用 `st.cancel()` **没传 taskId** ⇒ `running.get(undefined)` 恒为空
+     *    → 永远返回「没有正在运行的任务」，用户点了「取消任务」看起来毫无反应。
+     * 🛑 AR-86：取消必须覆盖**所有阶段** —— 下载/网络探测/解压期间没有 npm 子进程，
+     *    旧实现只杀子进程 ⇒ 取消无效，而 UI 的 `busy` 一直为 true ⇒ **所有按钮变灰、弹窗也关不掉**。
+     *    现在：先打取消标记 + abort 掉 fetch，再杀子进程（有的话）。
+     */
     const cancelTask = (taskId) => {
-        const child = running.get(taskId);
-        if (!child) return { success: false, error: '没有正在运行的任务' };
+        let targetId = taskId;
+        let child = targetId ? running.get(targetId) : null;
+        if (!child && (!targetId || !taskAborts.has(targetId)) && running.size === 1) {
+            targetId = [...running.keys()][0];
+            child = running.get(targetId);
+        }
+        // 没有子进程但任务在跑（下载/探测/解压）也要能取消：以 taskAborts 为「活跃任务」判据
+        const hasLiveTask = (targetId && (taskAborts.has(targetId) || running.has(targetId)));
+        if (!child && !hasLiveTask && running.size === 0 && taskAborts.size === 0) {
+            return { success: false, error: '当前没有正在运行的任务' };
+        }
+        if (!targetId && taskAborts.size === 1) targetId = [...taskAborts.keys()][0];
+
         try {
-            if (process.platform === 'win32') {
-                // Windows 下 npm 会派生子进程，需整棵树杀
-                spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true });
-            } else {
-                child.kill('SIGTERM');
+            if (targetId) cancelledTasks.add(targetId);
+            const ctrl = targetId ? taskAborts.get(targetId) : null;
+            if (ctrl) { try { ctrl.abort(); } catch (e) { /* 忽略 */ } }
+            if (child) {
+                if (process.platform === 'win32') {
+                    // Windows 下 npm 会派生子进程，需整棵树杀
+                    spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true });
+                } else {
+                    child.kill('SIGTERM');
+                }
+                running.delete(targetId);
             }
-            running.delete(taskId);
-            return { success: true };
+            emit({ type: 'stderr', text: '⏹ 已请求取消，正在终止当前步骤…', ts: Date.now(), taskId: targetId });
+            return { success: true, taskId: targetId };
         } catch (e) {
             return { success: false, error: e.message };
         }
@@ -638,47 +785,469 @@ function createStManager({ sendProgress, getMainWindow }) {
         return result;
     };
 
+    // ==================== 网络探测（先测网络再选地址） ====================
+
+    /** 探测单个地址是否可用 + 耗时（HEAD 请求，4 秒超时；可被外部 signal 取消） */
+    const probeUrl = async (url, timeoutMs = 4000, signal = null) => {
+        const startedAt = Date.now();
+        const ctrl = new AbortController();
+        const abortLocal = () => { try { ctrl.abort(); } catch (e) { /* 忽略 */ } };
+        const timer = setTimeout(abortLocal, timeoutMs);
+        if (signal) {
+            if (signal.aborted) abortLocal();
+            else { try { signal.addEventListener('abort', abortLocal, { once: true }); } catch (e) { /* 忽略 */ } }
+        }
+        try {
+            const resp = await fetch(url, {
+                method: 'HEAD',
+                redirect: 'follow',
+                signal: ctrl.signal,
+                headers: { 'User-Agent': 'Mozilla/5.0 (SillyTavern-Manager; compatible)' },
+            });
+            const ms = Date.now() - startedAt;
+            // 镜像常见 403/405（不支持 HEAD），只要连上了就算可达，实际下载还会再校验
+            return { ok: resp.ok || resp.status === 403 || resp.status === 405, ms, status: resp.status };
+        } catch (e) {
+            return { ok: false, ms: Date.now() - startedAt, status: 0, error: e && e.name === 'AbortError' ? 'timeout' : (e && e.message) };
+        } finally {
+            clearTimeout(timer);
+            if (signal) { try { signal.removeEventListener('abort', abortLocal); } catch (e) { /* 忽略 */ } }
+        }
+    };
+
+    /**
+     * 安装/升级前的网络体检：并行探测「GitHub 直连 + 各镜像 + 两个 npm registry」，
+     * 再按实测耗时决定用哪个下载源、哪个 npm 源（决策逻辑在 `main/networkPlan.js`，可单测）。
+     *
+     * @param {string} taskId
+     * @param {string} branch
+     * @param {{signal?:AbortSignal}} [opts]
+     * @returns {Promise<{ok:boolean, order:Array, registry:object, probes:Array, candidates:string[]}>}
+     */
+    const detectNetwork = async (taskId, branch, opts = {}) => {
+        const base = `https://codeload.github.com/${ST_REPO}/zip/refs/heads/${branch}`;
+        const downloadTargets = [
+            { key: 'github-direct', label: 'GitHub 直连', kind: 'download', priority: 10, url: base },
+            ...GH_MIRRORS.filter(Boolean).map((m, i) => ({
+                key: 'm-' + (m.replace(/^https?:\/\//, '').replace(/[^a-z0-9]/gi, '').slice(0, 14) || ('idx' + i)),
+                label: m.replace(/^https?:\/\//, '').replace(/\/$/, ''),
+                kind: 'download',
+                priority: 0,
+                url: m + base,
+            })),
+        ];
+        const registryTargets = [
+            { key: 'npm-official', label: 'npm 官方', kind: 'registry', priority: 10, url: 'https://registry.npmjs.org/-/ping', registryUrl: 'https://registry.npmjs.org' },
+            { key: 'npm-mirror', label: 'npm 国内镜像', kind: 'registry', priority: 0, url: 'https://registry.npmmirror.com/-/ping', registryUrl: 'https://registry.npmmirror.com' },
+        ];
+        const all = [...downloadTargets, ...registryTargets];
+        emit({ type: 'stage', stage: 'net', taskId, text: '🌐 正在检测网络（选择最快的下载源 / npm 源）…' });
+        const results = await Promise.all(all.map(async (t) => ({ ...t, ...(await probeUrl(t.url, 4000, opts.signal)) })));
+
+        const order = pickDownloadOrder(results);
+        const registry = pickNpmRegistry(results);
+        const text = describeDecision(results, { order, registry });
+        log(`🌐 网络检测：${text}`);
+
+        const candidates = order.map((p) => p.url);
+        if (!candidates.length) {
+            log('❌ 所有下载源都不可用（GitHub 直连与镜像均失败）');
+            return { ok: false, order, registry, probes: results, candidates: [] };
+        }
+        return { ok: true, order, registry, probes: results, candidates };
+    };
+
     // ==================== 下载与安装 ====================
 
-    /** 构造候选下载地址（直连 + 镜像） */
+    /** 构造候选下载地址（直连 + 镜像；固定顺序，仅在没做网络探测时兜底使用） */
     const buildZipCandidates = (branch) => {
         const base = `https://codeload.github.com/${ST_REPO}/zip/refs/heads/${branch}`;
         return GH_MIRRORS.map((m) => (m ? m + base : base));
     };
 
-    /** 下载并保存到文件，返回 { ok, bytes, from } */
-    const downloadZip = async (candidates, destFile) => {
-        for (let i = 0; i < candidates.length; i++) {
-            const url = candidates[i];
-            log(`尝试下载（源 ${i + 1}/${candidates.length}）：${url}`);
-            try {
-                const resp = await fetch(url, {
-                    headers: { 'User-Agent': 'Mozilla/5.0 (SillyTavern-Manager; compatible)' },
-                    redirect: 'follow',
-                });
-                if (!resp.ok) {
-                    log(`  下载失败 HTTP ${resp.status}`);
-                    continue;
-                }
-                const buf = Buffer.from(await resp.arrayBuffer());
-                if (!buf.length) { log('  内容为空，换下一个源'); continue; }
-                await fs.promises.writeFile(destFile, buf);
-                log(`  下载成功（${formatBytes(buf.length)}）`);
-                return { ok: true, bytes: buf.length, from: url };
-            } catch (e) {
-                log(`  下载异常：${e.message}`);
-            }
+    /**
+     * zip 魔数校验：镜像有时返回 200 的 HTML 错误页 / 截断文件 ⇒ 用 "PK" 挡掉，
+     * 避免把垃圾当安装包写进磁盘（流式下载时校验首块即可）。
+     */
+    const isZipMagic = (buf) => Boolean(buf && buf.length > 4 && buf[0] === 0x50 && buf[1] === 0x4b);
+
+    /** 读文件前 5 字节判断是不是 zip（用于「上次已下满但没改名」的快速复用） */
+    const fileLooksLikeZip = async (file) => {
+        let fh = null;
+        try {
+            fh = await fs.promises.open(file, 'r');
+            const buf = Buffer.alloc(5);
+            const { bytesRead } = await fh.read(buf, 0, 5, 0);
+            return isZipMagic(buf.subarray(0, bytesRead));
+        } catch (e) {
+            return false;
+        } finally {
+            if (fh) { try { await fh.close(); } catch (e) { /* 忽略 */ } }
         }
-        return { ok: false, bytes: 0, from: '' };
     };
 
-    /** 解压 zip（系统 bsdtar，Windows 10+ 自带） */
-    const extractZip = (zipFile, destDir) => new Promise((resolve) => {
+    /** 读文件尾部判断 zip 结构是否完整（跨源续传拼接不一致时能提前发现） */
+    const zipTailOk = async (file) => {
+        let fh = null;
+        try {
+            const size = (await fs.promises.stat(file)).size;
+            const len = Math.min(size, 128 * 1024);
+            fh = await fs.promises.open(file, 'r');
+            const buf = Buffer.alloc(len);
+            await fh.read(buf, 0, len, size - len);
+            return checkZipTail(buf, size).ok;
+        } catch (e) {
+            return false;
+        } finally {
+            if (fh) { try { await fh.close(); } catch (e) { /* 忽略 */ } }
+        }
+    };
+
+    /**
+     * 探测哪些候选源支持断点续传（`Range: bytes=0-0` → 期望 206）。
+     * 实测：GitHub 直连 codeload 恒返 200（不支持），部分镜像（gh-proxy.com）返 206。
+     */
+    const probeRangeSupport = async (urls, { signal } = {}) => Promise.all((urls || []).map(async (url) => {
+        const startedAt = Date.now();
+        const ac = new AbortController();
+        const timer = setTimeout(() => ac.abort(), 4000);
+        const onAbort = () => ac.abort();
+        if (signal) signal.addEventListener('abort', onAbort, { once: true });
+        try {
+            const r = await fetch(url, {
+                headers: { 'User-Agent': 'Mozilla/5.0 (SillyTavern-Manager; compatible)', Range: 'bytes=0-0' },
+                redirect: 'follow',
+                signal: ac.signal,
+            });
+            const contentRange = r.headers.get('content-range');
+            const ok = isRangeProbeOk({ status: r.status, contentRange });
+            const cr = parseContentRange(contentRange);
+            try { if (r.body) await r.body.cancel(); } catch (e) { /* 忽略 */ }
+            return { url, ok, total: cr ? cr.total : 0, ms: Date.now() - startedAt };
+        } catch (e) {
+            return { url, ok: false, total: 0, ms: Date.now() - startedAt };
+        } finally {
+            clearTimeout(timer);
+            if (signal) signal.removeEventListener('abort', onAbort);
+        }
+    }));
+
+    /**
+     * 下载并保存到文件，返回 { ok, bytes, from, cancelled?, error?, partial?, resumedFrom? }
+     *
+     * 📥 流式下载：边下边推送**数值百分比读数**（`37% · 13.6 MB / 36.7 MB · 1.1 MB/s`）。
+     *
+     * ⏯️ 断点续传：数据写 `<dest>.part`，旁边留 `<dest>.part.json`（源地址 / 总大小 / ETag）。
+     *    下次（哪怕软件被强制关闭后重开）再下载同一个目标时，用 `Range` 从已下载处继续，
+     *    不必从头再来；源不支持 Range（返回 200）或文件已变（`If-Range` 失效）则自动退回从头下载。
+     *
+     * @param {string[]} candidates
+     * @param {string} destFile
+     * @param {{taskId?:string, signal?:AbortSignal, tickMs?:number}} [opts] 传 signal 才能被「取消任务」真正中断
+     */
+    const downloadZip = async (candidates, destFile, opts = {}) => {
+        const taskId = opts.taskId || '';
+        const minTick = Number(opts.tickMs) > 0 ? Number(opts.tickMs) : DEFAULT_TICK_MS;
+        const partFile = `${destFile}.part`;
+        const metaFile = `${partFile}.json`;
+        const isCancelled = () => Boolean(taskId && cancelledTasks.has(taskId));
+        const fileSize = (p) => { try { return fs.statSync(p).size; } catch (e) { return 0; } };
+        const readMeta = () => {
+            try { return normalizeMeta(JSON.parse(fs.readFileSync(metaFile, 'utf-8'))); } catch (e) { return null; }
+        };
+        const writeMeta = (m) => {
+            try { fs.writeFileSync(metaFile, JSON.stringify(m), 'utf-8'); } catch (e) { /* 元数据写不了不影响下载本身 */ }
+        };
+        const dropMeta = async () => { try { await fs.promises.unlink(metaFile); } catch (e) { /* 忽略 */ } };
+        const cleanupPart = async () => {
+            try { await fs.promises.unlink(partFile); } catch (e) { /* 忽略 */ }
+            await dropMeta();
+        };
+        /** 中途中断/取消时**保留**已下载片段：下次能接着下（这正是断点续传的意义） */
+        const keepPart = (rateBps = 0) => {
+            const kept = fileSize(partFile);
+            if (kept <= 0) return;
+            const rate = Number(rateBps);
+            if (Number.isFinite(rate) && rate > 0) {
+                // 记下本次实测速度：下次用它判断「续传到慢镜像」还是「换回快源重下」
+                const m = readMeta();
+                if (m) writeMeta(makeMeta({ ...m, rateBps: rate }));
+            }
+            log(`  已保留已下载的 ${formatBytes(kept)}，下次点「一键安装」会从这里继续`);
+        };
+        const rateOf = (received, resumedFrom, startedAt) => {
+            const sec = (Date.now() - startedAt) / 1000;
+            return sec > 0.5 ? Math.round(Math.max(0, received - resumedFrom) / sec) : 0;
+        };
+
+        let meta = readMeta();
+        let resumeBytes = fileSize(partFile);
+
+        // ⏯️ 上次已经下满、只是没来得及改名（崩溃在 rename 之前）→ 直接复用，不联网
+        if (resumeBytes > 0 && meta && isPartComplete({ partBytes: resumeBytes, total: meta.total })) {
+            if (await fileLooksLikeZip(partFile)) {
+                try {
+                    await fs.promises.rename(partFile, destFile);
+                    await dropMeta();
+                    log(`  发现上次已下载完整的安装包（${formatBytes(resumeBytes)}），直接复用`);
+                    return { ok: true, bytes: resumeBytes, from: meta.url || '（本地已下载）', resumedFrom: resumeBytes };
+                } catch (e) {
+                    log(`  复用已下载文件失败：${e.message}`);
+                }
+            } else {
+                log('  残留的下载片段不是有效 zip，已丢弃');
+                await cleanupPart();
+                resumeBytes = 0;
+                meta = null;
+            }
+        }
+        if (resumeBytes > 0) {
+            log(`  发现未完成的下载片段（${formatBytes(resumeBytes)}${meta && meta.total ? ` / ${formatBytes(meta.total)}` : ''}），尝试续传`);
+        }
+
+        // 续传必须优先回到上次那个源
+        let ordered = prioritizeResumeSource(candidates, meta ? meta.url : '').list;
+        if (resumeBytes > 0 && !(meta && meta.total > 0)) {
+            // 没有可信的元数据（文件丢了 / 版本不符）→ 不敢拼，直接重下
+            log('  片段缺少可用的续传信息（不知道总大小），改为重新下载');
+            await cleanupPart();
+            resumeBytes = 0;
+            meta = null;
+        }
+        if (resumeBytes > 0) {
+            // 🔎 有残留片段时先问一句「谁能续传」：直连不支持 Range，镜像可能支持
+            const probes = await probeRangeSupport(ordered, { signal: opts.signal });
+            const pick = pickResumeSource(probes, { total: meta ? meta.total : 0, preferUrl: meta ? meta.url : '' });
+            if (pick) {
+                ordered = [pick, ...ordered.filter((u) => u !== pick)];
+                log(`  续传源：${pick}（该源支持 Range）`);
+            } else {
+                log('  ⚠️ 所有可用源都不支持断点续传（服务器未开启 Range），只能重新下载');
+                await cleanupPart();
+                resumeBytes = 0;
+                meta = null;
+            }
+        }
+        let keepOnExit = false;
+
+        try {
+            for (let i = 0; i < ordered.length; i++) {
+                if (isCancelled()) { keepPart(); return { ok: false, bytes: 0, from: '', cancelled: true }; }
+                const url = ordered[i];
+                log(`尝试下载（源 ${i + 1}/${ordered.length}）：${url}`);
+                const startedAt = Date.now();
+                let received = 0;
+                let resumedFrom = 0; // 本次的续传起点（catch 里也要用，故提到 try 之外）
+                let lastTick = 0;
+                let out = null;
+                try {
+                    // 只有回到「上次那个源」才带 If-Range（各镜像的 ETag 互不相同，不能交叉校验）
+                    const sameSource = Boolean(meta && meta.url && meta.url === url);
+                    const offset = resumeBytes > 0 ? resumeBytes : 0;
+                    const resp = await fetch(url, {
+                        headers: {
+                            'User-Agent': 'Mozilla/5.0 (SillyTavern-Manager; compatible)',
+                            ...buildRangeHeaders({
+                                offset,
+                                etag: sameSource ? meta.etag : '',
+                                lastModified: sameSource ? meta.lastModified : '',
+                            }),
+                        },
+                        redirect: 'follow',
+                        signal: opts.signal,
+                    });
+
+                    if (resp.status === 416) {
+                        // 服务端说范围越界：只有「元数据说已下满」才敢直接用（否则可能是换了版本）
+                        if (offset > 0 && meta && isPartComplete({ partBytes: offset, total: meta.total }) && await fileLooksLikeZip(partFile)) {
+                            await fs.promises.rename(partFile, destFile);
+                            await dropMeta();
+                            log(`  续传校验：本地片段已完整（${formatBytes(offset)}），直接使用`);
+                            return { ok: true, bytes: offset, from: url, resumedFrom: offset };
+                        }
+                        log('  续传位置无效（HTTP 416），改为从头下载');
+                        await cleanupPart();
+                        resumeBytes = 0;
+                        meta = null;
+                        continue;
+                    }
+                    if (!resp.ok) {
+                        log(`  下载失败 HTTP ${resp.status}`);
+                        continue;
+                    }
+
+                    const mode = decideResume({ offset, status: resp.status, contentRange: resp.headers.get('content-range') });
+                    const append = mode === 'append';
+                    if (offset > 0 && !append) {
+                        log(`  该源不支持续传（HTTP ${resp.status}），改为从头下载`);
+                        resumeBytes = 0; // 片段会被截断，后续源不要再试续传
+                    } else if (append) log(`  续传：从 ${formatBytes(offset)} 处继续`);
+
+                    const cr = parseContentRange(resp.headers.get('content-range'));
+                    const total = (cr && cr.total) || readTotalBytes(resp.headers);
+                    received = append ? offset : 0;
+                    writeMeta(makeMeta({
+                        url,
+                        total,
+                        etag: resp.headers.get('etag') || '',
+                        lastModified: resp.headers.get('last-modified') || '',
+                    }));
+
+                    resumedFrom = append ? offset : 0;
+                    const push = (readout, label) => {
+                        // 整体进度条按 10% → 45% 区间平滑推进；读数行给出真实下载百分比
+                        emit({
+                            type: 'progress',
+                            taskId,
+                            stage: 'download',
+                            percent: mapToOverall(readout.percent, 10, 45),
+                            downloadPercent: readout.percent,
+                            received,
+                            total,
+                            resumedFrom,
+                            text: `${label || (resumedFrom ? '续传中' : '下载中')} ${readout.text}`,
+                            detail: readout.detail,
+                        });
+                    };
+                    if (total > 0) log(`  文件大小 ${formatBytes(total)}`);
+
+                    if (!resp.body || typeof resp.body[Symbol.asyncIterator] !== 'function') {
+                        // 运行时没有流式 body（老 Node / 被 polyfill 掉）→ 退回一次性读，至少功能不丢
+                        const buf = Buffer.from(await resp.arrayBuffer());
+                        if (!isZipMagic(buf)) { log(`  内容不是有效 zip（前 4 字节 ${buf.subarray(0, 4).toString('hex') || '空'}），换下一个源`); continue; }
+                        received = buf.length;
+                        await fs.promises.writeFile(partFile, buf);
+                        await fs.promises.rename(partFile, destFile);
+                        await dropMeta();
+                        push(buildDownloadReadout({ received, total: total || received, elapsedMs: Date.now() - startedAt }), '下载完成');
+                        log(`  下载成功（${formatBytes(buf.length)}）`);
+                        return { ok: true, bytes: buf.length, from: url, resumedFrom };
+                    }
+
+                    out = fs.createWriteStream(partFile, { flags: append ? 'a' : 'w' });
+                    let writeErr = null;
+                    out.on('error', (e) => { writeErr = e; });
+                    let magicOk = append ? true : null; // 续传时首块不在文件开头，不验魔数
+                    let headBuf = null;
+                    // ⏱️ 续传先跑 10 秒测速：镜像若明显比上次慢，宁可重下（否则用户等更久）
+                    const SPEED_CHECK_MS = 10000;
+                    let speedChecked = !append;
+                    let abandonResume = false;
+                    for await (const chunk of resp.body) {
+                        if (writeErr) break;
+                        if (isCancelled()) break;
+                        let buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+                        if (!buf.length) continue;
+                        if (magicOk === null) {
+                            // 首块可能不足 5 字节（分块边界不可控）：攒够再判，避免误杀正常包
+                            buf = headBuf ? Buffer.concat([headBuf, buf]) : buf;
+                            headBuf = null;
+                            if (buf.length < 5) { headBuf = buf; continue; }
+                            magicOk = isZipMagic(buf);
+                            if (!magicOk) {
+                                log(`  内容不是有效 zip（前 4 字节 ${buf.subarray(0, 4).toString('hex') || '空'}），换下一个源`);
+                                break;
+                            }
+                        }
+                        received += buf.length;
+                        if (!out.write(buf)) {
+                            // 等背压释放；写流出错时也要放行（否则永远挂在这里）
+                            await new Promise((resolve) => {
+                                const done = () => { out.off('drain', done); out.off('error', done); resolve(); };
+                                out.once('drain', done);
+                                out.once('error', done);
+                            });
+                        }
+                        const now = Date.now();
+                        if (!speedChecked && now - startedAt >= SPEED_CHECK_MS) {
+                            speedChecked = true;
+                            const rate = (received - resumedFrom) / ((now - startedAt) / 1000);
+                            if (shouldAbandonResume({ resumeRateBps: rate, previousRateBps: meta && meta.rateBps })) {
+                                log(`  续传源明显更慢（${formatBytes(rate)}/s，上次 ${formatBytes(meta.rateBps)}/s），改回快速源重新下载`);
+                                abandonResume = true;
+                                break;
+                            }
+                        }
+                        if (shouldEmit(lastTick, now, minTick)) {
+                            lastTick = now;
+                            push(buildDownloadReadout({ received, total, elapsedMs: now - startedAt }));
+                        }
+                    }
+                    if (magicOk === false || writeErr || isCancelled() || abandonResume) {
+                        // 提前收手：把还没读完的响应体掐掉，别让后台继续白下载
+                        try { await resp.body.cancel(); } catch (e) { /* 忽略 */ }
+                    }
+                    await new Promise((resolve) => { out.end(() => resolve()); });
+                    out = null;
+                    if (writeErr) throw writeErr;
+
+                    if (abandonResume) {
+                        // 放弃续传：丢掉片段，回到候选列表里更快的源从头下
+                        await cleanupPart();
+                        resumeBytes = 0;
+                        meta = null;
+                        keepOnExit = false;
+                        continue;
+                    }
+                    if (isCancelled()) { keepPart(rateOf(received, resumedFrom, startedAt)); return { ok: false, bytes: 0, from: '', cancelled: true }; }
+                    if (magicOk === false) { await cleanupPart(); resumeBytes = 0; meta = null; continue; }
+                    if (!received) { log('  内容为空，换下一个源'); await cleanupPart(); resumeBytes = 0; meta = null; continue; }
+                    if (total > 0 && received < total) {
+                        // 连接被提前掐断（网络抖动 / 服务端断流）→ 保留片段，下次（或下一个源）续传
+                        keepOnExit = true;
+                        resumeBytes = received;
+                        keepPart(rateOf(received, resumedFrom, startedAt));
+                        log(`  下载中断（${formatBytes(received)} / ${formatBytes(total)}），已保留片段，可续传`);
+                        continue;
+                    }
+                    if (!(await zipTailOk(partFile))) {
+                        log('  下载内容结构不完整（zip 中央目录缺失，可能续传拼接不一致），换下一个源');
+                        await cleanupPart();
+                        resumeBytes = 0;
+                        meta = null;
+                        continue;
+                    }
+                    await fs.promises.rename(partFile, destFile);
+                    await dropMeta();
+                    push(buildDownloadReadout({ received, total: total || received, elapsedMs: Date.now() - startedAt }), '下载完成');
+                    log(`  下载成功（${formatBytes(received)}${total > 0 ? ' · 100%' : ''}）`);
+                    return { ok: true, bytes: received, from: url, resumedFrom };
+                } catch (e) {
+                    if (out) { try { out.destroy(); } catch (err) { /* 忽略 */ } }
+                    if (isCancelled()) { keepPart(rateOf(received, resumedFrom, startedAt)); return { ok: false, bytes: 0, from: '', cancelled: true }; }
+                    log(`  下载异常：${e.message}`);
+                    // 网络异常也保留片段（下次续传）；只有「内容不是 zip」才清掉
+                    const kept = fileSize(partFile);
+                    if (kept > 0) {
+                        keepOnExit = true;
+                        resumeBytes = kept;
+                        const m = readMeta();
+                        const rate = rateOf(received, resumedFrom, startedAt);
+                        if (m && rate > 0) writeMeta(makeMeta({ ...m, rateBps: rate }));
+                    }
+                }
+            }
+            if (keepOnExit) keepPart();
+            return { ok: false, bytes: resumeBytes, from: '', partial: keepOnExit };
+        } catch (e) {
+            if (keepOnExit) keepPart();
+            throw e;
+        }
+    };
+
+    /** 解压 zip（系统 bsdtar，Windows 10+ 自带）—— 传 taskId 时注册子进程，取消任务能杀掉它 */
+    const extractZip = (zipFile, destDir, opts = {}) => new Promise((resolve) => {
+        const taskId = opts.taskId || '';
         const tar = spawn('tar', ['-xf', zipFile, '-C', destDir], { windowsHide: true });
+        if (taskId) running.set(taskId, tar);
         let err = '';
         tar.stderr.on('data', (d) => { err += String(d); });
-        tar.on('error', (e) => resolve({ ok: false, error: e.message }));
-        tar.on('close', (code) => resolve(code === 0 ? { ok: true } : { ok: false, error: err.trim() || `tar 退出码 ${code}` }));
+        tar.on('error', (e) => { if (taskId) running.delete(taskId); resolve({ ok: false, error: e.message }); });
+        tar.on('close', (code) => {
+            if (taskId) running.delete(taskId);
+            if (taskId && cancelledTasks.has(taskId)) return resolve({ ok: false, cancelled: true, error: '已取消' });
+            resolve(code === 0 ? { ok: true } : { ok: false, error: err.trim() || `tar 退出码 ${code}` });
+        });
     });
 
     /**
@@ -690,8 +1259,19 @@ function createStManager({ sendProgress, getMainWindow }) {
         const task = taskId || `install-${Date.now()}`;
         if (!dir) return { success: false, error: '请选择安装目录' };
 
+        // 🛑 AR-86：登记取消控制（覆盖「下载/解压」这些没有子进程的阶段）
+        const ctrl = new AbortController();
+        taskAborts.set(task, ctrl);
+        const cancelledResult = () => ({
+            success: false,
+            cancelled: true,
+            error: '已取消（安装未完成，可重新点「一键安装」或「重装依赖」）',
+        });
+        /** 阶段之间的取消检查点（下载/解压/依赖之间各插一次） */
+        const bailIfCancelled = () => (cancelledTasks.has(task) ? cancelledResult() : null);
+
         try {
-            emit({ type: 'stage', stage: 'prepare', taskId, text: '准备安装…' });
+            emit({ type: 'stage', stage: 'prepare', taskId: task, text: '准备安装…' });
 
             // 1) Node 检查（未装先装）
             let node = await detectNode();
@@ -720,31 +1300,50 @@ function createStManager({ sendProgress, getMainWindow }) {
             log(`使用 Node.js ${node.version}（${node.path || 'PATH 中'}）`);
 
             // 2) 目录准备
+            const bail2 = bailIfCancelled(); if (bail2) return bail2;
             await fs.promises.mkdir(dir, { recursive: true });
             const runtimeDir = path.join(dir, RUNTIME_DIRNAME);
             await fs.promises.mkdir(runtimeDir, { recursive: true });
             const logsDir = path.join(runtimeDir, 'logs');
             await fs.promises.mkdir(logsDir, { recursive: true });
 
-            // 3) 下载
-            emit({ type: 'stage', stage: 'download', taskId, text: '正在下载酒馆…' });
-            const zipFile = path.join(runtimeDir, 'st-download.zip');
+            // 3) 下载（🌐 先测网络：按实测耗时选最快的源，而不是盲试固定顺序）
             const useBranch = branch === 'dev' ? ST_BRANCH_DEV : ST_BRANCH_STABLE;
-            const dl = await downloadZip(buildZipCandidates(useBranch), zipFile);
-            if (!dl.ok) {
-                return { success: false, error: '下载失败：所有源都不可用，请检查网络后重试' };
+            const net = await detectNetwork(task, useBranch, { signal: ctrl.signal });
+            const bail3 = bailIfCancelled(); if (bail3) return bail3;
+            if (!net.ok) {
+                return {
+                    success: false,
+                    error: '❌ 网络不可用：GitHub 直连与所有加速镜像都连不上。请检查网络/代理后重试。',
+                    network: net,
+                };
             }
-            emit({ type: 'progress', taskId, stage: 'download', percent: 40 });
+            emit({ type: 'stage', stage: 'download', taskId: task, text: '正在下载酒馆…' });
+            const zipFile = path.join(runtimeDir, 'st-download.zip');
+            const dl = await downloadZip(net.candidates, zipFile, { taskId: task, signal: ctrl.signal });
+            const bail4 = bailIfCancelled(); if (bail4) return bail4;
+            if (!dl.ok) {
+                if (dl.partial) {
+                    return {
+                        success: false,
+                        error: `下载中断（已保存 ${formatBytes(dl.bytes)}），网络恢复后再点「一键安装」会从断点继续`,
+                        partial: true,
+                        network: net,
+                    };
+                }
+                return { success: false, error: '下载失败：所有源都不可用，请检查网络后重试', network: net };
+            }
 
             // 4) 解压到临时目录
-            emit({ type: 'stage', stage: 'extract', taskId, text: '正在解压…' });
+            emit({ type: 'stage', stage: 'extract', taskId: task, text: '正在解压…' });
             const tmpDir = path.join(runtimeDir, `extract-${Date.now()}`);
             await fs.promises.mkdir(tmpDir, { recursive: true });
-            const ex = await extractZip(zipFile, tmpDir);
+            const ex = await extractZip(zipFile, tmpDir, { taskId: task });
+            const bail5 = bailIfCancelled(); if (bail5) return bail5;
             if (!ex.ok) {
                 return { success: false, error: `解压失败：${ex.error}` };
             }
-            emit({ type: 'progress', taskId, stage: 'extract', percent: 55 });
+            emit({ type: 'progress', taskId: task, stage: 'extract', percent: 55 });
 
             // 5) 定位真正的酒馆根并移动到目标位置
             const srcRoot = findStRoot(tmpDir);
@@ -768,28 +1367,36 @@ function createStManager({ sendProgress, getMainWindow }) {
             }
             try { await fs.promises.rm(tmpDir, { recursive: true, force: true }); } catch (e) { /* 忽略 */ }
             try { await fs.promises.unlink(zipFile); } catch (e) { /* 忽略 */ }
-            emit({ type: 'progress', taskId, stage: 'extract', percent: 60 });
+            emit({ type: 'progress', taskId: task, stage: 'extract', percent: 60 });
 
             // 6) 安装依赖
             if (!skipDeps) {
-                emit({ type: 'stage', stage: 'deps', taskId, text: '正在安装依赖（可能需要几分钟）…' });
-                const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+                emit({ type: 'stage', stage: 'deps', taskId: task, text: '正在安装依赖（可能需要几分钟，下方每 5 秒有一次心跳）…' });
+                const npm = await resolveNpm(node); // 🛡️ AR-84：解析 npm 绝对路径 + 注入 PATH
+                if (!npm.resolved) log('⚠️ 未找到 npm 的绝对路径，回退按 PATH 查找');
+                log(`📦 依赖安装命令：${npm.mode === 'node-cli' ? 'node + npm-cli.js' : npm.cmd}｜源：${net.registry.key === 'npm-mirror' ? '国内镜像' : '官方'}`);
+                const registryArgs = net.registry.key === 'npm-mirror' ? [`--registry=${net.registry.url}`] : [];
                 const code = await runStreamed(
                     task,
-                    npmCmd,
-                    ['install', '--no-save', '--no-audit', '--no-fund', '--loglevel=error', '--no-progress', '--omit=dev'],
-                    { cwd: targetRoot },
+                    npm.cmd,
+                    [...npm.argsPrefix, 'install', '--no-save', '--no-audit', '--no-fund', '--loglevel=error', '--no-progress', '--omit=dev', ...registryArgs],
+                    { cwd: targetRoot, env: npm.env, heartbeatMs: 5000, heartbeatProbe: () => countInstalled(targetRoot) },
                 );
+                if (code === -3) {
+                    return { success: false, cancelled: true, error: '已取消（依赖可能不完整，可稍后点「重装依赖」补齐）', stRoot: targetRoot, logsDir };
+                }
                 if (code !== 0) {
                     return {
                         success: false,
-                        error: `依赖安装失败（退出码 ${code}）。常见原因：网络问题、杀毒软件拦截、缺少 Visual C++ 运行库。`,
+                        error: code === -1
+                            ? '依赖安装无法启动：找不到可用的 npm（请确认 Node.js 已装好并重启软件后再试）。'
+                            : `依赖安装失败（退出码 ${code}）。常见原因：网络问题、杀毒软件拦截、缺少 Visual C++ 运行库。`,
                         stRoot: targetRoot,
                         logsDir,
                     };
                 }
             }
-            emit({ type: 'progress', taskId, stage: 'deps', percent: 95 });
+            emit({ type: 'progress', taskId: task, stage: 'deps', percent: 95 });
 
             // 7) 写安装清单
             const manifest = {
@@ -807,35 +1414,51 @@ function createStManager({ sendProgress, getMainWindow }) {
                 'utf-8',
             );
 
-            emit({ type: 'progress', taskId, stage: 'done', percent: 100 });
+            emit({ type: 'progress', taskId: task, stage: 'done', percent: 100 });
             const info = await inspect(dir);
             return { success: true, stRoot: targetRoot, version: manifest.version, info };
         } catch (err) {
             return { success: false, error: err && err.message ? err.message : String(err) };
+        } finally {
+            // 🧹 任务收尾：清掉取消信号与 AbortController，避免残留状态影响下一次安装
+            taskAborts.delete(task);
+            cancelledTasks.delete(task);
         }
     };
 
     /** 仅重装依赖 */
     const installDeps = async ({ dirPath, taskId } = {}) => {
+        const task = taskId || `deps-${Date.now()}`;
+        const ctrl = new AbortController(); // 🛑 AR-86：让「网络探测」阶段也能被取消
+        taskAborts.set(task, ctrl);
         try {
             const stRoot = findStRoot(String(dirPath || '').trim());
             if (!stRoot) return { success: false, error: '未找到酒馆目录' };
             const node = await detectNode();
             if (node.level !== 'ok') return { success: false, error: node.message };
-            const task = taskId || `deps-${Date.now()}`;
-            emit({ type: 'stage', stage: 'deps', taskId: task, text: '正在安装依赖…' });
-            const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+            emit({ type: 'stage', stage: 'deps', taskId: task, text: '正在安装依赖（可能需要几分钟，下方每 5 秒有一次心跳）…' });
+            // 🌐 重装依赖同样先测网络（决定用官方 registry 还是国内镜像）
+            const net = await detectNetwork(task, ST_BRANCH_STABLE, { signal: ctrl.signal });
+            if (cancelledTasks.has(task)) return { success: false, cancelled: true, error: '已取消' };
+            const npm = await resolveNpm(node); // 🛡️ AR-84：解析 npm 绝对路径 + 注入 PATH
+            if (!npm.resolved) log('⚠️ 未找到 npm 的绝对路径，回退按 PATH 查找');
+            log(`📦 依赖安装命令：${npm.mode === 'node-cli' ? 'node + npm-cli.js' : npm.cmd}｜源：${net.registry.key === 'npm-mirror' ? '国内镜像' : '官方'}`);
+            const registryArgs = net.registry.key === 'npm-mirror' ? [`--registry=${net.registry.url}`] : [];
             const code = await runStreamed(
                 task,
-                npmCmd,
-                ['install', '--no-save', '--no-audit', '--no-fund', '--loglevel=error', '--no-progress', '--omit=dev'],
-                { cwd: stRoot },
+                npm.cmd,
+                [...npm.argsPrefix, 'install', '--no-save', '--no-audit', '--no-fund', '--loglevel=error', '--no-progress', '--omit=dev', ...registryArgs],
+                { cwd: stRoot, env: npm.env, heartbeatMs: 5000, heartbeatProbe: () => countInstalled(stRoot) },
             );
-            if (code !== 0) return { success: false, error: `依赖安装失败（退出码 ${code}）` };
+            if (code === -3) return { success: false, cancelled: true, error: '已取消（依赖可能不完整，可重新点「重装依赖」）' };
+            if (code !== 0) return { success: false, error: code === -1 ? '依赖安装无法启动：找不到可用的 npm（请确认 Node.js 已装好并重启软件后再试）。' : `依赖安装失败（退出码 ${code}）` };
             const info = await inspect(dirPath);
             return { success: true, info };
         } catch (err) {
             return { success: false, error: err && err.message ? err.message : String(err) };
+        } finally {
+            taskAborts.delete(task);
+            cancelledTasks.delete(task);
         }
     };
 
@@ -1234,35 +1857,64 @@ function createStManager({ sendProgress, getMainWindow }) {
         const checks = [];
         const add = (id, label, status, detail, hint = '') => checks.push({ id, label, status, detail, hint });
 
-        // ---------- 1. 定位酒馆根 ----------
+        // ---------- 0. 网络（放最前面：安装/升级能否成功首先取决于它，空目录也要给结论） ----------
+        try {
+            const net = await detectNetwork('diag-network', ST_BRANCH_STABLE);
+            const best = net.order && net.order.length ? net.order[0] : null;
+            const regLabel = net.registry && net.registry.key === 'npm-mirror' ? '国内镜像' : '官方源';
+            if (!net.ok) {
+                add('network', '网络', 'error', 'GitHub 直连与所有加速镜像都连不上',
+                    '请检查网络/代理后重试；「一键安装」需要能访问 GitHub 或其加速镜像');
+            } else if (best && best.key === 'github-direct') {
+                add('network', '网络', 'ok', `GitHub 直连可用（${best.ms}ms）｜npm 将用${regLabel}`);
+            } else {
+                add('network', '网络', 'warn',
+                    `GitHub 直连不可用，将改用镜像 ${best ? best.label : '?'}（${best ? best.ms : '?'}ms）｜npm 将用${regLabel}`,
+                    '走镜像可以正常安装，只是速度取决于镜像');
+            }
+        } catch (e) {
+            add('network', '网络', 'warn', `网络探测失败：${(e && e.message) || e}`, '可忽略；安装时会再次自动探测');
+        }
+
+        // ---------- 1. 定位酒馆根（🗂️ 空目录 = 待安装，不是「必须修复」） ----------
         let stRoot = '';
         try { stRoot = findStRoot(dir); } catch (e) { /* 忽略 */ }
-        if (!stRoot) {
-            add('structure', '酒馆目录', 'error', '该目录不是有效的酒馆工程', '请选择酒馆根目录（应含 server.js 与 public/），或先点「一键安装」');
-            return { success: true, stRoot: '', checks, summary: summarize(checks), elapsedMs: Date.now() - startedAt };
-        }
+        const dirExists = fs.existsSync(dir);
+        const topEntries = dirExists ? safeReaddir(dir) : [];
+        const topLower = topEntries.map((x) => String(x).toLowerCase());
+        const dirState = classifyDirState({
+            exists: dirExists,
+            entries: topEntries,
+            stRoot,
+            hasServerJs: topLower.includes('server.js'),
+            hasPublic: topLower.includes('public'),
+        });
+        /** 还没装酒馆（空目录 / 目录不存在）→ 体检结论应说「可以安装」，而不是「一切正常」 */
+        const installReady = dirState.kind === 'empty' || dirState.kind === 'missing';
+        if (!stRoot) add('structure', '酒馆目录', dirState.status, dirState.detail, dirState.hint);
 
-        // ---------- 2. 程序文件 ----------
-        const stEntries = safeReaddir(stRoot);
-        const lower = stEntries.map((x) => String(x).toLowerCase());
-        const required = ['server.js', 'public', 'package.json'];
-        const missing = required.filter((n) => !lower.includes(n));
-        if (missing.length) {
-            add('structure', '程序文件', 'error', `缺少 ${missing.join('、')}`, '安装不完整，建议「一键安装」重装或重新拉取代码');
-        } else {
-            add('structure', '程序文件', 'ok', 'server.js / public / package.json 齐全');
-        }
+        // ---------- 2~3. 程序文件 / 版本（需要先定位到酒馆根） ----------
+        if (stRoot) {
+            const stEntries = safeReaddir(stRoot);
+            const lower = stEntries.map((x) => String(x).toLowerCase());
+            const required = ['server.js', 'public', 'package.json'];
+            const missing = required.filter((n) => !lower.includes(n));
+            if (missing.length) {
+                add('structure', '程序文件', 'error', `缺少 ${missing.join('、')}`, '安装不完整，建议「一键安装」重装或重新拉取代码');
+            } else {
+                add('structure', '程序文件', 'ok', 'server.js / public / package.json 齐全');
+            }
 
-        // ---------- 3. 版本 ----------
-        const pkg = readPkg(stRoot);
-        const version = pkg ? String(pkg.version || '') : '';
-        if (pkg && version) {
-            const engines = pkg.engines && pkg.engines.node ? String(pkg.engines.node) : '';
-            add('version', '酒馆版本', 'ok', `v${version}${engines ? `（要求 Node ${engines}）` : ''}`);
-        } else if (pkg) {
-            add('version', '酒馆版本', 'warn', 'package.json 里没有 version 字段', '可能不是官方发布版，升级时可能受影响');
-        } else {
-            add('version', '酒馆版本', 'warn', '读不到 package.json（或无 version）', '建议检查文件是否损坏');
+            const pkg = readPkg(stRoot);
+            const version = pkg ? String(pkg.version || '') : '';
+            if (pkg && version) {
+                const engines = pkg.engines && pkg.engines.node ? String(pkg.engines.node) : '';
+                add('version', '酒馆版本', 'ok', `v${version}${engines ? `（要求 Node ${engines}）` : ''}`);
+            } else if (pkg) {
+                add('version', '酒馆版本', 'warn', 'package.json 里没有 version 字段', '可能不是官方发布版，升级时可能受影响');
+            } else {
+                add('version', '酒馆版本', 'warn', '读不到 package.json（或无 version）', '建议检查文件是否损坏');
+            }
         }
 
         // ---------- 4. Node.js ----------
@@ -1276,41 +1928,41 @@ function createStManager({ sendProgress, getMainWindow }) {
             add('node', 'Node.js', 'error', '未检测到 Node.js', '酒馆是 Node 工程，必须先装 Node 20+；可点页面上的「一键安装 Node」');
         }
 
-        // ---------- 5. 依赖 ----------
-        const nmDir = path.join(stRoot, 'node_modules');
-        if (!fs.existsSync(nmDir)) {
-            add('deps', '依赖包', 'error', '未安装依赖（node_modules 不存在）', '点「🔄 重装依赖」即可');
-        } else {
-            // 抽查酒馆运行必需的核心包
-            const corePkgs = ['express', 'yaml'];
-            const missCore = corePkgs.filter((p) => !fs.existsSync(path.join(nmDir, p)));
-            const nmCount = safeReaddir(nmDir).length;
-            if (missCore.length) {
-                add('deps', '依赖包', 'error', `node_modules 存在但缺少核心包：${missCore.join('、')}`, '点「🔄 重装依赖」修复');
-            } else if (nmCount < 50) {
-                add('deps', '依赖包', 'warn', `node_modules 只有 ${nmCount} 个条目，可能装得不完整`, '建议点「🔄 重装依赖」');
+        // ---------- 5~7. 依赖 / 配置 / 数据（需要酒馆根） ----------
+        if (stRoot) {
+            const nmDir = path.join(stRoot, 'node_modules');
+            if (!fs.existsSync(nmDir)) {
+                add('deps', '依赖包', 'error', '未安装依赖（node_modules 不存在）', '点「🔄 重装依赖」即可');
             } else {
-                add('deps', '依赖包', 'ok', `已安装（node_modules 共 ${nmCount} 个条目）`);
+                // 抽查酒馆运行必需的核心包
+                const corePkgs = ['express', 'yaml'];
+                const missCore = corePkgs.filter((p) => !fs.existsSync(path.join(nmDir, p)));
+                const nmCount = safeReaddir(nmDir).length;
+                if (missCore.length) {
+                    add('deps', '依赖包', 'error', `node_modules 存在但缺少核心包：${missCore.join('、')}`, '点「🔄 重装依赖」修复');
+                } else if (nmCount < 50) {
+                    add('deps', '依赖包', 'warn', `node_modules 只有 ${nmCount} 个条目，可能装得不完整`, '建议点「🔄 重装依赖」');
+                } else {
+                    add('deps', '依赖包', 'ok', `已安装（node_modules 共 ${nmCount} 个条目）`);
+                }
             }
-        }
 
-        // ---------- 6. 配置文件 ----------
-        const cfgPath = path.join(stRoot, 'config.yaml');
-        if (fs.existsSync(cfgPath)) {
-            let size = 0;
-            try { size = fs.statSync(cfgPath).size; } catch (e) { /* 忽略 */ }
-            add('config', '配置文件', 'ok', `config.yaml 存在（${formatBytes(size)}）`);
-        } else {
-            add('config', '配置文件', 'warn', '没有 config.yaml', '首次启动时酒馆会按默认模板自动生成，通常不影响使用');
-        }
+            const cfgPath = path.join(stRoot, 'config.yaml');
+            if (fs.existsSync(cfgPath)) {
+                let size = 0;
+                try { size = fs.statSync(cfgPath).size; } catch (e) { /* 忽略 */ }
+                add('config', '配置文件', 'ok', `config.yaml 存在（${formatBytes(size)}）`);
+            } else {
+                add('config', '配置文件', 'warn', '没有 config.yaml', '首次启动时酒馆会按默认模板自动生成，通常不影响使用');
+            }
 
-        // ---------- 7. 数据目录 ----------
-        const dataDir = path.join(stRoot, 'data');
-        if (!fs.existsSync(dataDir)) {
-            add('data', '数据目录', 'warn', '没有 data 目录', '全新安装时属正常，首次启动会自动创建');
-        } else {
-            const counts = countStData(dataDir);
-            add('data', '数据目录', 'ok', `${counts.cards} 张角色卡 · ${counts.worldbooks} 本世界书 · ${counts.chats} 个会话`);
+            const dataDir = path.join(stRoot, 'data');
+            if (!fs.existsSync(dataDir)) {
+                add('data', '数据目录', 'warn', '没有 data 目录', '全新安装时属正常，首次启动会自动创建');
+            } else {
+                const counts = countStData(dataDir);
+                add('data', '数据目录', 'ok', `${counts.cards} 张角色卡 · ${counts.worldbooks} 本世界书 · ${counts.chats} 个会话`);
+            }
         }
 
         // ---------- 8. 端口 ----------
@@ -1326,7 +1978,7 @@ function createStManager({ sendProgress, getMainWindow }) {
         }
 
         // ---------- 9. 磁盘空间 ----------
-        const free = getFreeBytes(stRoot);
+        const free = getFreeBytes(stRoot || dir);
         if (free > 0) {
             const GB = 1024 ** 3;
             if (free < 2 * GB) {
@@ -1340,30 +1992,32 @@ function createStManager({ sendProgress, getMainWindow }) {
             add('disk', '磁盘空间', 'warn', '无法读取剩余空间', '可忽略，或用系统「此电脑」自行查看');
         }
 
-        // ---------- 10. git 状态 ----------
-        const gitDir = path.join(stRoot, '.git');
-        if (!fs.existsSync(gitDir)) {
-            add('git', '升级方式', 'warn', '不是 git 仓库（无 .git）', '升级时将改用「下载覆盖」方式，仍可正常升级');
-        } else {
-            const gitVer = await runOnce('git', ['--version']);
-            if (!gitVer.ok) {
-                add('git', '升级方式', 'warn', '是 git 仓库，但系统未安装 Git', '安装 Git 后可增量升级；否则用覆盖方式');
+        // ---------- 10. git 状态（需要酒馆根） ----------
+        if (stRoot) {
+            const gitDir = path.join(stRoot, '.git');
+            if (!fs.existsSync(gitDir)) {
+                add('git', '升级方式', 'warn', '不是 git 仓库（无 .git）', '升级时将改用「下载覆盖」方式，仍可正常升级');
             } else {
-                const st = await runOnce('git', ['-c', 'core.quotepath=false', 'status', '--porcelain'], { cwd: stRoot });
-                const dirtyLines = st.ok ? String(st.out || '').split(/\r?\n/).filter((l) => l.trim()) : [];
-                // 未跟踪文件（xx.bak、pnpm-lock.yaml 等）不会阻碍升级，单独计数
-                const trackedCount = dirtyLines.filter((l) => !/^\?\?/.test(l)).length;
-                const untrackedCount = dirtyLines.length - trackedCount;
-                if (trackedCount > 0) {
-                    // 这些改动（多半来自扩展自动注入，如 cocktail-plus 改 public/index.html）
-                    // 升级时会**自动备份 + 自动收起 + 升级后自动恢复**，用户无需懂 git
-                    add(
-                        'git', 'git 状态', 'ok',
-                        `有 ${trackedCount} 处本地改动${untrackedCount ? `、${untrackedCount} 个未跟踪文件` : ''}`,
-                        '升级时会自动备份并尽量保留，无需手动处理',
-                    );
+                const gitVer = await runOnce('git', ['--version']);
+                if (!gitVer.ok) {
+                    add('git', '升级方式', 'warn', '是 git 仓库，但系统未安装 Git', '安装 Git 后可增量升级；否则用覆盖方式');
                 } else {
-                    add('git', 'git 状态', 'ok', `工作区干净，可安全升级${untrackedCount ? `（另有 ${untrackedCount} 个未跟踪文件，不影响升级）` : ''}`);
+                    const st = await runOnce('git', ['-c', 'core.quotepath=false', 'status', '--porcelain'], { cwd: stRoot });
+                    const dirtyLines = st.ok ? String(st.out || '').split(/\r?\n/).filter((l) => l.trim()) : [];
+                    // 未跟踪文件（xx.bak、pnpm-lock.yaml 等）不会阻碍升级，单独计数
+                    const trackedCount = dirtyLines.filter((l) => !/^\?\?/.test(l)).length;
+                    const untrackedCount = dirtyLines.length - trackedCount;
+                    if (trackedCount > 0) {
+                        // 这些改动（多半来自扩展自动注入，如 cocktail-plus 改 public/index.html）
+                        // 升级时会**自动备份 + 自动收起 + 升级后自动恢复**，用户无需懂 git
+                        add(
+                            'git', 'git 状态', 'ok',
+                            `有 ${trackedCount} 处本地改动${untrackedCount ? `、${untrackedCount} 个未跟踪文件` : ''}`,
+                            '升级时会自动备份并尽量保留，无需手动处理',
+                        );
+                    } else {
+                        add('git', 'git 状态', 'ok', `工作区干净，可安全升级${untrackedCount ? `（另有 ${untrackedCount} 个未跟踪文件，不影响升级）` : ''}`);
+                    }
                 }
             }
         }
@@ -1371,7 +2025,14 @@ function createStManager({ sendProgress, getMainWindow }) {
         // ---------- 11. 运行状态 ----------
         try {
             const s = await getServerStatus();
-            add('running', '运行状态', 'ok', s.running ? `运行中：${s.url}` : '当前未运行');
+            if (s.running && s.tracked) {
+                add('running', '运行状态', 'ok', `本软件启动的酒馆正在运行：${s.url}`);
+            } else if (s.running) {
+                // 端口有人监听 ≠ 本软件启动的酒馆：不要重复报警（「端口」一项已说明），也别让用户以为「已经在跑了」
+                add('running', '运行状态', 'ok', '本软件当前没有启动酒馆（端口上另有程序在监听，见上一条「端口」）');
+            } else {
+                add('running', '运行状态', 'ok', '当前未运行');
+            }
         } catch (e) {
             add('running', '运行状态', 'warn', '无法获取运行状态', '可点「重新检测」重试');
         }
@@ -1379,6 +2040,8 @@ function createStManager({ sendProgress, getMainWindow }) {
         return {
             success: true,
             stRoot,
+            dirState: dirState.kind,
+            installReady,
             checks,
             summary: summarizeChecks(checks),
             elapsedMs: Date.now() - startedAt,
@@ -1460,6 +2123,8 @@ function createStManager({ sendProgress, getMainWindow }) {
      */
     const update = async ({ dirPath, taskId } = {}) => {
         const task = taskId || `update-${Date.now()}`;
+        const ctrl = new AbortController(); // 🛑 AR-86：升级也能在下载阶段被取消
+        taskAborts.set(task, ctrl);
         try {
             const stRoot = findStRoot(String(dirPath || '').trim());
             if (!stRoot) return { success: false, error: '未找到酒馆目录' };
@@ -1599,8 +2264,17 @@ function createStManager({ sendProgress, getMainWindow }) {
             const runtimeDir = path.join(path.dirname(stRoot), RUNTIME_DIRNAME);
             await fs.promises.mkdir(runtimeDir, { recursive: true });
             const zipFile = path.join(runtimeDir, 'st-update.zip');
-            const dl = await downloadZip(buildZipCandidates(ST_BRANCH_STABLE), zipFile);
-            if (!dl.ok) return { success: false, error: '下载失败，所有源都不可用' };
+            // 🌐 升级同样先测网络，选最快的源
+            const net = await detectNetwork(task, ST_BRANCH_STABLE, { signal: ctrl.signal });
+            if (!net.ok) return { success: false, error: '❌ 网络不可用：GitHub 直连与所有加速镜像都连不上，请检查网络后重试' };
+            const dl = await downloadZip(net.candidates, zipFile, { taskId: task, signal: ctrl.signal });
+            if (!dl.ok) {
+                if (dl.cancelled || cancelledTasks.has(task)) return { success: false, cancelled: true, error: '已取消升级' };
+                if (dl.partial) {
+                    return { success: false, error: `下载中断（已保存 ${formatBytes(dl.bytes)}），网络恢复后再点「升级」会从断点继续`, partial: true };
+                }
+                return { success: false, error: '下载失败，所有源都不可用' };
+            }
 
             const tmpDir = path.join(runtimeDir, `extract-${Date.now()}`);
             await fs.promises.mkdir(tmpDir, { recursive: true });
@@ -1647,6 +2321,9 @@ function createStManager({ sendProgress, getMainWindow }) {
             return { success: true, mode: 'zip', info, backup: backup.path };
         } catch (err) {
             return { success: false, error: err && err.message ? err.message : String(err) };
+        } finally {
+            taskAborts.delete(task);
+            cancelledTasks.delete(task);
         }
     };
 
@@ -1941,7 +2618,7 @@ function createStManager({ sendProgress, getMainWindow }) {
         inventory,
         listUninstallEntries,
         uninstall,
-        _internal: { buildZipCandidates, formatBytes },
+        _internal: { buildZipCandidates, formatBytes, downloadZip },
     };
 }
 

@@ -10,11 +10,11 @@
 
 **🖥️ 推荐 · 安装版**（双击安装，自动生成桌面/开始菜单快捷方式，免管理员权限，支持 OTA 自动更新）：
 
-[⬇️ 下载安装包 `sillytavern-card-manager-2.5.0.exe`](https://github.com/tian2418671-sys/JSKZX/releases/latest)
+[⬇️ 下载安装包 `sillytavern-card-manager-2.5.5.exe`](https://github.com/tian2418671-sys/JSKZX/releases/latest)
 
 **📦 绿色免安装版**（解压即用，无需安装）：
 
-[⬇️ 下载绿色版 `sillytavern-card-manager-2.5.0.zip`](https://github.com/tian2418671-sys/JSKZX/releases/latest)
+[⬇️ 下载绿色版 `sillytavern-card-manager-2.5.5.zip`](https://github.com/tian2418671-sys/JSKZX/releases/latest)
 
 > 💡 两个版本功能完全相同，任选其一即可。支持 Windows 10/11（64 位）。
 > 安装版内置 OTA 自动更新（检测 → 下载 → 静默安装 → 自动重启）；绿色版需手动下载新版覆盖。
@@ -108,6 +108,13 @@
 
 ### 📌 近期版本要点
 
+- **v2.5.5** —— ♻️ **查重引擎支持批量清理**（四个查重窗口通用）：保留策略 5 选 1（最旧/最新/最大/最全/推荐）、
+  处理范围 3 档（仅完全重复 / 含相似 / 全部）、组选择（全选·全不选·反选 + 只选 L0/相似/仅同名）、
+  先「预演」再执行、失败项逐条归因可重试、整批「撤销本次」还原回原位置；
+  🗂️ **自动分组修复**（分组后文件真的移入子文件夹、新分组立即出现在侧边栏、手动分组不再被抢）；
+  🛠️ **酒馆安装器硬化**：环境体检按目录状态给结论（空目录=可以安装）＋问题详情弹窗、
+  先测网络再选最快源、下载显示百分比/已下量/速度、**断点续传**（关掉软件也从断点继续）、
+  取消立即生效不再锁死窗口、依赖安装心跳提示。
 - **v2.5.0** —— 🛠️ **新增「酒馆安装与维护」**（工具菜单进入）：
   一键安装桌面版酒馆（自动补齐 Node、自选安装位置、装完可直接启动）、
   🔍 自动查找本机已装酒馆（多盘分层扫描，只认 `server.js`+`public` 等硬指纹）、
@@ -222,7 +229,7 @@ npm run build
 产物输出到 `dist_new/`：
 
 - `dist_new/win-unpacked/` —— 免安装绿色版（可压缩为 zip 分发）
-- `dist_new/sillytavern-card-manager-2.5.0.exe` —— NSIS 安装包
+- `dist_new/sillytavern-card-manager-2.5.5.exe` —— NSIS 安装包
 - `dist_new/latest.yml` —— **OTA 更新必需**（与 exe 一起上传 GitHub Release）
 
 ---

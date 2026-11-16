@@ -1,6 +1,6 @@
 {
   "name": "sillytavern-card-manager",
-  "version": "2.5.0",
+  "version": "2.5.5",
   "description": "SillyTavern 资源管理器 - 角色卡 / 世界书 / 预设 / 插件 本地桌面管理（Vue 3 + Tailwind CSS + Electron）",
   "main": "main.js",
   "author": {

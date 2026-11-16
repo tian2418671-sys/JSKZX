@@ -96,9 +96,14 @@ test('语法错误 → 作为问题上报（不静默通过）', () => {
 // ══════════════════════════════════════════════════════════════
 // ★ 真实门禁
 // ══════════════════════════════════════════════════════════════
-test('★ 门禁：js/** + main.js + preload.js 必须 0 未定义标识符', () => {
-    const { files, problems } = checkPaths(['js', 'main.js', 'preload.js']);
-    assert.ok(files.length > 50, `至少要扫到 50 个文件（实测 ${files.length}）`);
+test('★ 门禁：js/** + main/** + main.js + preload.js 必须 0 未定义标识符', () => {
+    // 🛡️ AR-83：`main/`（主进程服务模块）也必须扫 —— 曾经只扫 js/ + main.js，
+    //    结果 `main/stManager.js` 的 `summarize is not defined` 一路漏到用户实测才炸。
+    const { files, problems } = checkPaths(['js', 'main', 'main.js', 'preload.js']);
+    assert.ok(files.length > 60, `至少要扫到 60 个文件（实测 ${files.length}）`);
+    const covered = files.map((f) => f.replace(/\\/g, '/'));
+    assert.ok(covered.some((f) => f === 'main/stManager.js'), 'main/stManager.js 必须被扫到');
+    assert.ok(covered.some((f) => f === 'main/spawnPlan.js'), 'main/spawnPlan.js 必须被扫到');
     const msg = problems.slice(0, 10).map(p => `${p.file}:${p.line} ${p.name}`).join('\n');
     assert.equal(problems.length, 0,
         `发现 ${problems.length} 处未定义标识符（这类错运行期才会炸、单测抓不到）：\n${msg}`);

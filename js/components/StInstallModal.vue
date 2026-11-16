@@ -24,7 +24,7 @@
                         🛠️ 酒馆安装与维护
                         <span class="text-[10px] font-normal text-zinc-400">一键安装 · 升级 · 卸载</span>
                     </h3>
-                    <button @click="close" :disabled="busy" class="text-zinc-400 hover:text-white text-sm disabled:opacity-40">✕ 关闭</button>
+                    <button @click="close" :disabled="busy && !cancelling" class="text-zinc-400 hover:text-white text-sm disabled:opacity-40">✕ 关闭</button>
                 </div>
 
                 <div class="flex-1 min-h-0 overflow-y-auto p-5 space-y-4 custom-scrollbar">
@@ -54,21 +54,28 @@
                             <div class="flex items-center justify-between gap-2">
                                 <div class="text-[10px] font-bold"
                                      :class="diagSummary.error > 0 ? 'text-rose-300' : (diagSummary.warn > 0 ? 'text-amber-300' : 'text-emerald-300')">
-                                    🩺 环境体检：{{ diagSummary.verdict }}
+                                    🩺 环境体检：{{ diagVerdictText }}
                                     <span class="font-normal text-zinc-400">
                                         （{{ diagSummary.ok }} 项正常<template v-if="diagSummary.warn"> · {{ diagSummary.warn }} 项留意</template><template v-if="diagSummary.error"> · {{ diagSummary.error }} 项需修复</template>）
                                     </span>
                                 </div>
-                                <button @click="diagChecks = []" class="text-[10px] text-zinc-500 hover:text-zinc-300">收起</button>
+                                <div class="flex items-center gap-2 shrink-0">
+                                    <button v-if="diagIssues.length" @click="openDiagDetail(diagIssues)"
+                                            class="text-[10px] px-1.5 py-0.5 rounded border border-amber-600/70 text-amber-300 hover:bg-amber-600 hover:text-white transition">详情</button>
+                                    <button @click="diagChecks = []" class="text-[10px] text-zinc-500 hover:text-zinc-300">收起</button>
+                                </div>
                             </div>
                             <div v-for="c in diagChecks" :key="c.id"
-                                 class="flex items-start gap-1.5 text-[10px] leading-relaxed">
+                                 class="flex items-start gap-1.5 text-[10px] leading-relaxed"
+                                 :class="c.status !== 'ok' ? 'cursor-pointer hover:bg-zinc-800/50 rounded px-0.5' : ''"
+                                 @click="c.status !== 'ok' ? openDiagDetail([c]) : null">
                                 <span class="shrink-0">{{ c.status === 'ok' ? '✅' : (c.status === 'warn' ? '⚠️' : '❌') }}</span>
                                 <span class="shrink-0 font-bold"
                                       :class="c.status === 'ok' ? 'text-zinc-300' : (c.status === 'warn' ? 'text-amber-300' : 'text-rose-300')">{{ c.label }}</span>
                                 <span class="text-zinc-400 break-all">
                                     {{ c.detail }}
                                     <span v-if="c.hint" class="text-zinc-500">｜{{ c.hint }}</span>
+                                    <span v-if="c.status !== 'ok'" class="text-cyan-400">｜查看详情…</span>
                                 </span>
                             </div>
                         </div>
@@ -168,9 +175,17 @@
                         <div class="flex items-center justify-between">
                             <div class="text-[11px] font-bold text-zinc-300">③ 进度</div>
                             <button v-if="busy" @click="doCancel"
-                                    class="px-2 py-0.5 rounded border border-zinc-600 text-zinc-300 text-[10px] hover:bg-zinc-700 transition">取消任务</button>
+                                    :disabled="cancelling"
+                                    class="px-2 py-0.5 rounded border border-zinc-600 text-zinc-300 text-[10px] hover:bg-zinc-700 transition disabled:opacity-50">
+                                {{ cancelling ? '正在取消…' : '取消任务' }}
+                            </button>
                         </div>
                         <div v-if="stageText" class="text-[11px] text-cyan-300">{{ stageText }}</div>
+                        <div v-if="downloadPercent >= 0 || progressDetail" class="flex items-baseline gap-2">
+                            <span v-if="downloadPercent >= 0"
+                                  class="text-base font-black text-cyan-300 font-mono tabular-nums leading-none">{{ downloadPercent }}%</span>
+                            <span class="text-[10px] text-zinc-400 font-mono truncate">{{ progressDetail }}</span>
+                        </div>
                         <div v-if="percent > 0" class="h-1.5 bg-zinc-800 rounded overflow-hidden">
                             <div class="h-full bg-cyan-500 transition-all duration-300" :style="{ width: percent + '%' }"></div>
                         </div>
@@ -178,6 +193,45 @@
                             <div v-for="(l, i) in logs" :key="i" :class="l.type === 'stderr' ? 'text-amber-400' : (l.type === 'server' ? 'text-zinc-500' : '')">{{ l.text }}</div>
                         </div>
                     </section>
+                </div>
+
+                <!-- 🩺 体检问题详情弹窗（点某项 / 点「详情」打开） -->
+                <div v-if="diagDetailOpen" class="absolute inset-0 z-[135] bg-black/80 flex items-center justify-center p-4">
+                    <div class="bg-zinc-900 rounded-xl shadow-2xl w-full max-w-lg border border-amber-800/70 flex flex-col overflow-hidden">
+                        <div class="px-4 py-2.5 bg-amber-950/60 border-b border-amber-900/60 flex items-center justify-between">
+                            <div class="text-amber-200 text-sm font-bold">
+                                🩺 问题详情<template v-if="diagDetailList.length > 1">（共 {{ diagDetailList.length }} 项）</template>
+                            </div>
+                            <button @click="diagDetailOpen = false" class="text-zinc-400 hover:text-zinc-200 text-xs">✕</button>
+                        </div>
+                        <div class="p-4 space-y-3 overflow-y-auto max-h-[60vh] custom-scrollbar">
+                            <div v-for="(c, i) in diagDetailList" :key="i"
+                                 class="rounded border border-zinc-700 bg-zinc-950/70 p-2.5 space-y-1.5 text-[11px] leading-relaxed">
+                                <div class="flex items-center gap-2">
+                                    <span>{{ c.status === 'warn' ? '⚠️' : '❌' }}</span>
+                                    <span class="font-bold" :class="c.status === 'warn' ? 'text-amber-300' : 'text-rose-300'">{{ c.label }}</span>
+                                    <span class="text-[10px]" :class="c.status === 'warn' ? 'text-amber-400/80' : 'text-rose-400/80'">
+                                        {{ c.status === 'warn' ? '建议留意' : '必须修复' }}
+                                    </span>
+                                </div>
+                                <div class="text-zinc-300"><span class="text-zinc-500">现象：</span>{{ c.detail }}</div>
+                                <div v-if="c.hint" class="text-cyan-300"><span class="text-zinc-500">怎么修：</span>{{ c.hint }}</div>
+                            </div>
+                            <div class="text-[10px] text-zinc-500">
+                                这些结论都来自本机实际检查；按上面的建议处理完，点「重新体检」复查即可。
+                            </div>
+                        </div>
+                        <div class="px-4 py-2.5 border-t border-zinc-800 flex items-center justify-end gap-2 flex-wrap">
+                            <button v-if="dirPath" @click="diagOpenFolder" :disabled="busy"
+                                    class="px-2.5 py-1 rounded border border-zinc-600 text-zinc-300 text-[11px] hover:bg-zinc-700 disabled:opacity-50 transition">打开目录</button>
+                            <button v-if="dirPath && !isInstalled" @click="diagGoInstall" :disabled="busy"
+                                    class="px-2.5 py-1 rounded border border-cyan-600 text-cyan-300 text-[11px] hover:bg-cyan-600 hover:text-white disabled:opacity-50 transition">一键安装</button>
+                            <button @click="diagRecheck" :disabled="diagnosing"
+                                    class="px-2.5 py-1 rounded border border-emerald-600 text-emerald-300 text-[11px] hover:bg-emerald-600 hover:text-white disabled:opacity-50 transition">{{ diagnosing ? '体检中…' : '重新体检' }}</button>
+                            <button @click="diagDetailOpen = false"
+                                    class="px-2.5 py-1 rounded border border-zinc-600 bg-zinc-800 text-zinc-200 text-[11px] hover:bg-zinc-700 transition">关闭</button>
+                        </div>
+                    </div>
                 </div>
 
                 <!-- 卸载二级弹窗 -->
@@ -279,6 +333,10 @@ export default {
         const busy = ref(false);
         const stageText = ref('');
         const percent = ref(0);
+        /** 📥 下载百分比读数（-1 = 总量未知，界面只显示已下载量） */
+        const downloadPercent = ref(-1);
+        /** 📥 读数附注：`13.6 MB / 36.7 MB · 1.1 MB/s` */
+        const progressDetail = ref('');
         const logs = ref([]);
         const logBox = ref(null);
         const serverRunning = ref(false);
@@ -306,6 +364,11 @@ export default {
         const diagnosing = ref(false);
         const diagChecks = ref([]);
         const diagSummary = ref({ ok: 0, warn: 0, error: 0, total: 0, verdict: '' });
+        /** 目录还没装酒馆（空目录 / 不存在）→ 体检结论说「可以安装」 */
+        const diagInstallReady = ref(false);
+        /** 问题详情弹窗（点某一项，或点「查看详情」看全部非正常项） */
+        const diagDetailOpen = ref(false);
+        const diagDetailList = ref([]);
 
         // 版本检查（本地 package.json vs 远程最新）
         const versionChecking = ref(false);
@@ -315,6 +378,17 @@ export default {
 
         let unsub = null;
         let pollTimer = null;
+        /** 🛑 AR-85：当前正在跑的任务 id —— 取消时必须传它（早期没传 ⇒ 主进程永远「没有正在运行的任务」） */
+        const activeTaskId = ref('');
+        /** 🛑 AR-86：已请求取消（此时允许关闭弹窗，避免「按钮全灰 + 关不掉」） */
+        const cancelling = ref(false);
+
+        const newTaskId = (prefix) => {
+            const id = `${prefix}-${Date.now()}`;
+            activeTaskId.value = id;
+            cancelling.value = false;
+            return id;
+        };
 
         const isInstalled = computed(() => {
             const s = status.value && status.value.state;
@@ -495,6 +569,32 @@ export default {
             await recheck();
         };
 
+        /** 非正常项（warn / error）：体检结论要能一眼看到「到底哪项不对」 */
+        const diagIssues = computed(() => diagChecks.value.filter((c) => c && c.status && c.status !== 'ok'));
+
+        const diagVerdictText = computed(() => {
+            const s = diagSummary.value;
+            if (diagInstallReady.value && !s.error) return '可以安装（目录里还没有酒馆，属正常）';
+            return s.verdict || '';
+        });
+
+        const openDiagDetail = (items) => {
+            diagDetailList.value = Array.isArray(items) ? items.filter(Boolean) : [];
+            diagDetailOpen.value = diagDetailList.value.length > 0;
+        };
+        const diagRecheck = () => {
+            diagDetailOpen.value = false;
+            if (runDiagnose) runDiagnose();
+        };
+        const diagOpenFolder = () => {
+            diagDetailOpen.value = false;
+            if (openFolder) openFolder();
+        };
+        const diagGoInstall = () => {
+            diagDetailOpen.value = false;
+            if (doInstall) doInstall();
+        };
+
         /**
          * 环境体检：一次性查出「装完跑不起来」的常见成因，
          * 并把每项的详情与修复建议直接列在弹窗里。
@@ -503,6 +603,7 @@ export default {
             if (!dirPath.value || diagnosing.value) return;
             diagnosing.value = true;
             diagChecks.value = [];
+            diagInstallReady.value = false;
             try {
                 const r = await window.electronAPI.st.diagnose({ dirPath: dirPath.value });
                 if (!r || !r.success) {
@@ -512,11 +613,17 @@ export default {
                 }
                 diagChecks.value = Array.isArray(r.checks) ? r.checks : [];
                 diagSummary.value = r.summary || { ok: 0, warn: 0, error: 0, total: 0, verdict: '' };
-                pushLog('info', `🩺 体检完成：${diagSummary.value.verdict}（用时 ${((r.elapsedMs || 0) / 1000).toFixed(1)}s）`);
+                // 🗂️ 空目录/目录不存在 = 「可以安装」，不该显示成「发现问题」或「一切正常」
+                diagInstallReady.value = Boolean(r.installReady);
+                pushLog('info', `🩺 体检完成：${diagVerdictText.value}（用时 ${((r.elapsedMs || 0) / 1000).toFixed(1)}s）`);
                 if (diagSummary.value.error > 0) {
                     toast(`体检发现 ${diagSummary.value.error} 个必须修复的问题`, 'error');
+                    // 直接摊开问题详情：一行小字说不清「到底是什么问题」，用户会莫名其妙
+                    openDiagDetail(diagIssues.value);
                 } else if (diagSummary.value.warn > 0) {
                     toast(`体检通过，有 ${diagSummary.value.warn} 项建议留意`, 'info');
+                } else if (diagInstallReady.value) {
+                    toast('🩺 体检通过：目录是空的，可以直接点「一键安装」', 'success');
                 } else {
                     toast('🩺 体检通过：一切正常', 'success');
                 }
@@ -538,8 +645,17 @@ export default {
             if (unsub) return;
             unsub = window.electronAPI.st.onProgress((p) => {
                 if (!p) return;
-                if (p.type === 'stage') { stageText.value = p.text || ''; }
-                else if (p.type === 'progress') { if (typeof p.percent === 'number') percent.value = p.percent; }
+                if (p.type === 'stage') {
+                    stageText.value = p.text || '';
+                    // 进入新阶段（解压/依赖…）就收起下载读数，避免 100% 停在界面上误导
+                    if (p.stage && p.stage !== 'download') { downloadPercent.value = -1; progressDetail.value = ''; }
+                }
+                else if (p.type === 'progress') {
+                    if (typeof p.percent === 'number') percent.value = p.percent;
+                    // 📥 下载读数：数值百分比 + 已下/总量 + 速度（进度条看不出「还剩多久」）
+                    if (typeof p.downloadPercent === 'number') downloadPercent.value = p.downloadPercent;
+                    if (typeof p.detail === 'string') progressDetail.value = p.detail;
+                }
                 else if (p.type === 'log' || p.type === 'stdout' || p.type === 'stderr' || p.type === 'server') {
                     pushLog(p.type, p.text || '');
                 } else if (p.type === 'server-exit') {
@@ -550,17 +666,24 @@ export default {
             });
         };
 
-        const resetProgress = () => { stageText.value = ''; percent.value = 0; };
+        const resetProgress = () => { stageText.value = ''; percent.value = 0; downloadPercent.value = -1; progressDetail.value = ''; };
 
         // ==================== 操作 ====================
         const doInstall = async () => {
             if (!dirPath.value) return;
             busy.value = true; logs.value = []; resetProgress();
             try {
-                const r = await window.electronAPI.st.install({ dirPath: dirPath.value, taskId: 'install-' + Date.now() });
+                const r = await window.electronAPI.st.install({ dirPath: dirPath.value, taskId: newTaskId('install') });
                 if (r.success) {
                     toast('酒馆安装完成', 'success');
                     pushLog('stdout', `✅ 安装完成，版本 v${r.version || '?'}`);
+                } else if (r.cancelled) {
+                    toast('已取消安装', 'warning');
+                    pushLog('stderr', '⏹ 安装已取消：' + (r.error || ''));
+                } else if (r.partial) {
+                    // ⏯️ 断点续传：网络断了不该说成「安装失败」，告诉用户下次会接着下
+                    toast('下载中断：' + r.error, 'warning');
+                    pushLog('stderr', '⏸ ' + r.error);
                 } else {
                     toast('安装失败：' + r.error, 'error');
                     pushLog('stderr', '❌ ' + r.error);
@@ -569,17 +692,18 @@ export default {
                     }
                 }
                 await recheck();
-            } finally { busy.value = false; }
+            } finally { busy.value = false; activeTaskId.value = ''; cancelling.value = false; }
         };
 
         const doInstallDeps = async () => {
             busy.value = true; logs.value = []; resetProgress();
             try {
-                const r = await window.electronAPI.st.installDeps({ dirPath: dirPath.value, taskId: 'deps-' + Date.now() });
+                const r = await window.electronAPI.st.installDeps({ dirPath: dirPath.value, taskId: newTaskId('deps') });
                 if (r.success) { toast('依赖安装完成', 'success'); }
+                else if (r.cancelled) { toast('已取消依赖安装', 'warning'); pushLog('stderr', '⏹ ' + (r.error || '已取消')); }
                 else { toast('依赖安装失败：' + r.error, 'error'); pushLog('stderr', '❌ ' + r.error); }
                 await recheck();
-            } finally { busy.value = false; }
+            } finally { busy.value = false; activeTaskId.value = ''; cancelling.value = false; }
         };
 
         const doUpdate = async () => {
@@ -598,12 +722,15 @@ export default {
             if (!ok) return;
             busy.value = true; logs.value = []; resetProgress();
             try {
-                const r = await window.electronAPI.st.update({ dirPath: dirPath.value, taskId: 'update-' + Date.now() });
+                const r = await window.electronAPI.st.update({ dirPath: dirPath.value, taskId: newTaskId('update') });
                 if (r.success) {
                     toast(r.restoreNote ? ('升级完成：' + r.restoreNote) : '升级完成', 'success');
                     if (r.backup) pushLog('stdout', '已备份到：' + r.backup);
                     if (r.restoreNote) pushLog('stdout', r.restoreNote);
                     if (r.backupDir) pushLog('stdout', '本地改动备份目录：' + r.backupDir);
+                } else if (r.partial) {
+                    toast('下载中断：' + r.error, 'warning');
+                    pushLog('stderr', '⏸ ' + r.error);
                 } else {
                     toast('升级失败：' + r.error, 'error');
                     pushLog('stderr', '❌ ' + r.error);
@@ -611,7 +738,7 @@ export default {
                 await recheck();
                 // 升级完必须重新比对版本，否则按钮还是「升级」，用户会以为没升成功
                 await checkVersion();
-            } finally { busy.value = false; }
+            } finally { busy.value = false; cancelling.value = false; }
         };
 
         const doStart = async () => {
@@ -628,7 +755,7 @@ export default {
                     pushLog('stderr', '❌ ' + r.error);
                 }
                 await recheck();
-            } finally { busy.value = false; }
+            } finally { busy.value = false; cancelling.value = false; }
         };
 
         /**
@@ -653,7 +780,7 @@ export default {
                     pushLog('stderr', '❌ ' + r.error);
                 }
                 await recheck();
-            } finally { busy.value = false; }
+            } finally { busy.value = false; cancelling.value = false; }
         };
 
         const doStop = async () => {
@@ -670,7 +797,7 @@ export default {
                     pushLog('stderr', '❌ ' + (r.error || '停止失败'));
                 }
                 await recheck();
-            } finally { busy.value = false; }
+            } finally { busy.value = false; cancelling.value = false; }
         };
 
         const openUrl = async () => {
@@ -685,11 +812,22 @@ export default {
                     toast(r.skipped ? '没有 data/ 目录，无需备份' : ('备份完成：' + r.path), 'success');
                     if (r.path) pushLog('stdout', '💾 ' + r.path);
                 } else { toast('备份失败：' + r.error, 'error'); }
-            } finally { busy.value = false; }
+            } finally { busy.value = false; cancelling.value = false; }
         };
 
         const doCancel = async () => {
-            await window.electronAPI.st.cancel();
+            // 🛑 AR-85：必须带 taskId（否则主进程找不到任务，表现为「点了没反应」）
+            cancelling.value = true;
+            stageText.value = '正在取消…';
+            const r = await window.electronAPI.st.cancel(activeTaskId.value || undefined);
+            if (r && r.success) {
+                pushLog('stderr', '⏹ 已请求取消，正在终止当前步骤…');
+            } else {
+                cancelling.value = false;
+                const msg = (r && r.error) || '取消失败';
+                pushLog('stderr', '⚠️ ' + msg);
+                toast(msg, 'warning');
+            }
         };
 
         // ==================== 卸载 ====================
@@ -733,11 +871,26 @@ export default {
                     toast('卸载失败：' + r.error, 'error');
                     pushLog('stderr', '❌ ' + r.error);
                 }
-            } finally { busy.value = false; }
+            } finally { busy.value = false; cancelling.value = false; }
         };
 
         // ==================== 生命周期 ====================
-        const close = () => { if (!busy.value) emit('st-close'); };
+        /**
+         * 关闭弹窗
+         * 🛑 AR-86：**已请求取消后必须能关** —— 旧实现在 `busy` 期间一律拒绝关闭，
+         *    一旦主进程没能及时收尾，用户就被「按钮全灰 + 关不掉」锁死在弹窗里。
+         */
+        const close = () => {
+            if (!busy.value) { emit('st-close'); return; }
+            if (cancelling.value) {
+                // 逃生口：已请求取消仍卡住 → 允许关窗（后台任务会在完成/失败后自行收尾）
+                busy.value = false;
+                emit('st-close');
+                return;
+            }
+            // 安装进行中：明确告诉用户怎么退出，而不是静默无反应
+            toast('正在安装/升级中，请先点「取消任务」再关闭', 'warning');
+        };
 
         watch(() => props.show, async (v) => {
             if (!v) {
@@ -778,7 +931,7 @@ export default {
         });
 
         return {
-            dirPath, status, checking, busy, stageText, percent, logs, logBox,
+            dirPath, status, checking, busy, stageText, percent, downloadPercent, progressDetail, logs, logBox,
             serverRunning, serverUrl, pathWarn,
             isInstalled, uninstallOpen, uninstallMode, doBackupOnUninstall,
             ackIrreversible, confirmText, inv, invLoading, canUninstall,
@@ -786,7 +939,8 @@ export default {
             // 自动查找本地已装酒馆
             scanning, scanDone, scanResults, scanTruncated, scanLocal, useScanResult,
             // 环境体检
-            diagnosing, diagChecks, diagSummary, runDiagnose,
+            diagnosing, diagChecks, diagSummary, diagInstallReady, diagVerdictText, diagIssues,
+            diagDetailOpen, diagDetailList, openDiagDetail, diagRecheck, diagOpenFolder, diagGoInstall, runDiagnose,
             // 版本检查
             versionChecking, versionInfo, hasUpdate, checkVersion,
             fmtBytes,
